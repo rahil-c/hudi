@@ -29,6 +29,8 @@ import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+
+import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.apache.spark.api.java.JavaRDD;
@@ -134,8 +136,8 @@ public class HoodieCompactor {
     String schemaStr = UtilHelpers.parseSchema(fs, cfg.schemaFile);
     SparkRDDWriteClient<HoodieRecordPayload> client =
         UtilHelpers.createHoodieClient(jsc, cfg.basePath, schemaStr, cfg.parallelism, Option.empty(), props);
-    JavaRDD<WriteStatus> writeResponse = client.compact(cfg.compactionInstantTime);
-    return UtilHelpers.handleErrors(jsc, cfg.compactionInstantTime, writeResponse);
+    HoodieWriteMetadata<JavaRDD<WriteStatus>> compactionMetadata = client.compact(cfg.compactionInstantTime);
+    return UtilHelpers.handleErrors(compactionMetadata.getCommitMetadata().get(), cfg.compactionInstantTime);
   }
 
   private int doSchedule(JavaSparkContext jsc) throws Exception {

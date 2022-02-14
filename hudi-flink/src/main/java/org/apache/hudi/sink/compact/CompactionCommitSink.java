@@ -106,19 +106,19 @@ public class CompactionCommitSink extends CleanFunction<CompactionCommitEvent> {
         .flatMap(Collection::stream)
         .collect(Collectors.toList());
 
+    HoodieCommitMetadata metadata = new HoodieCommitMetadata(true);
     if (this.writeClient.getConfig().shouldAutoCommit()) {
       // Prepare the commit metadata.
       List<HoodieWriteStat> updateStatusMap = statuses.stream().map(WriteStatus::getStat).collect(Collectors.toList());
-      HoodieCommitMetadata metadata = new HoodieCommitMetadata(true);
       for (HoodieWriteStat stat : updateStatusMap) {
         metadata.addWriteStat(stat.getPartitionPath(), stat);
       }
       metadata.addMetadata(HoodieCommitMetadata.SCHEMA_KEY, writeClient.getConfig().getSchema());
       this.writeClient.completeCompaction(
-          metadata, statuses, this.writeClient.getHoodieTable(), instant);
+          metadata, this.writeClient.getHoodieTable(), instant);
     }
     // commit the compaction
-    this.writeClient.commitCompaction(instant, statuses, Option.empty());
+    this.writeClient.commitCompaction(instant, metadata, Option.empty());
 
     // Whether to cleanup the old log file when compaction
     if (!conf.getBoolean(FlinkOptions.CLEAN_ASYNC_ENABLED)) {
