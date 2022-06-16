@@ -1767,7 +1767,6 @@
         <activeByDefault>true</activeByDefault>
         <property>
           <name>spark3</name>
-          <value>!disabled</value>
         </property>
       </activation>
     </profile>
