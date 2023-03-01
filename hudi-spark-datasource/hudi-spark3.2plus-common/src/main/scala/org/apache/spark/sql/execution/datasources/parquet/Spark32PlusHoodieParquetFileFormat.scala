@@ -60,7 +60,7 @@ import java.net.URI
  *   <li>Schema on-read</li>
  * </ol>
  */
-class Spark32PlusHoodieParquetFileFormat(private val shouldAppendPartitionValues: Boolean) extends ParquetFileFormat {
+class Spark32PlusHoodieParquetFileFormat(protected val shouldAppendPartitionValues: Boolean) extends ParquetFileFormat {
 
   override def buildReaderWithPartitionValues(sparkSession: SparkSession,
                                               dataSchema: StructType,
@@ -95,7 +95,6 @@ class Spark32PlusHoodieParquetFileFormat(private val shouldAppendPartitionValues
     hadoopConf.setBoolean(
       SQLConf.PARQUET_INT96_AS_TIMESTAMP.key,
       sparkSession.sessionState.conf.isParquetINT96AsTimestamp)
-
     val internalSchemaStr = hadoopConf.get(SparkInternalSchemaConverter.HOODIE_QUERY_SCHEMA)
     // For Spark DataSource v1, there's no Physical Plan projection/schema pruning w/in Spark itself,
     // therefore it's safe to do schema projection here

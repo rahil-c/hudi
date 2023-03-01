@@ -107,6 +107,8 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
     conf.set(ParquetReadSupport.SPARK_ROW_REQUESTED_SCHEMA(), requestedStructType.json());
     conf.setBoolean(SQLConf.PARQUET_BINARY_AS_STRING().key(), (Boolean) SQLConf.get().getConf(SQLConf.PARQUET_BINARY_AS_STRING()));
     conf.setBoolean(SQLConf.PARQUET_INT96_AS_TIMESTAMP().key(), (Boolean) SQLConf.get().getConf(SQLConf.PARQUET_INT96_AS_TIMESTAMP()));
+    // need to revisit
+    conf.set(SQLConf.LEGACY_PARQUET_NANOS_AS_LONG().key(), "false");
     ParquetReader<InternalRow> reader = ParquetReader.<InternalRow>builder((ReadSupport) new ParquetReadSupport(), path)
         .withConf(conf)
         .build();
@@ -121,6 +123,8 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
     // Avro only supports representing Decimals as fixed byte array
     // and therefore if we convert to Avro directly we'll lose logical type-info.
     MessageType messageType = ((ParquetUtils) parquetUtils).readSchema(conf, path);
+    // need to revisit (since this will break other profiles)
+    conf.set(SQLConf.LEGACY_PARQUET_NANOS_AS_LONG().key(), "false");
     StructType structType = new ParquetToSparkSchemaConverter(conf).convert(messageType);
     return SparkAdapterSupport$.MODULE$.sparkAdapter()
         .getAvroSchemaConverters()
