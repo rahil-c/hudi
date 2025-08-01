@@ -1,0 +1,93 @@
+{
+  "partitionToWriteStats" : {
+    "2023-01-01" : [ {
+      "fileId" : "478364fc-75e6-43a2-810b-70b09c638f12-0",
+      "path" : "2023-01-01/478364fc-75e6-43a2-810b-70b09c638f12-0_0-17-29_20250731174437553.parquet",
+      "prevCommit" : "null",
+      "numWrites" : 2,
+      "numDeletes" : 0,
+      "numUpdateWrites" : 0,
+      "numInserts" : 2,
+      "totalWriteBytes" : 435187,
+      "totalWriteErrors" : 0,
+      "tempPath" : null,
+      "partitionPath" : "2023-01-01",
+      "totalLogRecords" : 0,
+      "totalLogFilesCompacted" : 0,
+      "totalLogSizeCompacted" : 0,
+      "totalUpdatedRecordsCompacted" : 0,
+      "totalLogBlocks" : 0,
+      "totalCorruptLogBlock" : 0,
+      "totalRollbackBlocks" : 0,
+      "fileSizeInBytes" : 435187,
+      "minEventTime" : null,
+      "maxEventTime" : null,
+      "runtimeStats" : {
+        "totalScanTime" : 0,
+        "totalUpsertTime" : 0,
+        "totalCreateTime" : 1074
+      }
+    } ],
+    "2023-01-02" : [ {
+      "fileId" : "dec3115d-b7d4-4851-bcb4-6b4d65472f4e-0",
+      "path" : "2023-01-02/dec3115d-b7d4-4851-bcb4-6b4d65472f4e-0_1-17-30_20250731174437553.parquet",
+      "prevCommit" : "null",
+      "numWrites" : 2,
+      "numDeletes" : 0,
+      "numUpdateWrites" : 0,
+      "numInserts" : 2,
+      "totalWriteBytes" : 435211,
+      "totalWriteErrors" : 0,
+      "tempPath" : null,
+      "partitionPath" : "2023-01-02",
+      "totalLogRecords" : 0,
+      "totalLogFilesCompacted" : 0,
+      "totalLogSizeCompacted" : 0,
+      "totalUpdatedRecordsCompacted" : 0,
+      "totalLogBlocks" : 0,
+      "totalCorruptLogBlock" : 0,
+      "totalRollbackBlocks" : 0,
+      "fileSizeInBytes" : 435211,
+      "minEventTime" : null,
+      "maxEventTime" : null,
+      "runtimeStats" : {
+        "totalScanTime" : 0,
+        "totalUpsertTime" : 0,
+        "totalCreateTime" : 1080
+      }
+    } ],
+    "2023-01-03" : [ {
+      "fileId" : "96b645a2-9e28-4fe5-b905-61d69c5dda24-0",
+      "path" : "2023-01-03/96b645a2-9e28-4fe5-b905-61d69c5dda24-0_2-17-31_20250731174437553.parquet",
+      "prevCommit" : "null",
+      "numWrites" : 1,
+      "numDeletes" : 0,
+      "numUpdateWrites" : 0,
+      "numInserts" : 1,
+      "totalWriteBytes" : 435031,
+      "totalWriteErrors" : 0,
+      "tempPath" : null,
+      "partitionPath" : "2023-01-03",
+      "totalLogRecords" : 0,
+      "totalLogFilesCompacted" : 0,
+      "totalLogSizeCompacted" : 0,
+      "totalUpdatedRecordsCompacted" : 0,
+      "totalLogBlocks" : 0,
+      "totalCorruptLogBlock" : 0,
+      "totalRollbackBlocks" : 0,
+      "fileSizeInBytes" : 435031,
+      "minEventTime" : null,
+      "maxEventTime" : null,
+      "runtimeStats" : {
+        "totalScanTime" : 0,
+        "totalUpsertTime" : 0,
+        "totalCreateTime" : 1078
+      }
+    } ]
+  },
+  "compacted" : false,
+  "extraMetadata" : {
+    "schema" : "{\"type\":\"record\",\"name\":\"hudi__v5__table_table_record\",\"namespace\":\"hoodie.hudi__v5__table_table\",\"fields\":[{\"name\":\"id\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"name\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"ts\",\"type\":\"long\"},{\"name\":\"partition\",\"type\":[\"null\",\"string\"],\"default\":null}]}"
+  },
+  "operationType" : "INSERT"
+}

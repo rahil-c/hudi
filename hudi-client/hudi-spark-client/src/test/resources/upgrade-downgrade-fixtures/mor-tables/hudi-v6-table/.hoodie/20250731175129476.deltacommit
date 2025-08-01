@@ -1,0 +1,38 @@
+{
+  "partitionToWriteStats" : {
+    "2023-01-04" : [ {
+      "fileId" : "42c8e7df-7e2f-4feb-b3e5-42aafa0796dd-0",
+      "path" : "2023-01-04/42c8e7df-7e2f-4feb-b3e5-42aafa0796dd-0_0-56-88_20250731175129476.parquet",
+      "cdcStats" : null,
+      "prevCommit" : "null",
+      "numWrites" : 2,
+      "numDeletes" : 0,
+      "numUpdateWrites" : 0,
+      "numInserts" : 2,
+      "totalWriteBytes" : 435201,
+      "totalWriteErrors" : 0,
+      "tempPath" : null,
+      "partitionPath" : "2023-01-04",
+      "totalLogRecords" : 0,
+      "totalLogFilesCompacted" : 0,
+      "totalLogSizeCompacted" : 0,
+      "totalUpdatedRecordsCompacted" : 0,
+      "totalLogBlocks" : 0,
+      "totalCorruptLogBlock" : 0,
+      "totalRollbackBlocks" : 0,
+      "fileSizeInBytes" : 435201,
+      "minEventTime" : null,
+      "maxEventTime" : null,
+      "runtimeStats" : {
+        "totalScanTime" : 0,
+        "totalUpsertTime" : 0,
+        "totalCreateTime" : 270
+      }
+    } ]
+  },
+  "compacted" : false,
+  "extraMetadata" : {
+    "schema" : "{\"type\":\"record\",\"name\":\"hudi__v6__table_table_record\",\"namespace\":\"hoodie.hudi__v6__table_table\",\"fields\":[{\"name\":\"id\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"name\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"ts\",\"type\":\"long\"},{\"name\":\"partition\",\"type\":[\"null\",\"string\"],\"default\":null}]}"
+  },
+  "operationType" : "INSERT"
+}

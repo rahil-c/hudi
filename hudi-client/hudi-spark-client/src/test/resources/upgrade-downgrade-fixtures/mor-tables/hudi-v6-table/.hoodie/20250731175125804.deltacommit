@@ -1,0 +1,74 @@
+{
+  "partitionToWriteStats" : {
+    "2023-01-01" : [ {
+      "fileId" : "9558f7a2-3996-4ae4-8a1b-f038274b948f-0",
+      "path" : "2023-01-01/.9558f7a2-3996-4ae4-8a1b-f038274b948f-0_20250731175110483.log.1_0-38-68",
+      "cdcStats" : null,
+      "prevCommit" : "20250731175110483",
+      "numWrites" : 2,
+      "numDeletes" : 0,
+      "numUpdateWrites" : 2,
+      "numInserts" : 0,
+      "totalWriteBytes" : 1079,
+      "totalWriteErrors" : 0,
+      "tempPath" : null,
+      "partitionPath" : "2023-01-01",
+      "totalLogRecords" : 0,
+      "totalLogFilesCompacted" : 0,
+      "totalLogSizeCompacted" : 0,
+      "totalUpdatedRecordsCompacted" : 0,
+      "totalLogBlocks" : 0,
+      "totalCorruptLogBlock" : 0,
+      "totalRollbackBlocks" : 0,
+      "fileSizeInBytes" : 1079,
+      "minEventTime" : null,
+      "maxEventTime" : null,
+      "runtimeStats" : {
+        "totalScanTime" : 0,
+        "totalUpsertTime" : 222,
+        "totalCreateTime" : 0
+      },
+      "logVersion" : 1,
+      "logOffset" : 0,
+      "baseFile" : "9558f7a2-3996-4ae4-8a1b-f038274b948f-0_0-13-26_20250731175110483.parquet",
+      "logFiles" : [ ".9558f7a2-3996-4ae4-8a1b-f038274b948f-0_20250731175110483.log.1_0-38-68" ],
+      "recordsStats" : {
+        "val" : null
+      }
+    } ],
+    "2023-01-03" : [ {
+      "fileId" : "6d606c80-c9ad-4563-b98a-b04885d4a9fc-0",
+      "path" : "2023-01-03/6d606c80-c9ad-4563-b98a-b04885d4a9fc-0_1-38-69_20250731175125804.parquet",
+      "cdcStats" : null,
+      "prevCommit" : "20250731175110483",
+      "numWrites" : 2,
+      "numDeletes" : 0,
+      "numUpdateWrites" : 0,
+      "numInserts" : 1,
+      "totalWriteBytes" : 435120,
+      "totalWriteErrors" : 0,
+      "tempPath" : null,
+      "partitionPath" : "2023-01-03",
+      "totalLogRecords" : 0,
+      "totalLogFilesCompacted" : 0,
+      "totalLogSizeCompacted" : 0,
+      "totalUpdatedRecordsCompacted" : 0,
+      "totalLogBlocks" : 0,
+      "totalCorruptLogBlock" : 0,
+      "totalRollbackBlocks" : 0,
+      "fileSizeInBytes" : 435120,
+      "minEventTime" : null,
+      "maxEventTime" : null,
+      "runtimeStats" : {
+        "totalScanTime" : 0,
+        "totalUpsertTime" : 235,
+        "totalCreateTime" : 0
+      }
+    } ]
+  },
+  "compacted" : false,
+  "extraMetadata" : {
+    "schema" : "{\"type\":\"record\",\"name\":\"hudi__v6__table_table_record\",\"namespace\":\"hoodie.hudi__v6__table_table\",\"fields\":[{\"name\":\"id\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"name\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"ts\",\"type\":\"long\"},{\"name\":\"partition\",\"type\":[\"null\",\"string\"],\"default\":null}]}"
+  },
+  "operationType" : "UPSERT"
+}
