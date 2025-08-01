@@ -1,2 +1,0 @@
-Spark 3.2.4 (git revision 0ae10ac182) built for Hadoop 3.3.1
-Build flags: -B -Pmesos -Pyarn -Pkubernetes -Psparkr -Pscala-2.12 -Phadoop-3.2 -Phive -Phive-thriftserver
