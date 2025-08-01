@@ -44,9 +44,9 @@ done
 # Convert comma-separated versions to array
 if [ -n "$REQUESTED_VERSIONS" ]; then
     IFS=',' read -ra VERSION_ARRAY <<< "$REQUESTED_VERSIONS"
-    echo "📌 Generating specific versions: ${VERSION_ARRAY[@]}"
+    echo "INFO: Generating specific versions: ${VERSION_ARRAY[@]}"
 else
-    echo "📌 Generating all fixture versions"
+    echo "INFO: Generating all fixture versions"
 fi
 
 # Function to check if a version should be generated
@@ -68,7 +68,7 @@ should_generate_version() {
 # Validate version 9 requirements
 if should_generate_version "9"; then
     if [ -z "$HUDI_BUNDLE_PATH" ]; then
-        echo "❌ ERROR: Version 9 requires --hudi-bundle-path argument"
+        echo "ERROR: Version 9 requires --hudi-bundle-path argument"
         echo ""
         echo "To generate table version 9, you need to:"
         echo "1. Build Hudi from master branch:"
@@ -81,11 +81,11 @@ if should_generate_version "9"; then
     fi
     
     if [ ! -f "$HUDI_BUNDLE_PATH" ]; then
-        echo "❌ ERROR: Hudi bundle not found at: $HUDI_BUNDLE_PATH"
+        echo "ERROR: Hudi bundle not found at: $HUDI_BUNDLE_PATH"
         exit 1
     fi
     
-    echo "✅ Using local Hudi bundle: $HUDI_BUNDLE_PATH"
+    echo "Using local Hudi bundle: $HUDI_BUNDLE_PATH"
 fi
 
 # Function to ensure Spark binary is available locally
@@ -115,7 +115,7 @@ ensure_spark_binary() {
             local extracted_dirname="spark-3.5.1-bin-hadoop3"
             ;;
         *)
-            echo "❌ Unsupported Spark version: $spark_version"
+            echo "ERROR: Unsupported Spark version: $spark_version"
             exit 1
             ;;
     esac
@@ -125,28 +125,28 @@ ensure_spark_binary() {
     
     # Check if Spark binary already exists
     if [ -f "$spark_bin" ]; then
-        echo "✅ Spark $spark_full_version already available at $spark_dir" >&2
+        echo "Spark $spark_full_version already available at $spark_dir" >&2
         echo "$spark_dir"
         return 0
     fi
     
-    echo "📥 Downloading Spark $spark_full_version..." >&2
+    echo "Downloading Spark $spark_full_version..." >&2
     
     local download_url="https://archive.apache.org/dist/spark/spark-${spark_full_version}/${spark_tarball}"
     local temp_tarball="/tmp/${spark_tarball}"
     
     # Download Spark binary
     if ! curl -L -o "$temp_tarball" "$download_url"; then
-        echo "❌ Failed to download Spark $spark_full_version" >&2
+        echo "ERROR: Failed to download Spark $spark_full_version" >&2
         exit 1
     fi
     
     # Extract to spark-versions directory
-    echo "📦 Extracting Spark $spark_full_version..." >&2
+    echo "Extracting Spark $spark_full_version..." >&2
     mkdir -p "$SCRIPT_DIR/spark-versions"
     
     if ! tar -xzf "$temp_tarball" -C "$SCRIPT_DIR/spark-versions/"; then
-        echo "❌ Failed to extract Spark $spark_full_version" >&2
+        echo "ERROR: Failed to extract Spark $spark_full_version" >&2
         rm -f "$temp_tarball"
         exit 1
     fi
@@ -161,10 +161,10 @@ ensure_spark_binary() {
     rm -f "$temp_tarball"
     
     # Add a small delay to ensure filesystem sync
-    echo "⏳ Waiting for filesystem sync..." >&2
+    echo "Waiting for filesystem sync..." >&2
     sleep 1
     
-    echo "✅ Spark $spark_full_version ready at $spark_dir" >&2
+    echo "Spark $spark_full_version ready at $spark_dir" >&2
     echo "$spark_dir"
 }
 
@@ -183,7 +183,7 @@ generate_fixture() {
     
     # Clean existing fixture directory to prevent table type conflicts
     if [ -d "$fixture_path" ]; then
-        echo "🧹 Cleaning existing fixture directory: $fixture_path"
+        echo "Cleaning existing fixture directory: $fixture_path"
         rm -rf "$fixture_path"
     fi
     
@@ -195,12 +195,12 @@ generate_fixture() {
     
     # Validate Spark installation
     if [ ! -f "$spark_home/bin/spark-shell" ]; then
-        echo "❌ ERROR: spark-shell not found at $spark_home/bin/spark-shell"
+        echo "ERROR: spark-shell not found at $spark_home/bin/spark-shell"
         echo "   Directory contents:"
         ls -la "$spark_home/bin/" || echo "   Directory does not exist"
         exit 1
     fi
-    echo "✅ Validated spark-shell exists at: $spark_home/bin/spark-shell"
+    echo "Validated spark-shell exists at: $spark_home/bin/spark-shell"
     
     # Prepare Scala script from template
     local table_name="${fixture_name}_table"
@@ -216,7 +216,7 @@ generate_fixture() {
     rm -f "${temp_script}.bak"
     
     # Run Spark shell directly to generate the fixture
-    echo "⚡ Running Spark shell directly from: $spark_home"
+    echo "Running Spark shell directly from: $spark_home"
     
     # Create temporary directory for Ivy cache to avoid permission issues
     local ivy_cache_dir="/tmp/ivy-cache-${fixture_name}"
@@ -224,7 +224,7 @@ generate_fixture() {
     
     # Handle version 9 specially (use local JAR instead of Maven)
     if [ "$table_version" = "9" ]; then
-        echo "📦 Using local Hudi bundle: $HUDI_BUNDLE_PATH"
+        echo "Using local Hudi bundle: $HUDI_BUNDLE_PATH"
         "$spark_home/bin/spark-shell" \
             --conf 'spark.serializer=org.apache.spark.serializer.KryoSerializer' \
             --conf 'spark.sql.catalog.spark_catalog=org.apache.spark.sql.hudi.catalog.HoodieCatalog' \
@@ -235,7 +235,7 @@ generate_fixture() {
     else
         # Use Maven packages for official releases
         local hudi_bundle="org.apache.hudi:hudi-spark${spark_version}-bundle_${scala_version}:${hudi_version}"
-        echo "📦 Using Hudi bundle: $hudi_bundle"
+        echo "Using Hudi bundle: $hudi_bundle"
         "$spark_home/bin/spark-shell" \
             --conf 'spark.serializer=org.apache.spark.serializer.KryoSerializer' \
             --conf 'spark.sql.catalog.spark_catalog=org.apache.spark.sql.hudi.catalog.HoodieCatalog' \
@@ -255,7 +255,7 @@ generate_fixture() {
 }
 
 # Generate fixtures for each version using appropriate Spark versions
-echo "🔧 Generating fixtures for all supported versions..."
+echo "Generating fixtures for all supported versions..."
 
 # Based on Hudi-Spark compatibility matrix:
 # 1.0.x    -> 3.5.x (default)
@@ -265,7 +265,7 @@ echo "🔧 Generating fixtures for all supported versions..."
 # 0.12.x   -> 3.3.x (default)
 # 0.11.x   -> 3.2.x (default)
 
-echo "📋 Hudi Version -> Spark Version -> Scala Version mapping:"
+echo "Hudi Version -> Spark Version -> Scala Version mapping:"
 
 # Hudi 0.11.1 (Table Version 4) -> Spark 3.2.x (default) -> Scala 2.12
 if should_generate_version "4"; then
@@ -302,25 +302,3 @@ echo ""
 echo "Fixture generation completed!"
 echo "Generated fixtures:"
 find "$FIXTURES_DIR" -type d -name "hudi-v*-table" | sort
-
-echo ""
-echo "💡 Next steps:"
-echo "   1. Verify fixture tables contain expected structure"
-echo "   2. Run TestUpgradeDowngradeFixtures to validate fixtures"
-echo "   3. Commit fixtures to version control if they look good"
-
-echo ""
-echo "ℹ️  Technical Details:"
-echo "   • Downloads Spark binaries directly from Apache archives"
-echo "   • Downloads Hudi bundles via --packages flag for version compatibility"
-echo "   • Follows Hudi-Spark compatibility matrix for version selection"
-echo "   • Each fixture uses the default/recommended Spark version for that Hudi release"
-echo "   • Essential Spark configurations included for optimal Hudi performance"
-echo "   • Uses Scala templates for maintainable fixture generation code"
-
-echo ""
-echo "⚡ Spark Binaries Used:"
-echo "   • spark-3.2.4 (for Hudi 0.11.1)"
-echo "   • spark-3.3.4 (for Hudi 0.12.2)"
-echo "   • spark-3.4.3 (for Hudi 0.14.0)"
-echo "   • spark-3.5.1 (for Hudi 1.0.2)"
