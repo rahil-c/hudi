@@ -18,10 +18,14 @@
 
 package org.apache.hudi.table.upgrade;
 
+import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.metadata.HoodieTableMetadata;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.testutils.HoodieSparkClientTestHarness;
 
 import org.apache.hadoop.fs.FileSystem;
@@ -36,6 +40,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.Properties;
 import java.util.stream.Stream;
 
@@ -98,8 +103,7 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
         .setConf(storageConf.newInstance())
         .setBasePath(originalMetaClient.getBasePath())
         .build();
-    assertEquals(targetVersion, upgradedMetaClient.getTableConfig().getTableVersion(),
-        "Table should be upgraded to target version");
+    assertTableVersionOnDataAndMetadataTable(upgradedMetaClient, targetVersion);
     validateTableIntegrity(upgradedMetaClient, "after upgrade");
     
     // Step 2: Downgrade back to original version
@@ -112,8 +116,7 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
         .setConf(storageConf.newInstance())
         .setBasePath(upgradedMetaClient.getBasePath())
         .build();
-    assertEquals(originalVersion, finalMetaClient.getTableConfig().getTableVersion(),
-        "Table should be back to original version after round-trip");
+    assertTableVersionOnDataAndMetadataTable(finalMetaClient, originalVersion);
     validateTableIntegrity(finalMetaClient, "after round-trip");
     
     LOG.info("Successfully completed round-trip test for version {}", originalVersion);
@@ -338,5 +341,45 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
         Arguments.of(HoodieTableVersion.EIGHT),  // Hudi 1.0.2
         Arguments.of(HoodieTableVersion.NINE)    // Hudi 1.1
     );
+  }
+
+  /**
+   * Assert table version on both data table and metadata table (if exists).
+   * Adapted from TestUpgradeDowngrade.assertTableVersionOnDataAndMetadataTable().
+   */
+  private void assertTableVersionOnDataAndMetadataTable(
+      HoodieTableMetaClient metaClient, HoodieTableVersion expectedVersion) throws IOException {
+    assertTableVersion(metaClient, expectedVersion);
+
+    if (expectedVersion.versionCode() >= HoodieTableVersion.FOUR.versionCode()) {
+      StoragePath metadataTablePath = HoodieTableMetadata.getMetadataTableBasePath(metaClient.getBasePath());
+      if (metaClient.getStorage().exists(metadataTablePath)) {
+        LOG.info("Verifying metadata table version at: {}", metadataTablePath);
+        HoodieTableMetaClient mdtMetaClient = HoodieTableMetaClient.builder()
+            .setConf(metaClient.getStorageConf().newInstance()).setBasePath(metadataTablePath).build();
+        assertTableVersion(mdtMetaClient, expectedVersion);
+      } else {
+        LOG.info("Metadata table does not exist at: {}", metadataTablePath);
+      }
+    }
+  }
+
+  /**
+   * Assert table version by checking both in-memory config and persisted properties file.
+   * Adapted from TestUpgradeDowngrade.assertTableVersion().
+   */
+  private void assertTableVersion(
+      HoodieTableMetaClient metaClient, HoodieTableVersion expectedVersion) throws IOException {
+    assertEquals(expectedVersion.versionCode(),
+        metaClient.getTableConfig().getTableVersion().versionCode());
+    StoragePath propertyFile = new StoragePath(
+        metaClient.getMetaPath(), HoodieTableConfig.HOODIE_PROPERTIES_FILE);
+    // Load the properties and verify
+    InputStream inputStream = metaClient.getStorage().open(propertyFile);
+    HoodieConfig config = new HoodieConfig();
+    config.getProps().load(inputStream);
+    inputStream.close();
+    assertEquals(Integer.toString(expectedVersion.versionCode()),
+        config.getString(HoodieTableConfig.VERSION));
   }
 }
