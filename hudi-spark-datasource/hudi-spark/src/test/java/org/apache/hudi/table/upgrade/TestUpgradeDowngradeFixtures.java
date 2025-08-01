@@ -45,12 +45,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.util.Properties;
 import java.util.stream.Stream;
 
-import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
-import org.apache.commons.compress.archivers.zip.ZipFile;
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -239,37 +240,33 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
    * Extract fixture zip file from resources to temporary directory.
    */
   private void extractFixtureToTempDir(String resourcePath, String tempPath) throws IOException {
-    // Get the resource URL for the zip file
-    java.net.URL resourceURL = getClass().getResource(resourcePath);
-    assertNotNull(resourceURL, "Fixture not found at: " + resourcePath);
+    LOG.info("Loading fixture from resource path: {}", resourcePath);
     
-    // Create temporary file from resource stream (required for ZipFile)
-    java.nio.file.Path tempZipFile = Files.createTempFile("fixture-", ".zip");
-    try {
-      // Copy resource to temporary file
-      try (InputStream inputStream = resourceURL.openStream()) {
-        Files.copy(inputStream, tempZipFile, StandardCopyOption.REPLACE_EXISTING);
+    try (ZipInputStream zip = new ZipInputStream(getClass().getResourceAsStream(resourcePath))) {
+      if (zip == null) {
+        throw new IOException("Fixture not found at: " + resourcePath);
       }
       
-      // Extract zip file using Apache Commons Compress
-      try (ZipFile zipFile = ZipFile.builder().setPath(tempZipFile).get()) {
-        java.util.Enumeration<ZipArchiveEntry> entries = zipFile.getEntries();
-        while (entries.hasMoreElements()) {
-          ZipArchiveEntry zipEntry = entries.nextElement();
-          java.nio.file.Path outputPath = Paths.get(tempPath, zipEntry.getName());
-          if (zipEntry.isDirectory()) {
-            Files.createDirectories(outputPath);
-          } else {
-            Files.createDirectories(outputPath.getParent());
-            try (InputStream entryInputStream = zipFile.getInputStream(zipEntry)) {
-              Files.copy(entryInputStream, outputPath, StandardCopyOption.REPLACE_EXISTING);
-            }
+      ZipEntry entry;
+      while ((entry = zip.getNextEntry()) != null) {
+        File file = Paths.get(tempPath, entry.getName()).toFile();
+        if (entry.isDirectory()) {
+          file.mkdirs();
+          continue;
+        }
+        
+        // Create parent directories if they don't exist
+        file.getParentFile().mkdirs();
+        
+        // Extract file content
+        byte[] buffer = new byte[10000];
+        try (BufferedOutputStream out = new BufferedOutputStream(Files.newOutputStream(file.toPath()))) {
+          int count;
+          while ((count = zip.read(buffer)) != -1) {
+            out.write(buffer, 0, count);
           }
         }
       }
-    } finally {
-      // Clean up temporary zip file
-      Files.deleteIfExists(tempZipFile);
     }
   }
 
