@@ -32,8 +32,6 @@ import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.testutils.HoodieSparkClientTestHarness;
 
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.io.TempDir;
@@ -45,8 +43,14 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.Properties;
 import java.util.stream.Stream;
+
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipFile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -214,13 +218,17 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
     String fixtureName = getFixtureName(version);
     String resourcePath = FIXTURES_BASE_PATH + fixtureName;
     
-    // Copy fixture from resources to temp directory
-    copyFixtureToTempDir(resourcePath, tempDir.toString());
+    // Extract fixture zip from resources to temp directory
+    extractFixtureToTempDir(resourcePath, tempDir.toString());
+    
+    // Get the table name from fixture (remove .zip extension)
+    String tableName = fixtureName.replace(".zip", "");
+    String tablePath = tempDir.resolve(tableName).toString();
     
     // Initialize meta client for the copied fixture
     metaClient = HoodieTableMetaClient.builder()
         .setConf(storageConf.newInstance())
-        .setBasePath(tempDir.toString())
+        .setBasePath(tablePath)
         .build();
     
     LOG.info("Loaded fixture table {} at version {}", fixtureName, metaClient.getTableConfig().getTableVersion());
@@ -228,30 +236,41 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
   }
 
   /**
-   * Copy fixture table from resources to temporary directory.
+   * Extract fixture zip file from resources to temporary directory.
    */
-  private void copyFixtureToTempDir(String resourcePath, String tempPath) throws IOException {
-    // Get the resource URL
+  private void extractFixtureToTempDir(String resourcePath, String tempPath) throws IOException {
+    // Get the resource URL for the zip file
     java.net.URL resourceURL = getClass().getResource(resourcePath);
     assertNotNull(resourceURL, "Fixture not found at: " + resourcePath);
     
-    // Use FileSystem to copy the directory contents recursively
-    FileSystem fs = FileSystem.get(storageConf.unwrap());
-    Path sourcePath = new Path(resourceURL.getPath());
-    Path targetPath = new Path(tempPath);
-    
-    // Create the target directory if it doesn't exist
-    fs.mkdirs(targetPath);
-    
-    // Copy all files and subdirectories from source to target
-    org.apache.hadoop.fs.FileStatus[] fileStatuses = fs.listStatus(sourcePath);
-    for (org.apache.hadoop.fs.FileStatus status : fileStatuses) {
-      Path srcFile = status.getPath();
-      Path dstFile = new Path(targetPath, srcFile.getName());
-      org.apache.hadoop.fs.FileUtil.copy(fs, srcFile, fs, dstFile, false, storageConf.unwrap());
+    // Create temporary file from resource stream (required for ZipFile)
+    java.nio.file.Path tempZipFile = Files.createTempFile("fixture-", ".zip");
+    try {
+      // Copy resource to temporary file
+      try (InputStream inputStream = resourceURL.openStream()) {
+        Files.copy(inputStream, tempZipFile, StandardCopyOption.REPLACE_EXISTING);
+      }
+      
+      // Extract zip file using Apache Commons Compress
+      try (ZipFile zipFile = ZipFile.builder().setPath(tempZipFile).get()) {
+        java.util.Enumeration<ZipArchiveEntry> entries = zipFile.getEntries();
+        while (entries.hasMoreElements()) {
+          ZipArchiveEntry zipEntry = entries.nextElement();
+          java.nio.file.Path outputPath = Paths.get(tempPath, zipEntry.getName());
+          if (zipEntry.isDirectory()) {
+            Files.createDirectories(outputPath);
+          } else {
+            Files.createDirectories(outputPath.getParent());
+            try (InputStream entryInputStream = zipFile.getInputStream(zipEntry)) {
+              Files.copy(entryInputStream, outputPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+          }
+        }
+      }
+    } finally {
+      // Clean up temporary zip file
+      Files.deleteIfExists(tempZipFile);
     }
-    
-    LOG.debug("Copied fixture contents from {} to {}", resourcePath, tempPath);
   }
 
   /**
@@ -318,20 +337,20 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
   }
 
   /**
-   * Get fixture directory name for a given table version.
+   * Get fixture zip file name for a given table version.
    */
   private String getFixtureName(HoodieTableVersion version) {
     switch (version) {
       case FOUR:
-        return "hudi-v4-table";
+        return "hudi-v4-table.zip";
       case FIVE:
-        return "hudi-v5-table";
+        return "hudi-v5-table.zip";
       case SIX:
-        return "hudi-v6-table";
+        return "hudi-v6-table.zip";
       case EIGHT:
-        return "hudi-v8-table";
+        return "hudi-v8-table.zip";
       case NINE:
-        return "hudi-v9-table";
+        return "hudi-v9-table.zip";
       default:
         throw new IllegalArgumentException("Unsupported fixture version: " + version);
     }

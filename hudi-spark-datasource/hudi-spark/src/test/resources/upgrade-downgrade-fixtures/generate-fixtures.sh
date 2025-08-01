@@ -300,5 +300,26 @@ fi
 
 echo ""
 echo "Fixture generation completed!"
-echo "Generated fixtures:"
-find "$FIXTURES_DIR" -type d -name "hudi-v*-table" | sort
+
+# Compress fixture tables to save space
+echo ""
+echo "Compressing fixture tables..."
+for fixture_dir in "$FIXTURES_DIR"/hudi-v*-table; do
+    if [ -d "$fixture_dir" ]; then
+        fixture_name=$(basename "$fixture_dir")
+        echo "Compressing $fixture_name..."
+        (cd "$FIXTURES_DIR" && zip -r -q -X "${fixture_name}.zip" "$fixture_name")
+        if [ $? -eq 0 ]; then
+            rm -rf "$fixture_dir"
+            echo "Created ${fixture_name}.zip"
+        else
+            echo "ERROR: Failed to compress $fixture_name"
+            exit 1
+        fi
+    fi
+done
+
+echo ""
+echo "Compression completed!"
+echo "Generated compressed fixtures:"
+find "$FIXTURES_DIR" -name "hudi-v*-table.zip" | sort
