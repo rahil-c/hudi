@@ -93,8 +93,11 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
     new UpgradeDowngrade(originalMetaClient, config, context, SparkUpgradeDowngradeHelper.getInstance())
         .run(targetVersion, null);
     
-    // Reload and validate upgrade
-    HoodieTableMetaClient upgradedMetaClient = HoodieTableMetaClient.reload(originalMetaClient);
+    // Create fresh meta client to read updated table configuration after upgrade
+    HoodieTableMetaClient upgradedMetaClient = HoodieTableMetaClient.builder()
+        .setConf(storageConf.newInstance())
+        .setBasePath(originalMetaClient.getBasePath())
+        .build();
     assertEquals(targetVersion, upgradedMetaClient.getTableConfig().getTableVersion(),
         "Table should be upgraded to target version");
     validateTableIntegrity(upgradedMetaClient, "after upgrade");
@@ -104,8 +107,11 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
     new UpgradeDowngrade(upgradedMetaClient, config, context, SparkUpgradeDowngradeHelper.getInstance())
         .run(originalVersion, null);
     
-    // Reload and validate complete round-trip
-    HoodieTableMetaClient finalMetaClient = HoodieTableMetaClient.reload(upgradedMetaClient);
+    // Create fresh meta client to read updated table configuration after downgrade
+    HoodieTableMetaClient finalMetaClient = HoodieTableMetaClient.builder()
+        .setConf(storageConf.newInstance())
+        .setBasePath(upgradedMetaClient.getBasePath())
+        .build();
     assertEquals(originalVersion, finalMetaClient.getTableConfig().getTableVersion(),
         "Table should be back to original version after round-trip");
     validateTableIntegrity(finalMetaClient, "after round-trip");
@@ -135,8 +141,11 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
     new UpgradeDowngrade(originalMetaClient, config, context, SparkUpgradeDowngradeHelper.getInstance())
         .run(targetVersion, null);
     
-    // Reload and validate that version remained unchanged
-    HoodieTableMetaClient unchangedMetaClient = HoodieTableMetaClient.reload(originalMetaClient);
+    // Create fresh meta client to validate that version remained unchanged 
+    HoodieTableMetaClient unchangedMetaClient = HoodieTableMetaClient.builder()
+        .setConf(storageConf.newInstance())
+        .setBasePath(originalMetaClient.getBasePath())
+        .build();
     assertEquals(originalVersion, unchangedMetaClient.getTableConfig().getTableVersion(),
         "Table version should remain unchanged when auto-upgrade is disabled");
     
@@ -169,8 +178,11 @@ public class TestUpgradeDowngradeFixtures extends HoodieSparkClientTestHarness {
     new UpgradeDowngrade(originalMetaClient, config, context, SparkUpgradeDowngradeHelper.getInstance())
         .run(targetVersion, null);
     
-    // Reload and validate timeline state
-    HoodieTableMetaClient upgradedMetaClient = HoodieTableMetaClient.reload(originalMetaClient);
+    // Create fresh meta client to validate timeline state after upgrade
+    HoodieTableMetaClient upgradedMetaClient = HoodieTableMetaClient.builder()
+        .setConf(storageConf.newInstance())
+        .setBasePath(originalMetaClient.getBasePath())
+        .build();
     
     // Verify rollback behavior - pending commits should be cleaned up or reduced
     int finalPendingCommits = upgradedMetaClient.getCommitsTimeline().filterPendingExcludingCompaction().countInstants();
