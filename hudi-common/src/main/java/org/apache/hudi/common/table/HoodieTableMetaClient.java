@@ -51,6 +51,7 @@ import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.util.CommitUtils;
 import org.apache.hudi.common.util.ConfigUtils;
+import org.apache.hudi.common.util.ExecutionContext;
 import org.apache.hudi.common.util.FileIOUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
@@ -180,6 +181,9 @@ public class HoodieTableMetaClient implements Serializable {
   protected HoodieTableMetaClient(HoodieStorage storage, String basePath, boolean loadActiveTimelineOnLoad,
                                   ConsistencyGuardConfig consistencyGuardConfig, Option<TimelineLayoutVersion> layoutVersion,
                                   HoodieTimeGeneratorConfig timeGeneratorConfig, FileSystemRetryConfig fileSystemRetryConfig) {
+    // Validate that MetaClient is not being created on executor nodes in distributed environments
+    validateExecutionContext(basePath);
+    
     LOG.info("Loading HoodieTableMetaClient from " + basePath);
     this.timeGeneratorConfig = timeGeneratorConfig;
     this.consistencyGuardConfig = consistencyGuardConfig;
@@ -219,6 +223,66 @@ public class HoodieTableMetaClient implements Serializable {
    * @deprecated
    */
   public HoodieTableMetaClient() {
+  }
+
+  /**
+   * Validates that MetaClient creation is happening in the appropriate execution context.
+   * Throws an exception if MetaClient is being created on executor nodes in distributed environments,
+   * which can cause performance issues due to repeated expensive filesystem operations.
+   * 
+   * @param basePath The table base path for context in error messages
+   */
+  private static void validateExecutionContext(String basePath) {
+    if (!ExecutionContext.isValidationEnabled()) {
+      return;
+    }
+    
+    if (ExecutionContext.isOnSparkExecutor()) {
+      String stackTrace = Thread.currentThread().getStackTrace().length > 10 
+          ? getRelevantStackTrace() 
+          : "Stack trace too short";
+      
+      String errorMessage = String.format(
+          "MetaClient created on Spark executor! This causes expensive FS operations per file/split.\n"
+          + "Table: %s\n"
+          + "Executor ID: %s\n"
+          + "Context: %s\n"
+          + "MetaClient should be created on driver and broadcast/serialized to executors.\n"
+          + "Relevant stack trace:\n%s\n\n"
+          + "To disable this validation, set system property: -Dhoodie.metaclient.validation.enabled=false",
+          basePath, 
+          ExecutionContext.getExecutorId(),
+          ExecutionContext.getContextInfo(),
+          stackTrace);
+      
+      throw new HoodieException(errorMessage);
+    }
+  }
+  
+  /**
+   * Gets relevant stack trace elements for debugging MetaClient creation location.
+   */
+  private static String getRelevantStackTrace() {
+    StackTraceElement[] elements = Thread.currentThread().getStackTrace();
+    StringBuilder sb = new StringBuilder();
+    
+    // Skip first few elements (getStackTrace, getRelevantStackTrace, validateExecutionContext)
+    int start = Math.min(4, elements.length);
+    int end = Math.min(start + 15, elements.length); // Limit to 15 elements
+    
+    for (int i = start; i < end; i++) {
+      StackTraceElement element = elements[i];
+      String className = element.getClassName();
+      
+      // Focus on relevant classes
+      if (className.contains("hudi") 
+          || className.contains("spark") 
+          || className.contains("FileGroupReader")) {
+        sb.append("  at ").append(element.toString()).append("\n");
+      }
+    }
+    
+    return sb.length() > 0 ? sb.toString() : "No relevant stack trace elements found";
   }
 
   public String getIndexDefinitionPath() {
