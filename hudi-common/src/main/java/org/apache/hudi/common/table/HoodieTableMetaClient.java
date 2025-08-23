@@ -238,9 +238,7 @@ public class HoodieTableMetaClient implements Serializable {
     }
     
     if (ExecutionContext.isOnSparkExecutor()) {
-      String stackTrace = Thread.currentThread().getStackTrace().length > 10 
-          ? getRelevantStackTrace() 
-          : "Stack trace too short";
+      String stackTrace = Thread.currentThread().getStackTrace().toString();
       
       String errorMessage = String.format(
           "MetaClient created on Spark executor! This causes expensive FS operations per file/split.\n"
@@ -262,28 +260,6 @@ public class HoodieTableMetaClient implements Serializable {
   /**
    * Gets relevant stack trace elements for debugging MetaClient creation location.
    */
-  private static String getRelevantStackTrace() {
-    StackTraceElement[] elements = Thread.currentThread().getStackTrace();
-    StringBuilder sb = new StringBuilder();
-    
-    // Skip first few elements (getStackTrace, getRelevantStackTrace, validateExecutionContext)
-    int start = Math.min(4, elements.length);
-    int end = Math.min(start + 15, elements.length); // Limit to 15 elements
-    
-    for (int i = start; i < end; i++) {
-      StackTraceElement element = elements[i];
-      String className = element.getClassName();
-      
-      // Focus on relevant classes
-      if (className.contains("hudi") 
-          || className.contains("spark") 
-          || className.contains("FileGroupReader")) {
-        sb.append("  at ").append(element.toString()).append("\n");
-      }
-    }
-    
-    return sb.length() > 0 ? sb.toString() : "No relevant stack trace elements found";
-  }
 
   public String getIndexDefinitionPath() {
     return tableConfig.getRelativeIndexDefinitionPath()
