@@ -25,9 +25,10 @@ import org.apache.hudi.common.config.{HoodieMetadataConfig, TypedProperties}
 import org.apache.hudi.common.model.{AWSDmsAvroPayload, DefaultHoodieRecordPayload, EventTimeAvroPayload, HoodieRecordMerger, HoodieTableType, OverwriteNonDefaultsWithLatestAvroPayload, OverwriteWithLatestAvroPayload, PartialUpdateAvroPayload}
 import org.apache.hudi.common.model.DefaultHoodieRecordPayload.DELETE_KEY
 import org.apache.hudi.common.model.debezium.{DebeziumConstants, MySqlDebeziumAvroPayload, PostgresDebeziumAvroPayload}
-import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient}
+import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient, HoodieTableVersion}
 import org.apache.hudi.common.table.HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX
 import org.apache.hudi.config.{HoodieArchivalConfig, HoodieCleanConfig, HoodieClusteringConfig, HoodieCompactionConfig, HoodieWriteConfig}
+import org.apache.hudi.table.upgrade.{SparkUpgradeDowngradeHelper, UpgradeDowngrade}
 import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.testutils.SparkClientFunctionalTestHarness
 
@@ -48,7 +49,8 @@ class TestPayloadDeprecationFlow extends SparkClientFunctionalTestHarness {
   def testMergerBuiltinPayloadUpgradePath(tableType: String,
                                           payloadClazz: String,
                                           useOpAsDeleteStr: String,
-                                          expectedConfigs: Map[String, String]): Unit = {
+                                          expectedConfigs: Map[String, String],
+                                          expectedDowngradeConfigs: Map[String, String]): Unit = {
     val useOpAsDelete = useOpAsDeleteStr.equals("true")
     val deleteOpts: Map[String, String] = if (useOpAsDelete) {
       Map(DefaultHoodieRecordPayload.DELETE_KEY -> "Op", DefaultHoodieRecordPayload.DELETE_MARKER -> "D")
@@ -317,6 +319,40 @@ class TestPayloadDeprecationFlow extends SparkClientFunctionalTestHarness {
         expectedTimeTravelDf.except(timeTravelDf).isEmpty
           && timeTravelDf.except(expectedTimeTravelDf).isEmpty)
     }
+
+    // 8. Downgrade from v9 to v8
+    val writeConfig = HoodieWriteConfig.newBuilder()
+      .withPath(basePath)
+      .withSchema(spark.read.format("hudi").load(basePath).schema.json)
+      .build()
+
+    new UpgradeDowngrade(metaClient, writeConfig, context, SparkUpgradeDowngradeHelper.getInstance)
+      .run(HoodieTableVersion.EIGHT, null)
+
+    // Reload metaClient to get updated table config
+    metaClient = HoodieTableMetaClient.builder()
+      .setBasePath(basePath)
+      .setConf(storageConf())
+      .build()
+
+    // Validate table version is 8
+    assertEquals(8, metaClient.getTableConfig.getTableVersion.versionCode())
+
+    // Validate downgrade configs
+    val downgradedTableConfig = metaClient.getTableConfig
+    expectedDowngradeConfigs.foreach { case (key, expectedValue) =>
+      if (expectedValue != null) {
+        assertEquals(expectedValue, downgradedTableConfig.getString(key), s"Config $key should be $expectedValue after downgrade")
+      } else {
+        assertFalse(downgradedTableConfig.contains(key), s"Config $key should not be present after downgrade")
+      }
+    }
+
+    // Validate data consistency after downgrade
+    val downgradeDf = spark.read.format("hudi").load(basePath)
+    val downgradeFinalDf = downgradeDf.select("ts", "_event_lsn", "rider", "driver", "fare", "Op", "_event_seq", DebeziumConstants.FLATTENED_FILE_COL_NAME, DebeziumConstants.FLATTENED_POS_COL_NAME, DebeziumConstants.FLATTENED_OP_COL_NAME).sort("_event_lsn")
+    assertTrue(expectedDf.except(downgradeFinalDf).isEmpty && downgradeFinalDf.except(expectedDf).isEmpty,
+      "Data should remain consistent after downgrade")
   }
 
   @ParameterizedTest
@@ -324,7 +360,8 @@ class TestPayloadDeprecationFlow extends SparkClientFunctionalTestHarness {
   def testMergerBuiltinPayloadFromTableCreationPath(tableType: String,
                                                     payloadClazz: String,
                                                     useOpAsDeleteStr: String,
-                                                    expectedConfigs: Map[String, String]): Unit = {
+                                                    expectedConfigs: Map[String, String],
+                                                    expectedDowngradeConfigs: Map[String, String]): Unit = {
     val useOpAsDelete = useOpAsDeleteStr.equals("true")
     val deleteOpts: Map[String, String] = if (useOpAsDelete) {
       Map(DefaultHoodieRecordPayload.DELETE_KEY -> "Op", DefaultHoodieRecordPayload.DELETE_MARKER -> "D")
@@ -587,6 +624,40 @@ class TestPayloadDeprecationFlow extends SparkClientFunctionalTestHarness {
     assertTrue(
       expectedTimeTravelDf.except(timeTravelDf).isEmpty
         && timeTravelDf.except(expectedTimeTravelDf).isEmpty)
+
+    // 8. Downgrade from v9 to v8
+    val writeConfig = HoodieWriteConfig.newBuilder()
+      .withPath(basePath)
+      .withSchema(spark.read.format("hudi").load(basePath).schema.json)
+      .build()
+
+    new UpgradeDowngrade(metaClient, writeConfig, context, SparkUpgradeDowngradeHelper.getInstance)
+      .run(HoodieTableVersion.EIGHT, null)
+
+    // Reload metaClient to get updated table config
+    metaClient = HoodieTableMetaClient.builder()
+      .setBasePath(basePath)
+      .setConf(storageConf())
+      .build()
+
+    // Validate table version is 8
+    assertEquals(8, metaClient.getTableConfig.getTableVersion.versionCode())
+
+    // Validate downgrade configs
+    val downgradedTableConfig = metaClient.getTableConfig
+    expectedDowngradeConfigs.foreach { case (key, expectedValue) =>
+      if (expectedValue != null) {
+        assertEquals(expectedValue, downgradedTableConfig.getString(key), s"Config $key should be $expectedValue after downgrade")
+      } else {
+        assertFalse(downgradedTableConfig.contains(key), s"Config $key should not be present after downgrade")
+      }
+    }
+
+    // Validate data consistency after downgrade
+    val downgradeDf = spark.read.format("hudi").load(basePath)
+    val downgradeFinalDf = downgradeDf.select("ts", "_event_lsn", "rider", "driver", "fare", "Op", "_event_seq", DebeziumConstants.FLATTENED_FILE_COL_NAME, DebeziumConstants.FLATTENED_POS_COL_NAME, DebeziumConstants.FLATTENED_OP_COL_NAME).sort("_event_lsn")
+    assertTrue(expectedDf.except(downgradeFinalDf).isEmpty && downgradeFinalDf.except(expectedDf).isEmpty,
+      "Data should remain consistent after downgrade")
   }
 
   def getWriteConfig(hudiOpts: Map[String, String]): HoodieWriteConfig = {
@@ -790,7 +861,11 @@ object TestPayloadDeprecationFlow {
         Map(
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[DefaultHoodieRecordPayload].getName,
-          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID)
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[DefaultHoodieRecordPayload].getName,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       ),
       Arguments.of(
         "COPY_ON_WRITE",
@@ -799,7 +874,13 @@ object TestPayloadDeprecationFlow {
         Map(
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[DefaultHoodieRecordPayload].getName,
-          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID)
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[DefaultHoodieRecordPayload].getName,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null,
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_KEY -> "Op",
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_MARKER -> "D")
       ),
       Arguments.of(
         "COPY_ON_WRITE",
@@ -808,7 +889,11 @@ object TestPayloadDeprecationFlow {
         Map(
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "COMMIT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[OverwriteWithLatestAvroPayload].getName,
-          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.COMMIT_TIME_BASED_MERGE_STRATEGY_UUID)
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.COMMIT_TIME_BASED_MERGE_STRATEGY_UUID),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[OverwriteWithLatestAvroPayload].getName,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       ),
       Arguments.of(
         "COPY_ON_WRITE",
@@ -818,7 +903,13 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[PartialUpdateAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID,
-          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> "IGNORE_DEFAULTS")
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> "IGNORE_DEFAULTS"),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[PartialUpdateAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       ),
       Arguments.of(
         "COPY_ON_WRITE",
@@ -830,7 +921,16 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID,
           HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> "FILL_UNAVAILABLE",
           HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + HoodieTableConfig.PARTIAL_UPDATE_UNAVAILABLE_VALUE
-            -> "__debezium_unavailable_value")
+            -> "__debezium_unavailable_value"),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[PostgresDebeziumAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.PRECOMBINE_FIELD.key() -> "_event_lsn",
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null,
+          HoodieTableConfig.ORDERING_FIELDS.key() -> null,
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + HoodieTableConfig.PARTIAL_UPDATE_UNAVAILABLE_VALUE -> null)
       ),
       Arguments.of(
         "COPY_ON_WRITE",
@@ -840,7 +940,14 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[MySqlDebeziumAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID,
-          HoodieTableConfig.ORDERING_FIELDS.key() -> (DebeziumConstants.FLATTENED_FILE_COL_NAME + "," + DebeziumConstants.FLATTENED_POS_COL_NAME))),
+          HoodieTableConfig.ORDERING_FIELDS.key() -> (DebeziumConstants.FLATTENED_FILE_COL_NAME + "," + DebeziumConstants.FLATTENED_POS_COL_NAME)),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[MySqlDebeziumAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.PRECOMBINE_FIELD.key() -> "_event_seq",
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.ORDERING_FIELDS.key() -> null)),
       Arguments.of(
         "COPY_ON_WRITE",
         classOf[AWSDmsAvroPayload].getName,
@@ -850,7 +957,14 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[AWSDmsAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.COMMIT_TIME_BASED_MERGE_STRATEGY_UUID,
           HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_KEY -> "Op",
-          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_MARKER -> "D")
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_MARKER -> "D"),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[AWSDmsAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_KEY -> null,
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_MARKER -> null)
       ),
       Arguments.of(
         "COPY_ON_WRITE",
@@ -860,7 +974,11 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[EventTimeAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID
-        )
+        ),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[EventTimeAvroPayload].getName,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       ),
       Arguments.of(
         "COPY_ON_WRITE",
@@ -871,7 +989,13 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[OverwriteNonDefaultsWithLatestAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.COMMIT_TIME_BASED_MERGE_STRATEGY_UUID,
           HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> "IGNORE_DEFAULTS"
-        )
+        ),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[OverwriteNonDefaultsWithLatestAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       ),
       Arguments.of(
         "MERGE_ON_READ",
@@ -880,7 +1004,11 @@ object TestPayloadDeprecationFlow {
         Map(
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[DefaultHoodieRecordPayload].getName,
-          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID)
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[DefaultHoodieRecordPayload].getName,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       ),
       Arguments.of(
         "MERGE_ON_READ",
@@ -889,7 +1017,13 @@ object TestPayloadDeprecationFlow {
         Map(
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[DefaultHoodieRecordPayload].getName,
-          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID)
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[DefaultHoodieRecordPayload].getName,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null,
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_KEY -> "Op",
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_MARKER -> "D")
       ),
       Arguments.of(
         "MERGE_ON_READ",
@@ -898,7 +1032,11 @@ object TestPayloadDeprecationFlow {
         Map(
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "COMMIT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[OverwriteWithLatestAvroPayload].getName,
-          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.COMMIT_TIME_BASED_MERGE_STRATEGY_UUID)
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.COMMIT_TIME_BASED_MERGE_STRATEGY_UUID),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[OverwriteWithLatestAvroPayload].getName,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       ),
       Arguments.of(
         "MERGE_ON_READ",
@@ -908,7 +1046,13 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[PartialUpdateAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID,
-          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> "IGNORE_DEFAULTS")
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> "IGNORE_DEFAULTS"),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[PartialUpdateAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       ),
       Arguments.of(
         "MERGE_ON_READ",
@@ -920,7 +1064,16 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID,
           HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> "FILL_UNAVAILABLE",
           HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + HoodieTableConfig.PARTIAL_UPDATE_UNAVAILABLE_VALUE
-            -> "__debezium_unavailable_value")
+            -> "__debezium_unavailable_value"),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[PostgresDebeziumAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.PRECOMBINE_FIELD.key() -> "_event_lsn",
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null,
+          HoodieTableConfig.ORDERING_FIELDS.key() -> null,
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + HoodieTableConfig.PARTIAL_UPDATE_UNAVAILABLE_VALUE -> null)
       ),
       Arguments.of(
         "MERGE_ON_READ",
@@ -930,7 +1083,14 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[MySqlDebeziumAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID,
-          HoodieTableConfig.ORDERING_FIELDS.key() -> (DebeziumConstants.FLATTENED_FILE_COL_NAME + "," + DebeziumConstants.FLATTENED_POS_COL_NAME))),
+          HoodieTableConfig.ORDERING_FIELDS.key() -> (DebeziumConstants.FLATTENED_FILE_COL_NAME + "," + DebeziumConstants.FLATTENED_POS_COL_NAME)),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[MySqlDebeziumAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.PRECOMBINE_FIELD.key() -> "_event_seq",
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.ORDERING_FIELDS.key() -> null)),
       Arguments.of(
         "MERGE_ON_READ",
         classOf[AWSDmsAvroPayload].getName,
@@ -940,7 +1100,14 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[AWSDmsAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.COMMIT_TIME_BASED_MERGE_STRATEGY_UUID,
           HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_KEY -> "Op",
-          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_MARKER -> "D")
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_MARKER -> "D"),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[AWSDmsAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_KEY -> null,
+          HoodieTableConfig.RECORD_MERGE_PROPERTY_PREFIX + DefaultHoodieRecordPayload.DELETE_MARKER -> null)
       ),
       Arguments.of(
         "MERGE_ON_READ",
@@ -950,7 +1117,11 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.RECORD_MERGE_MODE.key() -> "EVENT_TIME_ORDERING",
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[EventTimeAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.EVENT_TIME_BASED_MERGE_STRATEGY_UUID
-        )
+        ),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[EventTimeAvroPayload].getName,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       ),
       Arguments.of(
         "MERGE_ON_READ",
@@ -961,7 +1132,13 @@ object TestPayloadDeprecationFlow {
           HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> classOf[OverwriteNonDefaultsWithLatestAvroPayload].getName,
           HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.COMMIT_TIME_BASED_MERGE_STRATEGY_UUID,
           HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> "IGNORE_DEFAULTS"
-        )
+        ),
+        Map(
+          HoodieTableConfig.PAYLOAD_CLASS_NAME.key() -> classOf[OverwriteNonDefaultsWithLatestAvroPayload].getName,
+          HoodieTableConfig.RECORD_MERGE_MODE.key() -> "CUSTOM",
+          HoodieTableConfig.RECORD_MERGE_STRATEGY_ID.key() -> HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID,
+          HoodieTableConfig.LEGACY_PAYLOAD_CLASS_NAME.key() -> null,
+          HoodieTableConfig.PARTIAL_UPDATE_MODE.key() -> null)
       )
     )
   }
