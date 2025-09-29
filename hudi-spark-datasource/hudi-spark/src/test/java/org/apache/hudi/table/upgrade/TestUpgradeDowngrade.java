@@ -80,6 +80,8 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
       return "/upgrade-downgrade-fixtures/complex-keygen-tables/";
     } else if (suffix.contains("mor")) {
       return "/upgrade-downgrade-fixtures/mor-tables/";
+    } else if (suffix.contains("payload")) {
+      return "/upgrade-downgrade-fixtures/payload-tables/";
     } else {
       return "/upgrade-downgrade-fixtures/unsupported-upgrade-tables/";
     }
@@ -382,19 +384,41 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
   private HoodieTableMetaClient loadFixtureTable(HoodieTableVersion version, String suffix) throws IOException {
     String fixtureName = getFixtureName(version, suffix);
     String resourcePath = getFixturesBasePath(suffix) + fixtureName;
-    
+
     LOG.info("Loading fixture from resource path: {}", resourcePath);
     HoodieTestUtils.extractZipToDirectory(resourcePath, tempDir, getClass());
-    
+
     String tableName = fixtureName.replace(".zip", "");
     String tablePath = tempDir.resolve(tableName).toString();
-    
+
     metaClient = HoodieTableMetaClient.builder()
         .setConf(storageConf().newInstance())
         .setBasePath(tablePath)
         .build();
-    
+
     LOG.info("Loaded fixture table {} at version {}", fixtureName, metaClient.getTableConfig().getTableVersion());
+    return metaClient;
+  }
+
+  /**
+   * Load a payload-specific fixture table from resources.
+   */
+  private HoodieTableMetaClient loadPayloadFixtureTable(HoodieTableVersion version, String payloadType) throws IOException {
+    String fixtureName = "hudi-v" + version.versionCode() + "-table-payload-" + payloadType + ".zip";
+    String resourcePath = "/upgrade-downgrade-fixtures/payload-tables/" + fixtureName;
+
+    LOG.info("Loading payload fixture from resource path: {}", resourcePath);
+    HoodieTestUtils.extractZipToDirectory(resourcePath, tempDir, getClass());
+
+    String tableName = fixtureName.replace(".zip", "");
+    String tablePath = tempDir.resolve(tableName).toString();
+
+    metaClient = HoodieTableMetaClient.builder()
+        .setConf(storageConf().newInstance())
+        .setBasePath(tablePath)
+        .build();
+
+    LOG.info("Loaded payload fixture table {} at version {}", fixtureName, metaClient.getTableConfig().getTableVersion());
     return metaClient;
   }
 
@@ -492,10 +516,17 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
         // Upgrade test cases for six and greater
         Arguments.of(HoodieTableVersion.SIX, HoodieTableVersion.EIGHT),   // V6 -> V8
         Arguments.of(HoodieTableVersion.EIGHT, HoodieTableVersion.NINE),  // V8 -> V9
-        
+
         // Downgrade test cases til six
         Arguments.of(HoodieTableVersion.NINE, HoodieTableVersion.EIGHT),  // V9 -> V8
         Arguments.of(HoodieTableVersion.EIGHT, HoodieTableVersion.SIX)   // V8 -> V6
+    );
+  }
+
+  private static Stream<Arguments> testArgsUpgradeDowngrade() {
+    return Stream.of(
+        Arguments.of("MOR", RecordMergeMode.EVENT_TIME_ORDERING),
+        Arguments.of("MOR", RecordMergeMode.COMMIT_TIME_ORDERING)
     );
   }
 
@@ -832,12 +863,95 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
 
   private void performDataValidationOnTable(HoodieTableMetaClient metaClient, String stage) {
     LOG.info("Performing data validation on table {}", stage);
-    
+
     try {
       Dataset<Row> tableData = readTableData(metaClient, stage);
       LOG.info("Data validation passed {} (table accessible, {} rows)", stage, tableData.count());
     } catch (Exception e) {
       throw new RuntimeException("Data validation failed " + stage, e);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("testArgsUpgradeDowngrade")
+  public void testPayloadUpgradeDowngrade(String tableType, RecordMergeMode recordMergeMode) throws Exception {
+    // Test upgrade/downgrade with different payload classes
+    String[] payloadTypes = {
+        "default", "overwrite", "partial", "postgres", "mysql",
+        "awsdms", "eventtime", "overwritenondefaults"
+    };
+
+    for (String payloadType : payloadTypes) {
+      LOG.info("Testing payload upgrade/downgrade for: {} (tableType: {}, recordMergeMode: {})",
+          payloadType, tableType, recordMergeMode);
+
+      // Load v6 fixture for this payload type
+      HoodieTableMetaClient metaClientV6 = loadPayloadFixtureTable(HoodieTableVersion.SIX, payloadType);
+      assertEquals(HoodieTableVersion.SIX, metaClientV6.getTableConfig().getTableVersion(),
+          "Fixture table should be at version 6 for payload: " + payloadType);
+
+      // Read original data before upgrade
+      Dataset<Row> originalDataV6 = readTableData(metaClientV6, "original v6 for " + payloadType);
+
+      HoodieWriteConfig config = createWriteConfig(metaClientV6, true);
+
+      // Test upgrade v6 -> v8
+      new UpgradeDowngrade(metaClientV6, config, context(), SparkUpgradeDowngradeHelper.getInstance())
+          .run(HoodieTableVersion.EIGHT, null);
+
+      HoodieTableMetaClient metaClientV8 = HoodieTableMetaClient.builder()
+          .setConf(storageConf().newInstance())
+          .setBasePath(metaClientV6.getBasePath())
+          .build();
+
+      assertEquals(HoodieTableVersion.EIGHT, metaClientV8.getTableConfig().getTableVersion(),
+          "Table should be upgraded to version 8 for payload: " + payloadType);
+      validateDataConsistency(originalDataV6, metaClientV8, "after v6->v8 upgrade for " + payloadType);
+
+      // Test upgrade v8 -> v9 (need to set record merge mode first)
+      Properties props = new Properties();
+      props.setProperty(HoodieTableConfig.RECORD_MERGE_MODE.key(), recordMergeMode.name());
+      HoodieTableConfig.update(metaClientV8.getStorage(), metaClientV8.getMetaPath(), props);
+
+      new UpgradeDowngrade(metaClientV8, config, context(), SparkUpgradeDowngradeHelper.getInstance())
+          .run(HoodieTableVersion.NINE, null);
+
+      HoodieTableMetaClient metaClientV9 = HoodieTableMetaClient.builder()
+          .setConf(storageConf().newInstance())
+          .setBasePath(metaClientV8.getBasePath())
+          .build();
+
+      assertEquals(HoodieTableVersion.NINE, metaClientV9.getTableConfig().getTableVersion(),
+          "Table should be upgraded to version 9 for payload: " + payloadType);
+      validateDataConsistency(originalDataV6, metaClientV9, "after v8->v9 upgrade for " + payloadType);
+
+      // Test downgrade v9 -> v8
+      new UpgradeDowngrade(metaClientV9, config, context(), SparkUpgradeDowngradeHelper.getInstance())
+          .run(HoodieTableVersion.EIGHT, null);
+
+      metaClientV8 = HoodieTableMetaClient.builder()
+          .setConf(storageConf().newInstance())
+          .setBasePath(metaClientV9.getBasePath())
+          .build();
+
+      assertEquals(HoodieTableVersion.EIGHT, metaClientV8.getTableConfig().getTableVersion(),
+          "Table should be downgraded to version 8 for payload: " + payloadType);
+      validateDataConsistency(originalDataV6, metaClientV8, "after v9->v8 downgrade for " + payloadType);
+
+      // Test downgrade v8 -> v6
+      new UpgradeDowngrade(metaClientV8, config, context(), SparkUpgradeDowngradeHelper.getInstance())
+          .run(HoodieTableVersion.SIX, null);
+
+      metaClientV6 = HoodieTableMetaClient.builder()
+          .setConf(storageConf().newInstance())
+          .setBasePath(metaClientV8.getBasePath())
+          .build();
+
+      assertEquals(HoodieTableVersion.SIX, metaClientV6.getTableConfig().getTableVersion(),
+          "Table should be downgraded to version 6 for payload: " + payloadType);
+      validateDataConsistency(originalDataV6, metaClientV6, "after v8->v6 downgrade for " + payloadType);
+
+      LOG.info("Completed payload upgrade/downgrade test for: {}", payloadType);
     }
   }
 }
