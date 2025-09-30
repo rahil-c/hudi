@@ -29,6 +29,7 @@ import org.apache.hudi.common.table.timeline.InstantFileNameGenerator;
 import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieUpgradeDowngradeException;
 import org.apache.hudi.keygen.constant.KeyGeneratorType;
@@ -38,6 +39,7 @@ import org.apache.hudi.testutils.SparkClientFunctionalTestHarness;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SaveMode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -900,9 +902,14 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
 
     HoodieWriteConfig config = createWriteConfig(metaClientV6, true);
 
-    // Test upgrade v6 -> v8
-    new UpgradeDowngrade(metaClientV6, config, context(), SparkUpgradeDowngradeHelper.getInstance())
-        .run(HoodieTableVersion.EIGHT, null);
+    // Test upgrade v6 -> v8 via write operation
+    originalDataV6.write()
+        .format("hudi")
+        .option(HoodieWriteConfig.AUTO_UPGRADE_VERSION.key(), "true")
+        .option(HoodieWriteConfig.WRITE_TABLE_VERSION.key(), String.valueOf(HoodieTableVersion.EIGHT.versionCode()))
+        .option(HoodieWriteConfig.TBL_NAME.key(), metaClientV6.getTableConfig().getTableName())
+        .mode(SaveMode.Append)
+        .save(metaClientV6.getBasePath().toString());
 
     HoodieTableMetaClient metaClientV8 = HoodieTableMetaClient.builder()
         .setConf(storageConf().newInstance())
@@ -913,13 +920,15 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
         "Table should be upgraded to version 8 for payload: " + payloadType);
     validateDataConsistency(originalDataV6, metaClientV8, "after v6->v8 upgrade for " + payloadType);
 
-    // Test upgrade v8 -> v9 (need to set record merge mode first)
-    Properties props = new Properties();
-    props.setProperty(HoodieTableConfig.RECORD_MERGE_MODE.key(), recordMergeMode.name());
-    HoodieTableConfig.update(metaClientV8.getStorage(), metaClientV8.getMetaPath(), props);
-
-    new UpgradeDowngrade(metaClientV8, config, context(), SparkUpgradeDowngradeHelper.getInstance())
-        .run(HoodieTableVersion.NINE, null);
+    // Test upgrade v8 -> v9 via write operation
+    Dataset<Row> dataV8 = readTableData(metaClientV8, "v8 data for v8->v9 upgrade");
+    dataV8.write()
+        .format("hudi")
+        .option(HoodieWriteConfig.AUTO_UPGRADE_VERSION.key(), "true")
+        .option(HoodieWriteConfig.WRITE_TABLE_VERSION.key(), String.valueOf(HoodieTableVersion.NINE.versionCode()))
+        .option(HoodieWriteConfig.TBL_NAME.key(), metaClientV8.getTableConfig().getTableName())
+        .mode(SaveMode.Append)
+        .save(metaClientV8.getBasePath().toString());
 
     HoodieTableMetaClient metaClientV9 = HoodieTableMetaClient.builder()
         .setConf(storageConf().newInstance())

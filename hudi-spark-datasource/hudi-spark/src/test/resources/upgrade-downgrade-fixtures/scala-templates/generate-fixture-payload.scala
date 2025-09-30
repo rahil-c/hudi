@@ -133,12 +133,6 @@ def createPayloadTable(payloadName: String, payloadClass: String): Unit = {
 
   // Service configurations to enable table management operations
   val serviceConfig = Map(
-    "hoodie.cleaner.commits.retained" -> "3",
-    "hoodie.clean.automatic" -> "false",
-    "hoodie.archive.automatic" -> "true",
-    "hoodie.commits.archival.batch" -> "1",
-    "hoodie.archive.merge.min.commits" -> "2",
-    "hoodie.archive.merge.max.commits" -> "3",
     "hoodie.clustering.inline" -> "true",
     "hoodie.clustering.inline.max.commits" -> "2",
     "hoodie.clustering.plan.strategy.small.file.limit" -> "512000",
