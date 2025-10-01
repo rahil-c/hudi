@@ -18,6 +18,7 @@
 
 package org.apache.hudi.table.upgrade;
 
+import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.common.config.RecordMergeMode;
 import org.apache.hudi.common.model.HoodieIndexMetadata;
 import org.apache.hudi.common.table.HoodieTableConfig;
@@ -35,6 +36,7 @@ import org.apache.hudi.exception.HoodieUpgradeDowngradeException;
 import org.apache.hudi.keygen.constant.KeyGeneratorType;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.testutils.SparkClientFunctionalTestHarness;
 
 import org.apache.spark.sql.Dataset;
@@ -962,6 +964,17 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
         "Table should be downgraded to version 6 for payload: " + payloadType);
     validateDataConsistency(expectedData, metaClientV6, "after v9->v6 downgrade for " + payloadType);
 
+    // Perform read-optimized query and validate data
+    // (Note compaction seems to have already occured at this point)
+    // meaning ro_query should have same results as snapshot query
+    LOG.info("Performing read-optimized query for payload: {}", payloadType);
+    Dataset<Row> readOptimizedData = sqlContext().read()
+        .format("hudi")
+        .option("hoodie.datasource.query.type", "read_optimized")
+        .load(metaClientV6.getBasePath().toString());
+
+    assertEquals(6, readOptimizedData.count(),
+        "Read-optimized query should return 6 records after compaction for payload: " + payloadType);
     LOG.info("Completed payload upgrade/downgrade test for: {}", payloadType);
   }
 }
