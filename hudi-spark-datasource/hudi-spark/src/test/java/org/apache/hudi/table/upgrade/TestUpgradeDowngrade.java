@@ -933,20 +933,35 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
         "14 as _event_bin_file",
         "1 as _event_pos",
         "_change_operation_type"
-    );
+    ).cache();
     newRecordData.write()
         .format("hudi")
         .option(HoodieWriteConfig.TBL_NAME.key(), metaClientV9.getTableConfig().getTableName())
         .mode(SaveMode.Append)
         .save(metaClientV9.getBasePath().toString());
 
+    // Create expected dataset: original 5 records + 1 new record = 6 total
+    // Drop Hudi metadata columns from originalDataV6 to match newRecordData schema, as select expr contains only data columns
+    Dataset<Row> originalDataV6WithoutMeta = originalDataV6.drop(
+        "_hoodie_commit_time", "_hoodie_commit_seqno", "_hoodie_record_key",
+        "_hoodie_partition_path", "_hoodie_file_name");
+    Dataset<Row> expectedDataWithNewRecord = originalDataV6WithoutMeta.union(newRecordData).cache();
+
     // Refresh metaclient and read v9 data (which now contains original 5 + 1 new record = 6 total)
     metaClientV9 = HoodieTableMetaClient.builder()
         .setConf(storageConf().newInstance())
         .setBasePath(metaClientV6.getBasePath())
         .build();
-    Dataset<Row> expectedData = readTableData(metaClientV9, "v9 data after new write for " + payloadType);
-    assertEquals(6, expectedData.count(), "v9 table should have 6 records (5 original + 1 new)");
+
+    Dataset<Row> readOptimizedDataUpgradeAndWrite = sqlContext().read()
+            .format("hudi")
+            .option("hoodie.datasource.query.type", "read_optimized")
+            .load(metaClientV9.getBasePath().toString());
+
+    assertEquals(6, readOptimizedDataUpgradeAndWrite.count(),
+            "Read-optimized query should return 6 records after upgrade/write: " + payloadType);
+    // will perform real time query and do dataframe validation
+    validateDataConsistency(expectedDataWithNewRecord, metaClientV9, "dataframe validation after v9 upgrade/write for " + payloadType);
 
     // Test downgrade v9 -> v6
     new UpgradeDowngrade(metaClientV9, config, context(), SparkUpgradeDowngradeHelper.getInstance())
@@ -959,19 +974,15 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
 
     assertEquals(HoodieTableVersion.SIX, metaClientV6.getTableConfig().getTableVersion(),
         "Table should be downgraded to version 6 for payload: " + payloadType);
-    validateDataConsistency(expectedData, metaClientV6, "after v9->v6 downgrade for " + payloadType);
 
-    // Perform read-optimized query and validate data
-    // (Note compaction seems to have already occured at this point)
-    // meaning ro_query should have same results as snapshot query
-    LOG.info("Performing read-optimized query for payload: {}", payloadType);
-    Dataset<Row> readOptimizedData = sqlContext().read()
+    Dataset<Row> readOptimizedDataAfterDowngrade = sqlContext().read()
         .format("hudi")
         .option("hoodie.datasource.query.type", "read_optimized")
         .load(metaClientV6.getBasePath().toString());
 
-    assertEquals(6, readOptimizedData.count(),
-        "Read-optimized query should return 6 records after compaction for payload: " + payloadType);
+    assertEquals(6, readOptimizedDataAfterDowngrade.count(), "Read-optimized query should return 6 records after downgrade: " + payloadType);
+    // will perform real time query and do dataframe validation
+    validateDataConsistency(expectedDataWithNewRecord, metaClientV6, "dataframe validation after v9->v6 downgrade for " + payloadType);
     LOG.info("Completed payload upgrade/downgrade test for: {}", payloadType);
   }
 }
