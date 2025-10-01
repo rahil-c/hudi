@@ -902,68 +902,65 @@ public class TestUpgradeDowngrade extends SparkClientFunctionalTestHarness {
 
     HoodieWriteConfig config = createWriteConfig(metaClientV6, true);
 
-    // Test upgrade v6 -> v8 via write operation
+    // Test upgrade v6 -> v9 via write operation
     originalDataV6.write()
         .format("hudi")
         .option(HoodieWriteConfig.AUTO_UPGRADE_VERSION.key(), "true")
-        .option(HoodieWriteConfig.WRITE_TABLE_VERSION.key(), String.valueOf(HoodieTableVersion.EIGHT.versionCode()))
+        .option(HoodieWriteConfig.WRITE_TABLE_VERSION.key(), String.valueOf(HoodieTableVersion.NINE.versionCode()))
         .option(HoodieWriteConfig.TBL_NAME.key(), metaClientV6.getTableConfig().getTableName())
         .mode(SaveMode.Append)
         .save(metaClientV6.getBasePath().toString());
 
-    HoodieTableMetaClient metaClientV8 = HoodieTableMetaClient.builder()
+    HoodieTableMetaClient metaClientV9 = HoodieTableMetaClient.builder()
         .setConf(storageConf().newInstance())
         .setBasePath(metaClientV6.getBasePath())
         .build();
 
-    assertEquals(HoodieTableVersion.EIGHT, metaClientV8.getTableConfig().getTableVersion(),
-        "Table should be upgraded to version 8 for payload: " + payloadType);
-    validateDataConsistency(originalDataV6, metaClientV8, "after v6->v8 upgrade for " + payloadType);
-
-    // Test upgrade v8 -> v9 via write operation
-    Dataset<Row> dataV8 = readTableData(metaClientV8, "v8 data for v8->v9 upgrade");
-    dataV8.write()
-        .format("hudi")
-        .option(HoodieWriteConfig.AUTO_UPGRADE_VERSION.key(), "true")
-        .option(HoodieWriteConfig.WRITE_TABLE_VERSION.key(), String.valueOf(HoodieTableVersion.NINE.versionCode()))
-        .option(HoodieWriteConfig.TBL_NAME.key(), metaClientV8.getTableConfig().getTableName())
-        .mode(SaveMode.Append)
-        .save(metaClientV8.getBasePath().toString());
-
-    HoodieTableMetaClient metaClientV9 = HoodieTableMetaClient.builder()
-        .setConf(storageConf().newInstance())
-        .setBasePath(metaClientV8.getBasePath())
-        .build();
-
     assertEquals(HoodieTableVersion.NINE, metaClientV9.getTableConfig().getTableVersion(),
         "Table should be upgraded to version 9 for payload: " + payloadType);
-    validateDataConsistency(originalDataV6, metaClientV9, "after v8->v9 upgrade for " + payloadType);
+    validateDataConsistency(originalDataV6, metaClientV9, "after v6->v9 upgrade for " + payloadType);
 
-    // Test downgrade v9 -> v8
-    new UpgradeDowngrade(metaClientV9, config, context(), SparkUpgradeDowngradeHelper.getInstance())
-        .run(HoodieTableVersion.EIGHT, null);
+    // Add one new record to v9 table by modifying one existing row
+    // Read from upgraded table to get correct schema (with _change_operation_type and proper types)
+    Dataset<Row> dataAfterUpgrade = readTableData(metaClientV9, "v9 data for new record");
+    Dataset<Row> newRecordData = dataAfterUpgrade.limit(1).selectExpr(
+        "14 as ts",
+        "8L as _event_lsn",
+        "'rider-NEW' as rider",
+        "'driver-NEW' as driver",
+        "fare",
+        "Op",
+        "'14.1' as _event_seq",
+        "14 as _event_bin_file",
+        "1 as _event_pos",
+        "_change_operation_type"
+    );
+    newRecordData.write()
+        .format("hudi")
+        .option(HoodieWriteConfig.TBL_NAME.key(), metaClientV9.getTableConfig().getTableName())
+        .mode(SaveMode.Append)
+        .save(metaClientV9.getBasePath().toString());
 
-    metaClientV8 = HoodieTableMetaClient.builder()
+    // Refresh metaclient and read v9 data (which now contains original 5 + 1 new record = 6 total)
+    metaClientV9 = HoodieTableMetaClient.builder()
         .setConf(storageConf().newInstance())
-        .setBasePath(metaClientV9.getBasePath())
+        .setBasePath(metaClientV6.getBasePath())
         .build();
+    Dataset<Row> expectedData = readTableData(metaClientV9, "v9 data after new write for " + payloadType);
+    assertEquals(6, expectedData.count(), "v9 table should have 6 records (5 original + 1 new)");
 
-    assertEquals(HoodieTableVersion.EIGHT, metaClientV8.getTableConfig().getTableVersion(),
-        "Table should be downgraded to version 8 for payload: " + payloadType);
-    validateDataConsistency(originalDataV6, metaClientV8, "after v9->v8 downgrade for " + payloadType);
-
-    // Test downgrade v8 -> v6
-    new UpgradeDowngrade(metaClientV8, config, context(), SparkUpgradeDowngradeHelper.getInstance())
+    // Test downgrade v9 -> v6
+    new UpgradeDowngrade(metaClientV9, config, context(), SparkUpgradeDowngradeHelper.getInstance())
         .run(HoodieTableVersion.SIX, null);
 
     metaClientV6 = HoodieTableMetaClient.builder()
         .setConf(storageConf().newInstance())
-        .setBasePath(metaClientV8.getBasePath())
+        .setBasePath(metaClientV9.getBasePath())
         .build();
 
     assertEquals(HoodieTableVersion.SIX, metaClientV6.getTableConfig().getTableVersion(),
         "Table should be downgraded to version 6 for payload: " + payloadType);
-    validateDataConsistency(originalDataV6, metaClientV6, "after v8->v6 downgrade for " + payloadType);
+    validateDataConsistency(expectedData, metaClientV6, "after v9->v6 downgrade for " + payloadType);
 
     LOG.info("Completed payload upgrade/downgrade test for: {}", payloadType);
   }
