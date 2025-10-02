@@ -245,7 +245,7 @@ class TestPayloadDeprecationFlow extends SparkClientFunctionalTestHarness {
     val df = spark.read.format("hudi").load(basePath)
     val finalDf = df.select("ts", "_event_lsn", "rider", "driver", "fare", "Op", "_event_seq", DebeziumConstants.FLATTENED_FILE_COL_NAME, DebeziumConstants.FLATTENED_POS_COL_NAME, DebeziumConstants.FLATTENED_OP_COL_NAME)
       .sort("_event_lsn")
-    val expectedData = getExpectedResultForSnapshotQuery(payloadClazz, useOpAsDelete, setOrderingField)
+    val expectedData = getExpectedResultForSnapshotQuery(payloadClazz, useOpAsDelete, setOrderingField, tableType)
     val expectedDf = spark.createDataFrame(spark.sparkContext.parallelize(expectedData)).toDF(columns: _*).sort("_event_lsn")
     assertTrue(expectedDf.except(finalDf).isEmpty && finalDf.except(expectedDf).isEmpty)
     // Validate time travel query. Reading from v8 log file will not work for MySQLDebeziumAvroPayload due to the change from a single ordering field, to two ordering fields.
@@ -472,7 +472,7 @@ def testMergerBuiltinPayloadFromTableCreationPath(tableType: String,
     val df = spark.read.format("hudi").load(basePath)
     val finalDf = df.select("ts", "_event_lsn", "rider", "driver", "fare", "Op", "_event_seq", DebeziumConstants.FLATTENED_FILE_COL_NAME, DebeziumConstants.FLATTENED_POS_COL_NAME, DebeziumConstants.FLATTENED_OP_COL_NAME)
       .sort("_event_lsn")
-    val expectedData = getExpectedResultForSnapshotQuery(payloadClazz, useOpAsDelete, setOrderingField)
+    val expectedData = getExpectedResultForSnapshotQuery(payloadClazz, useOpAsDelete, setOrderingField, tableType)
     val expectedDf = spark.createDataFrame(spark.sparkContext.parallelize(expectedData)).toDF(columns: _*).sort("_event_lsn")
     assertTrue(expectedDf.except(finalDf).isEmpty && finalDf.except(expectedDf).isEmpty)
     // Validate time travel query.
@@ -602,12 +602,12 @@ def testMergerBuiltinPayloadFromTableCreationPath(tableType: String,
       "Data should remain consistent after downgrade including new row")
   }
 
-  def getExpectedResultForSnapshotQuery(payloadClazz: String, usesDeleteMarker: Boolean, hasOrderingField: Boolean): Seq[(Int, Long, String, String, Double, String, String, Int, Int, String)] = {
+  def getExpectedResultForSnapshotQuery(payloadClazz: String, usesDeleteMarker: Boolean, hasOrderingField: Boolean, tableType: String): Seq[(Int, Long, String, String, Double, String, String, Int, Int, String)] = {
     if (!isCDCPayload(payloadClazz) && !usesDeleteMarker) {
       if (payloadClazz.equals(classOf[PartialUpdateAvroPayload].getName)
         || payloadClazz.equals(classOf[EventTimeAvroPayload].getName)
         || payloadClazz.equals(classOf[DefaultHoodieRecordPayload].getName)
-        || (payloadClazz.equals(classOf[OverwriteWithLatestAvroPayload].getName) && hasOrderingField))
+        || (payloadClazz.equals(classOf[OverwriteWithLatestAvroPayload].getName) && hasOrderingField && tableType.equals(HoodieTableType.MERGE_ON_READ.name())))
       {
         // Expected results after all operations with _event_lsn collisions:
         // - rider-X (_event_lsn=1): deleted with higher ordering (ts=12)
