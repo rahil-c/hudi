@@ -23,6 +23,7 @@ import org.apache.hudi.common.util
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.storage.HoodieLanceRecordIterator
 import org.apache.hudi.storage.StorageConfiguration
+
 import com.lancedb.lance.file.LanceFileReader
 import org.apache.arrow.memory.RootAllocator
 import org.apache.hadoop.conf.Configuration
@@ -35,6 +36,7 @@ import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.LanceArrowUtils
 
 import java.io.IOException
+
 import scala.collection.JavaConverters._
 
 /**

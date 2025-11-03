@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.hudi.analysis
 
-import org.apache.hudi.{DataSourceReadOptions, DefaultSource, SparkAdapterSupport}
+import org.apache.hudi.{DataSourceReadOptions, DefaultSource, SparkAdapterSupport, VectorSearchRelation}
 import org.apache.hudi.storage.StoragePath
 
 import org.apache.spark.sql.{AnalysisException, SparkSession}
@@ -149,6 +149,29 @@ case class ResolveReferences(spark: SparkSession) extends Rule[LogicalPlan]
           (catalogTable.location.toString + "/.hoodie/metadata")))
         LogicalRelation(relation, catalogTable)
       }
+    case HoodieVectorSearch(args) =>
+      val params = HoodieVectorSearch.parseOptions(args, spark)
+
+      val resolvedTablePath = if (params.tableNameOrPath.contains(StoragePath.SEPARATOR)) {
+        // the first param is table path
+        params.tableNameOrPath
+      } else {
+        // the first param is table identifier
+        val tableId = spark.sessionState.sqlParser.parseTableIdentifier(params.tableNameOrPath)
+        val catalogTable = spark.sessionState.catalog.getTableMetadata(tableId)
+        catalogTable.location.toString
+      }
+
+      val relation = new VectorSearchRelation(
+        spark,
+        resolvedTablePath,
+        params.embeddingColumn,
+        params.queryVector,
+        params.topK,
+        params.distanceMetric
+      )
+
+      LogicalRelation(relation)
     case mO@MatchMergeIntoTable(targetTableO, sourceTableO, _)
       // START: custom Hudi change: don't want to go to the spark mit resolution so we resolve the source and target
       // if they haven't been
