@@ -24,6 +24,7 @@ import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordLocation;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.io.storage.HoodieAvroFileReader;
@@ -262,7 +263,7 @@ public abstract class TestHoodieReaderWriterBase {
 
   private void verifyReaderWithSchema(String schemaPath, HoodieAvroFileReader hoodieReader) throws IOException {
     Schema evolvedSchema = getSchemaFromResource(TestHoodieReaderWriterBase.class, schemaPath);
-    Iterator<HoodieRecord<IndexedRecord>> iter = hoodieReader.getRecordIterator(evolvedSchema);
+    Iterator<HoodieRecord<IndexedRecord>> iter = hoodieReader.getRecordIterator(HoodieSchema.fromAvroSchema(evolvedSchema));
     int index = 0;
     while (iter.hasNext()) {
       verifyRecord(schemaPath, (GenericRecord) iter.next().getData(), index);
