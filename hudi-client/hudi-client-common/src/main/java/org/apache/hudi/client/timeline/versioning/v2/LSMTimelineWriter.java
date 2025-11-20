@@ -26,6 +26,7 @@ import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieLSMTimelineManifest;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.ActiveAction;
 import org.apache.hudi.common.table.timeline.LSMTimeline;
@@ -302,7 +303,9 @@ public class LSMTimelineWriter {
             .getReaderFactory(HoodieRecord.HoodieRecordType.AVRO)
             .getFileReader(config, new StoragePath(archivePath, fileName))) {
           // Read the meta entry
-          try (ClosableIterator<IndexedRecord> iterator = reader.getIndexedRecordIterator(HoodieLSMTimelineInstant.getClassSchema(), HoodieLSMTimelineInstant.getClassSchema())) {
+          //TODO boundary to revisit in later pr to use HoodieSchema directly
+          try (ClosableIterator<IndexedRecord> iterator = reader.getIndexedRecordIterator(HoodieSchema.fromAvroSchema(HoodieLSMTimelineInstant.getClassSchema()),
+                  HoodieSchema.fromAvroSchema(HoodieLSMTimelineInstant.getClassSchema()))) {
             while (iterator.hasNext()) {
               IndexedRecord record = iterator.next();
               writer.write(record.get(0).toString(), new HoodieAvroIndexedRecord(record), HoodieLSMTimelineInstant.getClassSchema());

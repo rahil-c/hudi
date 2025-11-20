@@ -64,7 +64,7 @@ public abstract class HoodieBootstrapFileReader<T> implements HoodieFileReader<T
   public ClosableIterator<HoodieRecord<T>> getRecordIterator(HoodieSchema readerSchema, HoodieSchema requestedSchema) throws IOException {
     ClosableIterator<HoodieRecord<T>> skeletonIterator = skeletonFileReader.getRecordIterator(readerSchema, requestedSchema);
     // TODO boundary for now to revisit HoodieAvroUtils in later pr to use HoodieSchema
-    Schema avroReaderSchema =readerSchema.getAvroSchema();
+    Schema avroReaderSchema = readerSchema.getAvroSchema();
     Schema dataReaderFields = HoodieAvroUtils.removeMetadataFields(avroReaderSchema);
     ClosableIterator<HoodieRecord<T>> dataFileIterator = dataFileReader.getRecordIterator(HoodieSchema.fromAvroSchema(dataReaderFields), requestedSchema);
     return new HoodieBootstrapRecordIterator<T>(skeletonIterator, dataFileIterator, readerSchema, partitionFields, partitionValues) {
@@ -118,7 +118,7 @@ public abstract class HoodieBootstrapFileReader<T> implements HoodieFileReader<T
   public HoodieSchema getSchema() {
     // return merged schema (meta fields + data file schema)
     // TODO boundary for now to revisit HoodieAvroUtils in later pr to use HoodieSchema
-    Schema avroReaderSchema =dataFileReader.getSchema().getAvroSchema();
+    Schema avroReaderSchema = dataFileReader.getSchema().getAvroSchema();
     return HoodieSchema.fromAvroSchema(HoodieAvroUtils.addMetadataFields(avroReaderSchema));
   }
 
