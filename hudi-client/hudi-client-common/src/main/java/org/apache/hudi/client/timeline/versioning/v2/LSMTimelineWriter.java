@@ -147,7 +147,7 @@ public class LSMTimelineWriter {
           preWriteCallback.ifPresent(callback -> callback.accept(activeAction));
           // in local FS and HDFS, there could be empty completed instants due to crash.
           final HoodieLSMTimelineInstant metaEntry = MetadataConversionUtils.createLSMTimelineInstant(activeAction, metaClient);
-          writer.write(metaEntry.getInstantTime(), new HoodieAvroIndexedRecord(metaEntry), wrapperSchema);
+          writer.write(metaEntry.getInstantTime(), new HoodieAvroIndexedRecord(metaEntry), HoodieSchema.fromAvroSchema(wrapperSchema));
         } catch (Exception e) {
           LOG.error("Failed to write instant: " + activeAction.getInstantTime(), e);
           exceptionHandler.ifPresent(handler -> handler.accept(e));
@@ -308,7 +308,7 @@ public class LSMTimelineWriter {
                   HoodieSchema.fromAvroSchema(HoodieLSMTimelineInstant.getClassSchema()))) {
             while (iterator.hasNext()) {
               IndexedRecord record = iterator.next();
-              writer.write(record.get(0).toString(), new HoodieAvroIndexedRecord(record), HoodieLSMTimelineInstant.getClassSchema());
+              writer.write(record.get(0).toString(), new HoodieAvroIndexedRecord(record), HoodieSchema.fromAvroSchema(HoodieLSMTimelineInstant.getClassSchema()));
             }
           }
         }
@@ -424,7 +424,7 @@ public class LSMTimelineWriter {
   private HoodieFileWriter openWriter(StoragePath filePath) {
     try {
       return HoodieFileWriterFactory.getFileWriter("", filePath, metaClient.getStorage(), getOrCreateWriterConfig(),
-          HoodieLSMTimelineInstant.getClassSchema(), taskContextSupplier, HoodieRecord.HoodieRecordType.AVRO);
+          HoodieSchema.fromAvroSchema(HoodieLSMTimelineInstant.getClassSchema()), taskContextSupplier, HoodieRecord.HoodieRecordType.AVRO);
     } catch (IOException e) {
       throw new HoodieException("Unable to initialize archiving writer", e);
     }
