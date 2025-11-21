@@ -188,7 +188,7 @@ public abstract class TestHoodieReaderWriterBase {
       record.put("time", Integer.toString(i));
       record.put("number", i);
       HoodieRecord avroRecord = new HoodieAvroIndexedRecord(record);
-      writer.write(key, avroRecord, avroSchema);
+      writer.write(key, avroRecord, HoodieSchema.fromAvroSchema(avroSchema));
     }
     writer.close();
   }
