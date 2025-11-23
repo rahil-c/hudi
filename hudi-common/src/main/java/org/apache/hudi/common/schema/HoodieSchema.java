@@ -377,20 +377,6 @@ public class HoodieSchema implements Serializable {
   }
 
   /**
-   * If this is a union schema representing a null, it returns the underlying non-null type.
-   * @return the underlying non-null HoodieSchema
-   */
-  public HoodieSchema getUnderlyingType() {
-    if (HoodieSchemaType.UNION == type) {
-      return getTypes().stream()
-          .filter(schema -> schema.getType() != HoodieSchemaType.NULL)
-          .findFirst()
-          .orElseThrow(() -> new IllegalArgumentException("No non-null type found in Union"));
-    }
-    return this;
-  }
-
-  /**
    * Returns the name of the schema if a record, otherwise it returns the name of the type.
    *
    * @return the schema name
