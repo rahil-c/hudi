@@ -316,9 +316,7 @@ public class TestHoodieSchema {
       stringSchema.getTypes();
     }, "Should throw exception when getting types from non-union schema");
 
-    assertThrows(IllegalStateException.class, () -> {
-      stringSchema.getNonNullType();
-    }, "Should throw exception when getting non-null type from non-union schema");
+    assertSame(stringSchema, stringSchema.getNonNullType());
   }
 
   @Test
