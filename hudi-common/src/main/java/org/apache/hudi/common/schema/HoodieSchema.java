@@ -509,16 +509,11 @@ public class HoodieSchema implements Serializable {
    *
    * @return the schema name
    */
-<<<<<<< HEAD
-  public String getName() {
-    return avroSchema.getName();
-=======
   public Option<String> getName() {
     if (avroSchema.getLogicalType() != null) {
       return Option.of(type.name().toLowerCase(Locale.ENGLISH));
     }
     return Option.ofNullable(avroSchema.getName());
->>>>>>> c9498a018b33 (update javadocs, update testing)
   }
 
   /**

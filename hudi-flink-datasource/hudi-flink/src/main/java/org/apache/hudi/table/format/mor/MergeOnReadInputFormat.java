@@ -23,6 +23,7 @@ import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieFileGroupId;
 import org.apache.hudi.common.model.HoodieLogFile;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.read.HoodieFileGroupReader;
 import org.apache.hudi.common.util.ValidationUtils;
@@ -301,8 +302,8 @@ public class MergeOnReadInputFormat
    */
   protected ClosableIterator<RowData> getSplitRowIterator(
       MergeOnReadInputSplit split,
-      Schema tableSchema,
-      Schema requiredSchema,
+      HoodieSchema tableSchema,
+      HoodieSchema requiredSchema,
       String mergeType,
       boolean emitDelete) throws IOException {
     HoodieFileGroupReader<RowData> fileGroupReader = createFileGroupReader(split, tableSchema, requiredSchema, mergeType, emitDelete);
@@ -322,8 +323,8 @@ public class MergeOnReadInputFormat
    */
   protected HoodieFileGroupReader<RowData> createFileGroupReader(
       MergeOnReadInputSplit split,
-      Schema tableSchema,
-      Schema requiredSchema,
+      HoodieSchema tableSchema,
+      HoodieSchema requiredSchema,
       String mergeType,
       boolean emitDelete) {
     FileSlice fileSlice = new FileSlice(
