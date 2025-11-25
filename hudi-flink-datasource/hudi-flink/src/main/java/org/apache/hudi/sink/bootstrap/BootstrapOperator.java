@@ -18,7 +18,6 @@
 
 package org.apache.hudi.sink.bootstrap;
 
-import org.apache.avro.Schema;
 import org.apache.hudi.client.common.HoodieFlinkEngineContext;
 import org.apache.hudi.client.model.HoodieFlinkInternalRow;
 import org.apache.hudi.common.fs.FSUtils;
@@ -218,7 +217,8 @@ public class BootstrapOperator
     Option<HoodieInstant> latestCommitTime = commitsTimeline.filterCompletedAndCompactionInstants().lastInstant();
 
     if (latestCommitTime.isPresent()) {
-      Schema schema = new TableSchemaResolver(this.hoodieTable.getMetaClient()).getTableAvroSchema();
+      HoodieSchema schema = HoodieSchema.fromAvroSchema(
+          new TableSchemaResolver(this.hoodieTable.getMetaClient()).getTableAvroSchema());
 
       List<FileSlice> fileSlices = this.hoodieTable.getSliceView()
           .getLatestMergedFileSlicesBeforeOrOn(partitionPath, latestCommitTime.get().requestedTime())
@@ -229,7 +229,7 @@ public class BootstrapOperator
           continue;
         }
         LOG.info("Load records from {}.", fileSlice);
-        try (ClosableIterator<String> recordKeyIterator = getRecordKeyIterator(fileSlice, HoodieSchema.fromAvroSchema(schema))) {
+        try (ClosableIterator<String> recordKeyIterator = getRecordKeyIterator(fileSlice, schema)) {
           while (recordKeyIterator.hasNext()) {
             String recordKey = recordKeyIterator.next();
             insertIndexStreamRecord(recordKey, partitionPath, fileSlice);

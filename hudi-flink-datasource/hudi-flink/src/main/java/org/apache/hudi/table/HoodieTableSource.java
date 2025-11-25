@@ -493,7 +493,7 @@ public class HoodieTableSource implements
   private InputFormat<RowData, ?> getStreamInputFormat() {
     // if table does not exist or table data does not exist, use schema from the DDL
     HoodieSchema tableSchema = (this.metaClient == null || !tableDataExists()) ? inferSchemaFromDdl() : getTableHoodieSchema();
-    final DataType rowDataType = AvroSchemaConverter.convertToDataType(tableSchema);
+    final DataType rowDataType = AvroSchemaConverter.convertToDataType(tableSchema.getAvroSchema());
     final RowType rowType = (RowType) rowDataType.getLogicalType();
     final RowType requiredRowType = (RowType) getProducedDataType().notNull().getLogicalType();
 

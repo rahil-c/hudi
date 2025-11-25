@@ -19,7 +19,7 @@
 package org.apache.hudi.table.format.cdc;
 
 import org.apache.avro.Schema;
-import org.apache.hudi.avro.AvroSchemaCache;
+import org.apache.hudi.common.schema.HoodieSchemaCache;
 import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.client.model.HoodieFlinkRecord;
 import org.apache.hudi.common.config.TypedProperties;
@@ -31,6 +31,7 @@ import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieOperation;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.cdc.HoodieCDCFileSplit;
 import org.apache.hudi.common.table.cdc.HoodieCDCSupplementalLoggingMode;
@@ -140,8 +141,8 @@ public class CdcInputFormat extends MergeOnReadInputFormat {
   private ClosableIterator<RowData> getFileSliceIterator(MergeOnReadInputSplit split) {
     try {
       // get full schema iterator.
-      final Schema tableSchema = AvroSchemaCache.intern(new Schema.Parser().parse(tableState.getAvroSchema()));
-      final HoodieSchema schema = HoodieSchema.fromAvroSchema(tableSchema);
+      final HoodieSchema schema = HoodieSchemaCache.intern(
+          new HoodieSchema.Parser().parse(tableState.getAvroSchema()));
       // before/after images have assumption of snapshot scan, so `emitDelete` is set as false
       return getSplitRowIterator(split, schema, schema, FlinkOptions.REALTIME_PAYLOAD_COMBINE, false);
     } catch (IOException e) {
@@ -181,7 +182,7 @@ public class CdcInputFormat extends MergeOnReadInputFormat {
         MergeOnReadInputSplit inputSplit = fileSlice2Split(tablePath, fileSlice, maxCompactionMemoryInBytes);
         return new RemoveBaseFileIterator(tableState, getFileSliceIterator(inputSplit));
       case AS_IS:
-        Schema dataSchema = HoodieAvroUtils.removeMetadataFields(new Schema.Parser().parse(tableState.getAvroSchema()));
+        HoodieSchema dataSchema = HoodieSchemaUtils.removeMetadataFields(new HoodieSchema.Parser().parse(tableState.getAvroSchema()));
         Schema cdcSchema = HoodieCDCUtils.schemaBySupplementalLoggingMode(mode, dataSchema);
         switch (mode) {
           case DATA_BEFORE_AFTER:
@@ -215,8 +216,8 @@ public class CdcInputFormat extends MergeOnReadInputFormat {
    * @return {@link RowData} iterator for the given split.
    */
   private ClosableIterator<HoodieRecord<RowData>> getSplitRecordIterator(MergeOnReadInputSplit split) throws IOException {
-    final Schema tableSchema = AvroSchemaCache.intern(new Schema.Parser().parse(tableState.getAvroSchema()));
-    final HoodieSchema schema = HoodieSchema.fromAvroSchema(tableSchema);
+    final HoodieSchema schema = HoodieSchemaCache.intern(
+        new HoodieSchema.Parser().parse(tableState.getAvroSchema()));
     HoodieFileGroupReader<RowData> fileGroupReader =
         createFileGroupReader(split, schema, schema, FlinkOptions.REALTIME_PAYLOAD_COMBINE, true);
     return fileGroupReader.getClosableHoodieRecordIterator();
@@ -363,7 +364,7 @@ public class CdcInputFormat extends MergeOnReadInputFormat {
         MergeOnReadTableState tableState,
         ClosableIterator<HoodieRecord<RowData>> logRecordIterator,
         HoodieTableMetaClient metaClient) throws IOException {
-      this.tableSchema = new Schema.Parser().parse(tableState.getAvroSchema());
+      this.tableSchema = new HoodieSchema.Parser().parse(tableState.getAvroSchema()).getAvroSchema();
       this.maxCompactionMemoryInBytes = maxCompactionMemoryInBytes;
       this.imageManager = imageManager;
       this.projection = tableState.getRequiredRowType().equals(tableState.getRowType())
@@ -495,7 +496,7 @@ public class CdcInputFormat extends MergeOnReadInputFormat {
         MergeOnReadTableState tableState,
         Schema cdcSchema,
         HoodieCDCFileSplit fileSplit) {
-      this.requiredSchema = new Schema.Parser().parse(tableState.getRequiredAvroSchema());
+      this.requiredSchema = new HoodieSchema.Parser().parse(tableState.getRequiredAvroSchema()).getAvroSchema();
       this.requiredPos = getRequiredPos(tableState.getAvroSchema(), this.requiredSchema);
       this.recordBuilder = new GenericRecordBuilder(requiredSchema);
       this.avroToRowDataConverter = AvroToRowDataConverters.createRowConverter(tableState.getRequiredRowType());
@@ -513,7 +514,7 @@ public class CdcInputFormat extends MergeOnReadInputFormat {
     }
 
     private int[] getRequiredPos(String tableSchema, Schema required) {
-      Schema dataSchema = HoodieAvroUtils.removeMetadataFields(new Schema.Parser().parse(tableSchema));
+      Schema dataSchema = HoodieAvroUtils.removeMetadataFields(new HoodieSchema.Parser().parse(tableSchema).getAvroSchema());
       List<String> fields = dataSchema.getFields().stream().map(Schema.Field::name).collect(Collectors.toList());
       return required.getFields().stream()
           .map(f -> fields.indexOf(f.name()))
