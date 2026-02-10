@@ -44,7 +44,7 @@ object HoodieSparkSchemaConverters {
   /**
    * Internal wrapper for SQL data type and nullability.
    */
-  case class SchemaType(dataType: DataType, nullable: Boolean)
+  case class SchemaType(dataType: DataType, nullable: Boolean, metadata: Option[Metadata] = None)
 
   def toSqlType(hoodieSchema: HoodieSchema): (DataType, Boolean) = {
     val result = toSqlTypeHelper(hoodieSchema, Set.empty)
@@ -54,7 +54,8 @@ object HoodieSparkSchemaConverters {
   def toHoodieType(catalystType: DataType,
                    nullable: Boolean = false,
                    recordName: String = "topLevelRecord",
-                   nameSpace: String = ""): HoodieSchema = {
+                   nameSpace: String = "",
+                   metadata: Metadata = Metadata.empty): HoodieSchema = {
     val schema = catalystType match {
       // Primitive types
       case BooleanType => HoodieSchema.create(HoodieSchemaType.BOOLEAN)
@@ -78,6 +79,23 @@ object HoodieSparkSchemaConverters {
         HoodieSchema.createDecimal(name, nameSpace, null, d.precision, d.scale, fixedSize)
 
       // Complex types
+      // Check for VECTOR type metadata property in spark struct type
+      case arrayType @ ArrayType(FloatType, containsNull) // for now checking floats but will need to check element type
+          if metadata.contains("hoodie.vector.dimension") =>
+        if (containsNull) {
+          throw new IncompatibleSchemaException(
+            s"VECTOR type does not support nullable elements (field: $recordName)")
+        }
+
+        val dimension = metadata.getLong("hoodie.vector.dimension").toInt
+        if (dimension <= 0) {
+          throw new IncompatibleSchemaException(
+            s"VECTOR dimension must be positive, got: $dimension (field: $recordName)")
+        }
+
+        // Create VECTOR schema (FLOAT only for now)
+        HoodieSchema.createVector(dimension, HoodieSchema.Vector.ELEMENT_TYPE_FLOAT)
+
       case ArrayType(elementType, containsNull) =>
         val elementSchema = toHoodieType(elementType, containsNull, recordName, nameSpace)
         HoodieSchema.createArray(elementSchema)
@@ -103,7 +121,7 @@ object HoodieSparkSchemaConverters {
         } else {
           // Create record
           val fields = st.map { f =>
-            val fieldSchema = toHoodieType(f.dataType, f.nullable, f.name, childNameSpace)
+            val fieldSchema = toHoodieType(f.dataType, f.nullable, f.name, childNameSpace, f.metadata)
             val doc = f.getComment.orNull
             // Match existing Avro SchemaConverters behavior: use NULL_VALUE for nullable unions
             // to avoid serializing "default":null in JSON representation
@@ -177,6 +195,26 @@ object HoodieSparkSchemaConverters {
       case HoodieSchemaType.UUID =>
         SchemaType(StringType, nullable = false)
 
+      case HoodieSchemaType.VECTOR =>
+        val vectorSchema = hoodieSchema.asInstanceOf[HoodieSchema.Vector]
+        val dimension = vectorSchema.getDimension
+        val elementTypeStr = vectorSchema.getVectorElementType
+
+        // Currently only FLOAT supported,
+        // ensure we can also take double later
+        if (elementTypeStr != "FLOAT") {
+          throw new IncompatibleSchemaException(
+            s"Unsupported vector element type: $elementTypeStr. Only FLOAT is currently supported.")
+        }
+
+        // Reconstruct ArrayType with dimension metadata
+        val metadata = new MetadataBuilder()
+          .putLong("hoodie.vector.dimension", dimension)
+          .build()
+
+        // Return SchemaType with metadata (containsNull=false for vector elements)
+        SchemaType(ArrayType(FloatType, containsNull = false), nullable = false, Some(metadata))
+
       // Complex types
       case HoodieSchemaType.RECORD =>
         val fullName = hoodieSchema.getFullName
@@ -190,12 +228,26 @@ object HoodieSparkSchemaConverters {
         val newRecordNames = existingRecordNames + fullName
         val fields = hoodieSchema.getFields.asScala.map { f =>
           val schemaType = toSqlTypeHelper(f.schema(), newRecordNames)
-          val metadata = if (f.doc().isPresent && !f.doc().get().isEmpty) {
-            new MetadataBuilder().putString("comment", f.doc().get()).build()
-          } else {
-            Metadata.empty
+          val metadataBuilder = new MetadataBuilder()
+
+          // Add comment if present
+          if (f.doc().isPresent && !f.doc().get().isEmpty) {
+            metadataBuilder.putString("comment", f.doc().get())
           }
-          StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)
+
+          // Merge in metadata from schemaType (e.g., vector dimension)
+          val finalMetadata = schemaType.metadata match {
+            //TODO need to check more on this if we need to copy the properties from metadata oobject
+            // currently the map is private in Metadata m variable
+            case Some(m) if m.contains("hoodie.vector.dimension") =>
+              // Handle VECTOR metadata specifically
+              metadataBuilder.putLong("hoodie.vector.dimension", m.getLong("hoodie.vector.dimension"))
+              metadataBuilder.build()
+            case _ =>
+              metadataBuilder.build()
+          }
+
+          StructField(f.name(), schemaType.dataType, schemaType.nullable, finalMetadata)
         }
         SchemaType(StructType(fields.toSeq), nullable = false)
 
