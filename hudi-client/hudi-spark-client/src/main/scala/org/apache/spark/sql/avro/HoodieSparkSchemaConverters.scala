@@ -195,61 +195,49 @@ object HoodieSparkSchemaConverters {
       case HoodieSchemaType.UUID =>
         SchemaType(StringType, nullable = false)
 
-      case HoodieSchemaType.VECTOR =>
-        val vectorSchema = hoodieSchema.asInstanceOf[HoodieSchema.Vector]
-        val dimension = vectorSchema.getDimension
-        val elementTypeStr = vectorSchema.getVectorElementType
-
-        // Currently only FLOAT supported,
-        // ensure we can also take double later
-        if (elementTypeStr != "FLOAT") {
-          throw new IncompatibleSchemaException(
-            s"Unsupported vector element type: $elementTypeStr. Only FLOAT is currently supported.")
-        }
-
-        // Reconstruct ArrayType with dimension metadata
-        val metadata = new MetadataBuilder()
-          .putLong("hoodie.vector.dimension", dimension)
-          .build()
-
-        // Return SchemaType with metadata (containsNull=false for vector elements)
-        SchemaType(ArrayType(FloatType, containsNull = false), nullable = false, Some(metadata))
-
       // Complex types
-      case HoodieSchemaType.RECORD =>
-        val fullName = hoodieSchema.getFullName
-        if (existingRecordNames.contains(fullName)) {
-          throw new IncompatibleSchemaException(
-            s"""
-               |Found recursive reference in HoodieSchema, which cannot be processed by Spark:
-               |$fullName
-             """.stripMargin)
-        }
-        val newRecordNames = existingRecordNames + fullName
-        val fields = hoodieSchema.getFields.asScala.map { f =>
-          val schemaType = toSqlTypeHelper(f.schema(), newRecordNames)
-          val metadataBuilder = new MetadataBuilder()
+      case HoodieSchemaType.VECTOR | HoodieSchemaType.RECORD =>
+        // Check if this is a VECTOR logical type first
+        if (hoodieSchema.getType != null &&
+            hoodieSchema.getName == "vector") {
+          val vectorSchema = hoodieSchema.asInstanceOf[HoodieSchema.Vector]
+          val dimension = vectorSchema.getDimension
+          val elementTypeStr = vectorSchema.getVectorElementType
 
-          // Add comment if present
-          if (f.doc().isPresent && !f.doc().get().isEmpty) {
-            metadataBuilder.putString("comment", f.doc().get())
+          // Currently only FLOAT supported
+          if (elementTypeStr != "FLOAT") {
+            throw new IncompatibleSchemaException(
+              s"Unsupported vector element type: $elementTypeStr. Only FLOAT is currently supported.")
           }
 
-          // Merge in metadata from schemaType (e.g., vector dimension)
-          val finalMetadata = schemaType.metadata match {
-            //TODO need to check more on this if we need to copy the properties from metadata oobject
-            // currently the map is private in Metadata m variable
-            case Some(m) if m.contains("hoodie.vector.dimension") =>
-              // Handle VECTOR metadata specifically
-              metadataBuilder.putLong("hoodie.vector.dimension", m.getLong("hoodie.vector.dimension"))
-              metadataBuilder.build()
-            case _ =>
-              metadataBuilder.build()
-          }
+          // Return ArrayType with dimension metadata
+          val metadata = new MetadataBuilder()
+            .putLong("hoodie.vector.dimension", dimension)
+            .build()
 
-          StructField(f.name(), schemaType.dataType, schemaType.nullable, finalMetadata)
+          SchemaType(ArrayType(FloatType, containsNull = false), nullable = false, Some(metadata))
+        } else {
+          // Handle normal RECORD
+          val fullName = hoodieSchema.getFullName
+          if (existingRecordNames.contains(fullName)) {
+            throw new IncompatibleSchemaException(
+              s"""
+                 |Found recursive reference in HoodieSchema, which cannot be processed by Spark:
+                 |$fullName
+               """.stripMargin)
+          }
+          val newRecordNames = existingRecordNames + fullName
+          val fields = hoodieSchema.getFields.asScala.map { f =>
+            val schemaType = toSqlTypeHelper(f.schema(), newRecordNames)
+            val metadata = if (f.doc().isPresent && !f.doc().get().isEmpty) {
+              new MetadataBuilder().putString("comment", f.doc().get()).build()
+            } else {
+              Metadata.empty
+            }
+            StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)
+          }
+          SchemaType(StructType(fields.toSeq), nullable = false)
         }
-        SchemaType(StructType(fields.toSeq), nullable = false)
 
       case HoodieSchemaType.ARRAY =>
         val elementSchema = hoodieSchema.getElementType
