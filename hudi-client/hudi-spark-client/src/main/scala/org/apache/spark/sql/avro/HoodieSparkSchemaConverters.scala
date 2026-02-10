@@ -229,10 +229,24 @@ object HoodieSparkSchemaConverters {
           val newRecordNames = existingRecordNames + fullName
           val fields = hoodieSchema.getFields.asScala.map { f =>
             val schemaType = toSqlTypeHelper(f.schema(), newRecordNames)
-            val metadata = if (f.doc().isPresent && !f.doc().get().isEmpty) {
-              new MetadataBuilder().putString("comment", f.doc().get()).build()
-            } else {
-              Metadata.empty
+            // Merge type-specific metadata (e.g., vector dimension) with field doc comment
+            val metadata = schemaType.metadata match {
+              case Some(typeMetadata) =>
+                // If there's type-specific metadata, use it as base
+                if (f.doc().isPresent && !f.doc().get().isEmpty) {
+                  // Merge doc comment into the metadata
+                  new MetadataBuilder().withMetadata(typeMetadata)
+                    .putString("comment", f.doc().get()).build()
+                } else {
+                  typeMetadata
+                }
+              case None =>
+                // No type-specific metadata, just use doc comment if present
+                if (f.doc().isPresent && !f.doc().get().isEmpty) {
+                  new MetadataBuilder().putString("comment", f.doc().get()).build()
+                } else {
+                  Metadata.empty
+                }
             }
             StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)
           }
