@@ -169,9 +169,8 @@ private[sql] class AvroDeserializer(rootAvroType: Schema,
           if avroType.getLogicalType != null &&
              avroType.getLogicalType.getName == "vector" =>
 
-        // Extract dimension from schema
-        val dimensionField = avroType.getField("dimension")
-        val dimension = dimensionField.defaultVal().asInstanceOf[Int]
+        // Extract dimension from schema-level property (not a field)
+        val dimension = avroType.getObjectProp("dimension").asInstanceOf[Number].intValue()
 
         // Return writer that unpacks bytes to float array
         (updater, ordinal, value) => {
@@ -181,10 +180,16 @@ private[sql] class AvroDeserializer(rootAvroType: Schema,
           val bytesValue = record.get("valuesFixed")
 
           if (bytesValue == null) {
-            // Null vector - set null at field level
             updater.setNullAt(ordinal)
           } else {
-            val bytes = bytesValue.asInstanceOf[java.nio.ByteBuffer].array()
+            // Handle both GenericData.Fixed and ByteBuffer
+            val bytes = bytesValue match {
+              case fixed: GenericData.Fixed => fixed.bytes()
+              //TODO do we need this case
+              case bb: java.nio.ByteBuffer => bb.array()
+              case other => throw new IncompatibleSchemaException(
+                s"Unexpected valuesFixed type: ${other.getClass}")
+            }
 
             // Validate size
             val expectedSize = dimension * 4

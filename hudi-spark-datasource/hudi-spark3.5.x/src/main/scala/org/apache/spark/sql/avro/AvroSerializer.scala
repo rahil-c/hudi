@@ -149,9 +149,16 @@ private[sql] class AvroSerializer(rootCatalystType: DataType,
           if avroType.getLogicalType != null &&
              avroType.getLogicalType.getName == "vector" =>
 
-        // Extract dimension from schema
-        val dimensionField = avroType.getField("dimension")
-        val dimension = dimensionField.defaultVal().asInstanceOf[Int]
+        // Extract dimension from schema-level property (not a field)
+        val dimension = avroType.getObjectProp("dimension").asInstanceOf[Number].intValue()
+
+        // Get the FIXED schema from the valuesFixed field (unwrap nullable union)
+        val valuesFixedFieldSchema = avroType.getField("valuesFixed").schema()
+        val fixedSchema = if (valuesFixedFieldSchema.getType == UNION) {
+          valuesFixedFieldSchema.getTypes.asScala.find(_.getType != NULL).get
+        } else {
+          valuesFixedFieldSchema
+        }
 
         // Return converter that packs float array to bytes
         (getter, ordinal) => {
@@ -172,12 +179,9 @@ private[sql] class AvroSerializer(rootCatalystType: DataType,
             buffer.putFloat(arrayData.getFloat(i))
           }
 
-          // Create RECORD with 4 fields
+          // Create RECORD with only the valuesFixed field
           val record = new Record(avroType)
-          record.put("dimension", dimension)
-          record.put("elementType", "FLOAT")
-          record.put("storageBacking", "FIXED_BYTES")
-          record.put("valuesFixed", java.nio.ByteBuffer.wrap(buffer.array()))
+          record.put("valuesFixed", new Fixed(fixedSchema, buffer.array()))
           record
         }
 
