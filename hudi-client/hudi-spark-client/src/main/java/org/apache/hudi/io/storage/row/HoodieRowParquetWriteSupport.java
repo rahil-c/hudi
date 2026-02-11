@@ -26,6 +26,7 @@ import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.schema.HoodieSchema.TimePrecision;
+import org.apache.hudi.common.schema.HoodieSchemaField;
 import org.apache.hudi.common.schema.HoodieSchemaType;
 import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.util.Option;
@@ -69,6 +70,8 @@ import org.apache.spark.sql.types.YearMonthIntervalType;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.apache.spark.util.VersionUtils;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -182,11 +185,41 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
 
   @Override
   public WriteSupport.FinalizedWriteContext finalizeWrite() {
-    Map<String, String> extraMetadata =
-        bloomFilterWriteSupportOpt.map(HoodieBloomFilterWriteSupport::finalizeMetadata)
-            .orElse(Collections.emptyMap());
+    Map<String, String> extraMetadata = new HashMap<>();
+    bloomFilterWriteSupportOpt.ifPresent(bf -> extraMetadata.putAll(bf.finalizeMetadata()));
+
+    String vectorColumnsStr = buildVectorColumnsMetadata(schema);
+    if (!vectorColumnsStr.isEmpty()) {
+      extraMetadata.put("hoodie.vector.columns", vectorColumnsStr);
+    }
 
     return new WriteSupport.FinalizedWriteContext(extraMetadata);
+  }
+
+  /**
+   * Scans the schema for VECTOR fields and builds metadata string.
+   * Format: "colName:dimension:elementType,..." e.g. "embedding:128:FLOAT"
+   */
+  private static String buildVectorColumnsMetadata(HoodieSchema hoodieSchema) {
+    if (hoodieSchema == null || !hoodieSchema.hasFields()) {
+      return "";
+    }
+    StringBuilder sb = new StringBuilder();
+    for (HoodieSchemaField field : hoodieSchema.getFields()) {
+      HoodieSchema fieldSchema = field.schema().getNonNullType();
+      if (fieldSchema.getType() == HoodieSchemaType.VECTOR) {
+        HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) fieldSchema;
+        if (sb.length() > 0) {
+          sb.append(",");
+        }
+        sb.append(field.name())
+            .append(":")
+            .append(vectorSchema.getDimension())
+            .append(":")
+            .append(vectorSchema.getVectorElementType());
+      }
+    }
+    return sb.toString();
   }
 
   public void add(UTF8String recordKey) {
@@ -304,6 +337,19 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
           fixedLengthBytes = decimalBuffer;
         }
         recordConsumer.addBinary(Binary.fromReusedByteArray(fixedLengthBytes, 0, numBytes));
+      };
+    } else if (dataType instanceof ArrayType
+        && resolvedSchema != null
+        && resolvedSchema.getType() == HoodieSchemaType.VECTOR) {
+      HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) resolvedSchema;
+      int dimension = vectorSchema.getDimension();
+      return (row, ordinal) -> {
+        ArrayData array = row.getArray(ordinal);
+        ByteBuffer buffer = ByteBuffer.allocate(dimension * 4).order(ByteOrder.LITTLE_ENDIAN);
+        for (int i = 0; i < dimension; i++) {
+          buffer.putFloat(array.getFloat(i));
+        }
+        recordConsumer.addBinary(Binary.fromReusedByteArray(buffer.array()));
       };
     } else if (dataType instanceof ArrayType) {
       ValueWriter elementWriter = makeWriter(resolvedSchema == null ? null : resolvedSchema.getElementType(), ((ArrayType) dataType).elementType());
@@ -518,6 +564,14 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
           .as(LogicalTypeAnnotation.decimalType(scale, precision))
           .length(Decimal.minBytesForPrecision()[precision])
           .named(structField.name());
+    } else if (dataType instanceof ArrayType
+        && resolvedSchema != null
+        && resolvedSchema.getType() == HoodieSchemaType.VECTOR) {
+      HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) resolvedSchema;
+      int fixedSize = vectorSchema.getDimension()
+          * HoodieSchema.Vector.getElementSize(vectorSchema.getVectorElementType());
+      return Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition)
+          .length(fixedSize).named(structField.name());
     } else if (dataType instanceof ArrayType) {
       ArrayType arrayType = (ArrayType) dataType;
       DataType elementType = arrayType.elementType();
