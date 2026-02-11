@@ -92,6 +92,17 @@ public class InternalSchemaConverter {
         }
         return;
 
+      case VECTOR:
+        // Vector is structurally a RECORD, traverse its fields
+        List<HoodieSchemaField> vectorFields = schema.getFields();
+        for (HoodieSchemaField f : vectorFields) {
+          visited.push(f.name());
+          collectColNamesFromSchema(f.schema(), visited, resultSet);
+          visited.pop();
+          addFullNameIfLeafNode(f.schema(), f.name(), visited, resultSet);
+        }
+        return;
+
       case UNION:
         collectColNamesFromSchema(schema.getNonNullType(), visited, resultSet);
         return;
@@ -122,6 +133,7 @@ public class InternalSchemaConverter {
   private static void addFullNameIfLeafNode(HoodieSchemaType type, String name, Deque<String> visited, List<String> resultSet) {
     switch (type) {
       case RECORD:
+      case VECTOR:
       case ARRAY:
       case MAP:
         return;
@@ -292,6 +304,42 @@ public class InternalSchemaConverter {
         String valuePath = currentFieldPath + InternalSchema.MAP_VALUE + ".";
         Type valueType = visitSchemaToBuildType(schema.getValueType(), visited, valuePath, nextId, existingNameToPosition);
         return Types.MapType.get(keyId, valueId, Types.StringType.get(), valueType, schema.getValueType().isNullable());
+      case VECTOR:
+        // Vector is structurally a RECORD with one field (valuesFixed: nullable FIXED)
+        // Process it as a RECORD for InternalSchema representation
+        HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) schema;
+        String vectorName = vectorSchema.getFullName();
+
+        if (visited.contains(vectorName)) {
+          throw new HoodieSchemaException(String.format("cannot convert recursive record %s", vectorName));
+        }
+
+        visited.push(vectorName);
+        List<HoodieSchemaField> vectorFields = vectorSchema.getFields();
+        List<Type> vectorFieldTypes = new ArrayList<>(vectorFields.size());
+
+        int nextVectorId = nextId.get();
+        nextId.set(nextVectorId + vectorFields.size());
+
+        vectorFields.forEach(field -> {
+          Type fieldType = visitSchemaToBuildType(field.schema(), visited,
+              currentFieldPath + field.name() + ".", nextId, existingNameToPosition);
+          checkNullType(fieldType, field.name(), visited);
+          vectorFieldTypes.add(fieldType);
+        });
+        visited.pop();
+
+        List<Types.Field> vectorInternalFields = new ArrayList<>(vectorFields.size());
+        for (int i = 0; i < vectorFields.size(); i++) {
+          HoodieSchemaField field = vectorFields.get(i);
+          Type fieldType = vectorFieldTypes.get(i);
+          vectorInternalFields.add(Types.Field.get(nextVectorId, field.isNullable(),
+              field.name(), fieldType, field.doc().orElse(null)));
+          nextVectorId += 1;
+        }
+
+        // Return as RecordType with vector name preserved
+        return Types.RecordType.get(vectorInternalFields, vectorName);
       default:
         return visitPrimitiveToBuildInternalType(schema);
     }
@@ -448,6 +496,42 @@ public class InternalSchemaConverter {
       schemaFields.add(field);
     }
     String recordName = Option.ofNullable(recordType.name()).orElse(recordNameFallback);
+
+    // Check if this is a Vector record (has single field named "valuesFixed")
+    if (schemaFields.size() == 1 &&
+        HoodieSchema.Vector.VALUES_FIXED_FIELD.equals(schemaFields.get(0).name())) {
+
+      HoodieSchema valuesFixedSchema = schemaFields.get(0).schema();
+
+      // Extract FIXED schema from nullable wrapper
+      HoodieSchema nonNullSchema = valuesFixedSchema.getNonNullType();
+
+      if (nonNullSchema.getType() == HoodieSchemaType.FIXED) {
+        // This is a Vector! Extract dimension and element type
+        int fixedSize = nonNullSchema.getFixedSize();
+
+        // Infer dimension and element type from size
+        // Try FLOAT first (most common): size must be divisible by 4
+        if (fixedSize % 4 == 0) {
+          int dimension = fixedSize / 4;
+          return HoodieSchema.createVector(recordName, dimension,
+              HoodieSchema.Vector.ELEMENT_TYPE_FLOAT);
+        }
+        // Try DOUBLE: size must be divisible by 8
+        else if (fixedSize % 8 == 0) {
+          int dimension = fixedSize / 8;
+          return HoodieSchema.createVector(recordName, dimension,
+              HoodieSchema.Vector.ELEMENT_TYPE_DOUBLE);
+        }
+        // Try INT8: any size works (1 byte per element)
+        else {
+          return HoodieSchema.createVector(recordName, fixedSize,
+              HoodieSchema.Vector.ELEMENT_TYPE_INT8);
+        }
+      }
+    }
+
+    // Not a vector, create regular RECORD
     return HoodieSchema.createRecord(recordName, null, null, false, schemaFields);
   }
 
