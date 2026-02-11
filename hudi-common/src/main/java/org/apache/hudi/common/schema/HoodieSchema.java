@@ -1610,7 +1610,7 @@ public class HoodieSchema implements Serializable {
      * @param elementType the element type (FLOAT, DOUBLE, INT8, etc.)
      * @return number of bytes per element
      */
-    private static int getElementSize(String elementType) {
+    public static int getElementSize(String elementType) {
       switch (elementType) {
         case ELEMENT_TYPE_FLOAT:
           return 4;

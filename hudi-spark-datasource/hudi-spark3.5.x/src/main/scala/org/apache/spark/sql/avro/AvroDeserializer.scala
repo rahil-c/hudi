@@ -164,6 +164,50 @@ private[sql] class AvroDeserializer(rootAvroType: Schema,
           s"Avro logical type $other cannot be converted to SQL type ${TimestampNTZType.sql}.")
       }
 
+      // Handle VECTOR logical type
+      case (RECORD, ArrayType(FloatType, false))
+          if avroType.getLogicalType != null &&
+             avroType.getLogicalType.getName == "vector" =>
+
+        // Extract dimension from schema-level property (not a field)
+        val dimension = avroType.getObjectProp("dimension").asInstanceOf[Number].intValue()
+
+        // Return writer that unpacks bytes to float array
+        (updater, ordinal, value) => {
+          val record = value.asInstanceOf[GenericRecord]
+
+          // Get packed bytes from valuesFixed field
+          val bytesValue = record.get("valuesFixed")
+
+          if (bytesValue == null) {
+            updater.setNullAt(ordinal)
+          } else {
+            // Handle both GenericData.Fixed and ByteBuffer
+            val bytes = bytesValue match {
+              case fixed: GenericData.Fixed => fixed.bytes()
+              //TODO do we need this case
+              case bb: java.nio.ByteBuffer => bb.array()
+              case other => throw new IncompatibleSchemaException(
+                s"Unexpected valuesFixed type: ${other.getClass}")
+            }
+
+            // Validate size
+            val expectedSize = dimension * 4
+            if (bytes.length != expectedSize) {
+              throw new IncompatibleSchemaException(
+                s"VECTOR byte size mismatch: expected=$expectedSize, actual=${bytes.length}")
+            }
+
+            // Unpack bytes to float array (little-endian)
+            val buffer = java.nio.ByteBuffer.wrap(bytes)
+              .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            val floats = (0 until dimension).map(_ => buffer.getFloat()).toArray
+
+            // Set as ArrayData
+            updater.set(ordinal, ArrayData.toArrayData(floats))
+          }
+        }
+
       // Before we upgrade Avro to 1.8 for logical type support, spark-avro converts Long to Date.
       // For backward compatibility, we still keep this conversion.
       case (LONG, DateType) => (updater, ordinal, value) =>
