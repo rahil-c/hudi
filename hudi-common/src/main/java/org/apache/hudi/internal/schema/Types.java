@@ -298,6 +298,67 @@ public class Types {
     }
   }
 
+  /**
+   * Vector type that preserves dimension, element type, and storage backing
+   * through InternalSchema round-trips.
+   */
+  public static class VectorType extends PrimitiveType {
+    private final int dimension;
+    private final String elementType;
+    private final String storageBacking;
+
+    public static VectorType get(int dimension, String elementType, String storageBacking) {
+      return new VectorType(dimension, elementType, storageBacking);
+    }
+
+    private VectorType(int dimension, String elementType, String storageBacking) {
+      this.dimension = dimension;
+      this.elementType = elementType;
+      this.storageBacking = storageBacking;
+    }
+
+    public int getDimension() {
+      return dimension;
+    }
+
+    public String getElementType() {
+      return elementType;
+    }
+
+    public String getStorageBacking() {
+      return storageBacking;
+    }
+
+    @Override
+    public TypeID typeId() {
+      return TypeID.VECTOR;
+    }
+
+    @Override
+    public String toString() {
+      return String.format("vector[%d, %s, %s]", dimension, elementType, storageBacking);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      } else if (!(o instanceof VectorType)) {
+        return false;
+      }
+
+      VectorType that = (VectorType) o;
+      return dimension == that.dimension
+          && Objects.equals(elementType, that.elementType)
+          && Objects.equals(storageBacking, that.storageBacking);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(VectorType.class, dimension, elementType, storageBacking);
+    }
+  }
+
   public abstract static class DecimalBase extends PrimitiveType {
 
     protected final int scale;
