@@ -25,7 +25,7 @@ import org.apache.hudi.avro.{AvroSchemaUtils, HoodieAvroUtils}
 import org.apache.hudi.common.engine.HoodieReaderContext
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.HoodieRecord
-import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaUtils}
+import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType, HoodieSchemaUtils}
 import org.apache.hudi.common.table.HoodieTableConfig
 import org.apache.hudi.common.table.read.buffer.PositionBasedFileGroupRecordBuffer.ROW_INDEX_TEMPORARY_COLUMN_NAME
 import org.apache.hudi.common.util.ValidationUtils.checkState
@@ -41,7 +41,9 @@ import org.apache.spark.sql.execution.datasources.{PartitionedFile, SparkColumna
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.hudi.SparkAdapter
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{LongType, MetadataBuilder, StructField, StructType}
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
+import org.apache.spark.sql.catalyst.util.GenericArrayData
+import org.apache.spark.sql.types.{BinaryType, LongType, MetadataBuilder, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 
 import scala.collection.JavaConverters._
@@ -81,7 +83,17 @@ class SparkFileFormatInternalRowReaderContext(baseFileReader: SparkColumnarFileR
       assert(getRecordContext.supportsParquetRowIndex())
     }
     val structType = HoodieInternalRowUtils.getCachedSchema(requiredSchema)
-    val (readSchema, readFilters) = getSchemaAndFiltersForRead(structType, hasRowIndexField)
+
+    // Detect VECTOR columns and replace with BinaryType for the Parquet reader
+    // (Parquet stores VECTOR as FIXED_LEN_BYTE_ARRAY which Spark maps to BinaryType)
+    val vectorColumnInfo = SparkFileFormatInternalRowReaderContext.detectVectorColumns(requiredSchema)
+    val parquetReadStructType = if (vectorColumnInfo.nonEmpty) {
+      SparkFileFormatInternalRowReaderContext.replaceVectorColumnsWithBinary(structType, vectorColumnInfo)
+    } else {
+      structType
+    }
+
+    val (readSchema, readFilters) = getSchemaAndFiltersForRead(parquetReadStructType, hasRowIndexField)
     if (FSUtils.isLogFile(filePath)) {
       // NOTE: now only primary key based filtering is supported for log files
       new HoodieSparkFileReaderFactory(storage).newParquetFileReader(filePath)
@@ -100,9 +112,16 @@ class SparkFileFormatInternalRowReaderContext(baseFileReader: SparkColumnarFileR
       } else {
         org.apache.hudi.common.util.Option.empty[org.apache.parquet.schema.MessageType]()
       }
-      new CloseableInternalRowIterator(baseFileReader.read(fileInfo,
+      val rawIterator = new CloseableInternalRowIterator(baseFileReader.read(fileInfo,
         readSchema, StructType(Seq.empty), getSchemaHandler.getInternalSchemaOpt,
         readFilters, storage.getConf.asInstanceOf[StorageConfiguration[Configuration]], tableSchemaOpt))
+
+      // Post-process: convert binary VECTOR columns back to float arrays
+      if (vectorColumnInfo.nonEmpty) {
+        SparkFileFormatInternalRowReaderContext.wrapWithVectorConversion(rawIterator, vectorColumnInfo, readSchema)
+      } else {
+        rawIterator
+      }
     }
   }
 
@@ -288,6 +307,77 @@ object SparkFileFormatInternalRowReaderContext {
 
   private def isIndexTempColumn(field: StructField): Boolean = {
     field.name.equals(ROW_INDEX_TEMPORARY_COLUMN_NAME)
+  }
+
+  /**
+   * Detects VECTOR columns from HoodieSchema.
+   * @return Map of ordinal to dimension for VECTOR fields.
+   */
+  private[hudi] def detectVectorColumns(schema: HoodieSchema): Map[Int, Int] = {
+    if (schema == null) return Map.empty
+    import scala.collection.JavaConverters._
+    schema.getFields.asScala.zipWithIndex.flatMap { case (field, idx) =>
+      val fieldSchema = field.schema().getNonNullType
+      if (fieldSchema.getType == HoodieSchemaType.VECTOR) {
+        Some(idx -> fieldSchema.asInstanceOf[HoodieSchema.Vector].getDimension)
+      } else {
+        None
+      }
+    }.toMap
+  }
+
+  /**
+   * Replaces ArrayType(FloatType) with BinaryType for VECTOR columns so the Parquet reader
+   * can read FIXED_LEN_BYTE_ARRAY data without type mismatch.
+   */
+  private[hudi] def replaceVectorColumnsWithBinary(structType: StructType, vectorColumns: Map[Int, Int]): StructType = {
+    StructType(structType.fields.zipWithIndex.map { case (field, idx) =>
+      if (vectorColumns.contains(idx)) {
+        StructField(field.name, BinaryType, field.nullable, org.apache.spark.sql.types.Metadata.empty)
+      } else {
+        field
+      }
+    })
+  }
+
+  /**
+   * Wraps an iterator to convert binary VECTOR columns back to ArrayType(FloatType).
+   * Unpacks little-endian float bytes from FIXED_LEN_BYTE_ARRAY into GenericArrayData.
+   */
+  private[hudi] def wrapWithVectorConversion(
+      iterator: ClosableIterator[InternalRow],
+      vectorColumns: Map[Int, Int],
+      readSchema: StructType): ClosableIterator[InternalRow] = {
+    val numFields = readSchema.fields.length
+    new ClosableIterator[InternalRow] {
+      override def hasNext: Boolean = iterator.hasNext
+      override def next(): InternalRow = {
+        val row = iterator.next()
+        val result = new GenericInternalRow(numFields)
+        var i = 0
+        while (i < numFields) {
+          if (row.isNullAt(i)) {
+            result.setNullAt(i)
+          } else if (vectorColumns.contains(i)) {
+            val bytes = row.getBinary(i)
+            val dim = vectorColumns(i)
+            val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            val floats = new Array[Float](dim)
+            var j = 0
+            while (j < dim) {
+              floats(j) = buffer.getFloat()
+              j += 1
+            }
+            result.update(i, new GenericArrayData(floats))
+          } else {
+            result.update(i, row.get(i, readSchema(i).dataType))
+          }
+          i += 1
+        }
+        result
+      }
+      override def close(): Unit = iterator.close()
+    }
   }
 
 }

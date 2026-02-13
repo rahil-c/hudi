@@ -248,6 +248,12 @@ public class AvroSchemaConverterWithTimestampNTZ extends HoodieAvroParquetSchema
           builder = Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition).length(schema.getFixedSize());
         }
         break;
+      case VECTOR:
+        HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) schema;
+        int fixedSize = vectorSchema.getDimension()
+                * vectorSchema.getVectorElementType().getElementSize();
+        builder = Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition).length(fixedSize);
+        break;
       case UNION:
         return convertUnion(fieldName, schema, repetition, schemaPath);
       default:

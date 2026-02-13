@@ -313,6 +313,7 @@ public class InternalSchemaConverter {
       case ENUM:
         return Types.StringType.get();
       case FIXED:
+      case VECTOR:
         return Types.FixedType.getFixed(schema.getFixedSize());
       case BYTES:
         return Types.BinaryType.get();
