@@ -119,6 +119,11 @@ public enum HoodieSchemaType {
 
   VARIANT(Schema.Type.RECORD),
 
+  /**
+   * BLOB type - represents binary large objects, stored as records with either inline bytes or a reference to a file and range within that file.
+   */
+  BLOB(Schema.Type.RECORD),
+
   VECTOR(Schema.Type.FIXED),
 
   /**
@@ -158,6 +163,8 @@ public enum HoodieSchemaType {
         return UUID;
       } else if (logicalType instanceof VariantLogicalType) {
         return VARIANT;
+      } else if (logicalType == HoodieSchema.BlobLogicalType.blob()) {
+        return BLOB;
       } else if (logicalType instanceof HoodieSchema.VectorLogicalType) {
         return VECTOR;
       }
@@ -227,6 +234,7 @@ public enum HoodieSchemaType {
       case MAP:
       case UNION:
       case VARIANT:
+      case BLOB:
       case VECTOR:
         return true;
       default:
