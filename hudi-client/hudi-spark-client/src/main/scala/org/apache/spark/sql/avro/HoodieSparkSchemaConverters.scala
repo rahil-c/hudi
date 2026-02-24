@@ -80,7 +80,7 @@ object HoodieSparkSchemaConverters {
 
       // Complex types
       // Check for VECTOR type metadata property in spark struct type
-      case arrayType @ ArrayType(FloatType, containsNull) // for now checking floats but will need to check element type
+      case ArrayType(elementSparkType, containsNull)
           if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
             metadata.getString(HoodieSchema.TYPE_METADATA_FIELD).startsWith("VECTOR") =>
         if (containsNull) {
@@ -98,6 +98,12 @@ object HoodieSparkSchemaConverters {
         val elementType = if (typeDescriptor.getParams.size() > 1)
           HoodieSchema.Vector.VectorElementType.fromString(typeDescriptor.getParam(1))
         else HoodieSchema.Vector.VectorElementType.FLOAT
+
+        val expectedSparkType = sparkTypeForVectorElementType(elementType)
+        if (elementSparkType != expectedSparkType) {
+          throw new IncompatibleSchemaException(
+            s"VECTOR element type mismatch for field $recordName: metadata requires $elementType, Spark array has $elementSparkType")
+        }
 
         HoodieSchema.createVector(dimension, elementType)
 
@@ -212,7 +218,8 @@ object HoodieSparkSchemaConverters {
           .putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchema.toTypeString(vectorSchema))
           .build()
 
-        SchemaType(ArrayType(FloatType, containsNull = false), nullable = false, Some(metadata))
+        val sparkElementType = sparkTypeForVectorElementType(vectorSchema.getVectorElementType)
+        SchemaType(ArrayType(sparkElementType, containsNull = false), nullable = false, Some(metadata))
 
       case HoodieSchemaType.BLOB | HoodieSchemaType.RECORD =>
         val fullName = hoodieSchema.getFullName
@@ -325,6 +332,13 @@ object HoodieSparkSchemaConverters {
       st.forall { f =>
         f.name.matches("member\\d+") && f.nullable
       }
+  }
+
+  private def sparkTypeForVectorElementType(
+      elementType: HoodieSchema.Vector.VectorElementType): DataType = elementType match {
+    case HoodieSchema.Vector.VectorElementType.FLOAT => FloatType
+    case HoodieSchema.Vector.VectorElementType.DOUBLE => DoubleType
+    case HoodieSchema.Vector.VectorElementType.INT8 => ByteType
   }
 }
 

@@ -592,6 +592,36 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     assert(!embeddingField.isNullable())
   }
 
+  test("test VECTOR type conversion - Spark to HoodieSchema for DOUBLE and INT8") {
+    val doubleMetadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(64, DOUBLE)")
+      .build()
+    val int8Metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(32, INT8)")
+      .build()
+
+    val struct = new StructType()
+      .add("embedding_double", ArrayType(DoubleType, containsNull = false), nullable = false, doubleMetadata)
+      .add("embedding_int8", ArrayType(ByteType, containsNull = false), nullable = false, int8Metadata)
+
+    val hoodieSchema = HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(
+      struct, "VectorTypedTest", "test")
+
+    val doubleField = hoodieSchema.getField("embedding_double").get()
+    assert(doubleField.schema().getType == HoodieSchemaType.VECTOR)
+    val doubleVector = doubleField.schema().asInstanceOf[HoodieSchema.Vector]
+    assert(doubleVector.getDimension == 64)
+    assert(doubleVector.getVectorElementType == HoodieSchema.Vector.VectorElementType.DOUBLE)
+    assert(!doubleField.isNullable())
+
+    val int8Field = hoodieSchema.getField("embedding_int8").get()
+    assert(int8Field.schema().getType == HoodieSchemaType.VECTOR)
+    val int8Vector = int8Field.schema().asInstanceOf[HoodieSchema.Vector]
+    assert(int8Vector.getDimension == 32)
+    assert(int8Vector.getVectorElementType == HoodieSchema.Vector.VectorElementType.INT8)
+    assert(!int8Field.isNullable())
+  }
+
   test("test VECTOR type conversion - HoodieSchema to Spark") {
     val vectorSchema = HoodieSchema.createVector(256, HoodieSchema.Vector.VectorElementType.FLOAT)
     val fields = java.util.Arrays.asList(
@@ -618,6 +648,32 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     val typeDescriptor = HoodieSchema.parseTypeString(embeddingField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
     assert(typeDescriptor.getType == HoodieSchemaType.VECTOR)
     assert(typeDescriptor.getParam(0) == "256")
+  }
+
+  test("test VECTOR type conversion - HoodieSchema to Spark for DOUBLE and INT8") {
+    val fields = java.util.Arrays.asList(
+      HoodieSchemaField.of("embedding_double", HoodieSchema.createVector(64, HoodieSchema.Vector.VectorElementType.DOUBLE)),
+      HoodieSchemaField.of("embedding_int8", HoodieSchema.createVector(32, HoodieSchema.Vector.VectorElementType.INT8))
+    )
+    val hoodieSchema = HoodieSchema.createRecord("VectorTypedTest", "test", null, fields)
+
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(hoodieSchema)
+
+    val doubleField = structType.fields(0)
+    assert(doubleField.dataType == ArrayType(DoubleType, containsNull = false))
+    assert(doubleField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
+    val doubleDescriptor = HoodieSchema.parseTypeString(doubleField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+    assert(doubleDescriptor.getType == HoodieSchemaType.VECTOR)
+    assert(doubleDescriptor.getParam(0) == "64")
+    assert(doubleDescriptor.getParam(1) == "DOUBLE")
+
+    val int8Field = structType.fields(1)
+    assert(int8Field.dataType == ArrayType(ByteType, containsNull = false))
+    assert(int8Field.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
+    val int8Descriptor = HoodieSchema.parseTypeString(int8Field.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+    assert(int8Descriptor.getType == HoodieSchemaType.VECTOR)
+    assert(int8Descriptor.getParam(0) == "32")
+    assert(int8Descriptor.getParam(1) == "INT8")
   }
 
   test("test VECTOR round-trip conversion - Spark to HoodieSchema to Spark") {
@@ -655,6 +711,43 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     val convertedArrayType = convertedVectorField.dataType.asInstanceOf[ArrayType]
     assert(convertedArrayType.elementType == FloatType)
     assert(!convertedArrayType.containsNull)
+  }
+
+  test("test VECTOR round-trip conversion - Spark to HoodieSchema to Spark for DOUBLE and INT8") {
+    val doubleMetadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(64, DOUBLE)")
+      .build()
+    val int8Metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(32, INT8)")
+      .build()
+    val originalStruct = new StructType()
+      .add("id", LongType, false)
+      .add("vector_double", ArrayType(DoubleType, containsNull = false), nullable = false, doubleMetadata)
+      .add("vector_int8", ArrayType(ByteType, containsNull = false), nullable = false, int8Metadata)
+
+    val hoodieSchema = HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(
+      originalStruct, "VectorTypedRoundTripTest", "test")
+    val convertedStruct = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(hoodieSchema)
+
+    val originalDouble = originalStruct.fields(1)
+    val convertedDouble = convertedStruct.fields(1)
+    assert(convertedDouble.name == originalDouble.name)
+    assert(convertedDouble.dataType == originalDouble.dataType)
+    assert(convertedDouble.nullable == originalDouble.nullable)
+    val convertedDoubleDescriptor = HoodieSchema.parseTypeString(convertedDouble.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+    assert(convertedDoubleDescriptor.getType == HoodieSchemaType.VECTOR)
+    assert(convertedDoubleDescriptor.getParam(0) == "64")
+    assert(convertedDoubleDescriptor.getParam(1) == "DOUBLE")
+
+    val originalInt8 = originalStruct.fields(2)
+    val convertedInt8 = convertedStruct.fields(2)
+    assert(convertedInt8.name == originalInt8.name)
+    assert(convertedInt8.dataType == originalInt8.dataType)
+    assert(convertedInt8.nullable == originalInt8.nullable)
+    val convertedInt8Descriptor = HoodieSchema.parseTypeString(convertedInt8.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+    assert(convertedInt8Descriptor.getType == HoodieSchemaType.VECTOR)
+    assert(convertedInt8Descriptor.getParam(0) == "32")
+    assert(convertedInt8Descriptor.getParam(1) == "INT8")
   }
 
   test("test VECTOR round-trip conversion - HoodieSchema to Spark to HoodieSchema") {
