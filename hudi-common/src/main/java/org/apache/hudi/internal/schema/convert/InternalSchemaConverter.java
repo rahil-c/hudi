@@ -319,7 +319,7 @@ public class InternalSchemaConverter {
         return Types.VectorType.get(
             vectorSchema.getDimension(),
             vectorSchema.getVectorElementType().getDataType(),
-            vectorSchema.getStorageBacking());
+            vectorSchema.getStorageBacking().getBacking());
       case BYTES:
         return Types.BinaryType.get();
       case UUID:

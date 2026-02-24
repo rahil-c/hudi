@@ -26,8 +26,6 @@ import org.apache.spark.sql.types._
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions._
 
-import java.util.Collections
-
 /**
  * End-to-end tests for vector column support in Hudi.
  * Tests round-trip data correctness through Spark DataFrames.
@@ -53,11 +51,8 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
   @Test
   def testVectorRoundTrip(): Unit = {
     // 1. Create schema with vector metadata
-    val typeMetadataStr = HoodieSchema.buildTypeMetadata(
-      Collections.singletonMap("vector.dimension", "128"))
     val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchemaType.VECTOR.name())
-      .putString(HoodieSchema.TYPE_METADATA_PROPS_FIELD, typeMetadataStr)
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(128)")
       .build()
 
     val schema = StructType(Seq(
@@ -104,7 +99,10 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     // 7. Verify vector metadata preserved
     val readMetadata = embeddingField.metadata
     assertTrue(readMetadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
-    assertEquals("VECTOR", readMetadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+    val typeDescriptor = HoodieSchema.parseTypeString(
+      readMetadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+    assertEquals(HoodieSchemaType.VECTOR, typeDescriptor.getType)
+    assertEquals("128", typeDescriptor.getParam(0))
 
     // 8. Verify float values match exactly
     val originalRows = df.select("id", "embedding").collect()
@@ -131,11 +129,8 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
   @Test
   def testNullableVectorField(): Unit = {
     // Vector column itself nullable (entire array can be null)
-    val typeMetadataStr = HoodieSchema.buildTypeMetadata(
-      Collections.singletonMap("vector.dimension", "32"))
     val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchemaType.VECTOR.name())
-      .putString(HoodieSchema.TYPE_METADATA_PROPS_FIELD, typeMetadataStr)
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(32)")
       .build()
 
     val schema = StructType(Seq(
