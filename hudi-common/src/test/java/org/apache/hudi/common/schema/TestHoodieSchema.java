@@ -879,6 +879,10 @@ public class TestHoodieSchema {
     // Create vector with FLOAT element type
     HoodieSchema schemaFloat = HoodieSchema.createVector(512, HoodieSchema.Vector.VectorElementType.FLOAT);
     assertVector(schemaFloat, 512, HoodieSchema.Vector.VectorElementType.FLOAT);
+
+    // Create vector with INT8 element type
+    HoodieSchema.Vector schemaInt = HoodieSchema.createVector(256, HoodieSchema.Vector.VectorElementType.INT8);
+    assertVector(schemaInt, 256, HoodieSchema.Vector.VectorElementType.INT8);
   }
 
   @Test
@@ -1091,7 +1095,7 @@ public class TestHoodieSchema {
     Schema avroSchema = vector.getAvroSchema();
     assertEquals(expectedDimension, ((Number) avroSchema.getObjectProp("dimension")).intValue());
     assertEquals(expectedElementType.getDataType(), avroSchema.getProp("elementType"));
-    assertEquals(HoodieSchema.Vector.STORAGE_BACKING_FIXED_BYTES, avroSchema.getProp("storageBacking"));
+    assertEquals(HoodieSchema.Vector.StorageBacking.FIXED_BYTES.getBacking(), avroSchema.getProp("storageBacking"));
   }
 
   @Test

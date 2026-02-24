@@ -647,6 +647,7 @@ public class HoodieSchema implements Serializable {
 
   /**
    * Creates Vector schema with custom name and dimension.
+   * Use VectorElementType.FLOAT as the default if no elementType is provided
    *
    * @param name record name (null uses default "vector")
    * @param dimension vector dimension (must be > 0)
@@ -1595,12 +1596,47 @@ public class HoodieSchema implements Serializable {
       }
     }
 
-    // Storage backing types
-    public static final String STORAGE_BACKING_FIXED_BYTES = "FIXED_BYTES";
+    /**
+     * Enum representing the physical storage format backing a vector.
+     */
+    public enum StorageBacking {
+      FIXED_BYTES("FIXED_BYTES");
+
+      private final String backing;
+
+      StorageBacking(String backing) {
+        this.backing = backing;
+      }
+
+      /**
+       * Returns the string representation for serialization.
+       *
+       * @return storage backing name
+       */
+      public String getBacking() {
+        return backing;
+      }
+
+      /**
+       * Converts a string to StorageBacking enum.
+       *
+       * @param name the storage backing name (e.g., "FIXED_BYTES")
+       * @return the corresponding enum value
+       * @throws IllegalArgumentException if name is unknown
+       */
+      public static StorageBacking fromString(String name) {
+        for (StorageBacking b : values()) {
+          if (b.backing.equalsIgnoreCase(name)) {
+            return b;
+          }
+        }
+        throw new IllegalArgumentException("Unknown storage backing: " + name);
+      }
+    }
 
     private final int dimension;
     private final VectorElementType elementType;
-    private final String storageBacking;
+    private final StorageBacking storageBacking;
 
     /**
      * Creates Vector from pre-built schema (used by factory methods).
@@ -1621,7 +1657,7 @@ public class HoodieSchema implements Serializable {
       VectorLogicalType vectorLogicalType = (VectorLogicalType) logicalType;
       this.dimension = vectorLogicalType.getDimension();
       this.elementType = VectorElementType.fromString(vectorLogicalType.getElementType());
-      this.storageBacking = vectorLogicalType.getStorageBacking();
+      this.storageBacking = StorageBacking.fromString(vectorLogicalType.getStorageBacking());
 
       // Validate schema structure
       validateVectorSchema(avroSchema);
@@ -1629,22 +1665,12 @@ public class HoodieSchema implements Serializable {
 
     @Override
     public String getName() {
-      return "vector";
+      return VectorLogicalType.VECTOR_LOGICAL_TYPE_NAME;
     }
 
     @Override
     public HoodieSchemaType getType() {
       return HoodieSchemaType.VECTOR;
-    }
-
-    /**
-     * Gets the byte size of a single element based on element type.
-     *
-     * @param elementType the element type
-     * @return number of bytes per element
-     */
-    private static int getElementSize(VectorElementType elementType) {
-      return elementType.getElementSize();
     }
 
     /**
@@ -1663,14 +1689,14 @@ public class HoodieSchema implements Serializable {
       VectorElementType resolvedElementType = elementType != null ? elementType : VectorElementType.FLOAT;
 
       // Calculate fixed size: dimension × element size in bytes
-      int elementSize = getElementSize(resolvedElementType);
+      int elementSize = resolvedElementType.getElementSize();
       int fixedSize = dimension * elementSize;
 
       // Create fixed Schema
       Schema vectorSchema = Schema.createFixed(name, null, null, fixedSize);
 
       // Apply logical type with properties directly to FIXED
-      VectorLogicalType vectorLogicalType = new VectorLogicalType(dimension, resolvedElementType.getDataType(), STORAGE_BACKING_FIXED_BYTES);
+      VectorLogicalType vectorLogicalType = new VectorLogicalType(dimension, resolvedElementType.getDataType(), StorageBacking.FIXED_BYTES.getBacking());
       vectorLogicalType.addToSchema(vectorSchema);
 
       return vectorSchema;
@@ -1684,12 +1710,12 @@ public class HoodieSchema implements Serializable {
      */
     private void validateVectorSchema(Schema avroSchema) {
       // Verify FIXED size matches: dimension × elementSize
-      int expectedSize = dimension * getElementSize(elementType);
+      int expectedSize = dimension * elementType.getElementSize();
       int actualSize = avroSchema.getFixedSize();
       ValidationUtils.checkArgument(actualSize == expectedSize,
           () -> "Vector FIXED size mismatch: expected " + expectedSize
                 + " bytes (dimension=" + dimension + " × elementSize="
-                + getElementSize(elementType) + "), got " + actualSize);
+                + elementType.getElementSize() + "), got " + actualSize);
     }
 
     /**
@@ -1713,9 +1739,9 @@ public class HoodieSchema implements Serializable {
     /**
      * Returns the storage backing type.
      *
-     * @return storage backing string (e.g., "FIXED_BYTES")
+     * @return storage backing enum value
      */
-    public String getStorageBacking() {
+    public StorageBacking getStorageBacking() {
       return storageBacking;
     }
 
@@ -1982,7 +2008,7 @@ public class HoodieSchema implements Serializable {
 
       String storageBacking = schema.getProp(VectorLogicalType.PROP_STORAGE_BACKING);
       if (storageBacking == null) {
-        storageBacking = Vector.STORAGE_BACKING_FIXED_BYTES; // default
+        storageBacking = Vector.StorageBacking.FIXED_BYTES.getBacking(); // default
       }
 
       return new VectorLogicalType(dimension, elementType, storageBacking);
