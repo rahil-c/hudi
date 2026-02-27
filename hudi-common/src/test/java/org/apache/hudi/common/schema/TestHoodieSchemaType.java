@@ -235,8 +235,8 @@ public class TestHoodieSchemaType {
    */
   private static Schema createVectorSchemaForTest() {
     int dimension = 128;
-    String elementType = HoodieSchema.Vector.VectorElementType.FLOAT.getDataType();
-    String storageBacking = HoodieSchema.Vector.StorageBacking.FIXED_BYTES.getBacking();
+    String elementType = HoodieSchema.Vector.VectorElementType.FLOAT.name();
+    String storageBacking = HoodieSchema.Vector.StorageBacking.FIXED_BYTES.name();
 
     int fixedSize = dimension * 4;
     // Create FIXED schema directly

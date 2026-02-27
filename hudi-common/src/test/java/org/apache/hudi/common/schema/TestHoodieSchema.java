@@ -1094,13 +1094,70 @@ public class TestHoodieSchema {
 
   @Test
   void testVectorWithDefaultName() {
-    // Create vector with null name
-    HoodieSchema.Vector v1 = HoodieSchema.createVector(null, 1536);
-    assertEquals("vector", v1.getAvroSchema().getName());
+    // createVector(dimension) generates a dimension-aware name to avoid Avro collisions
+    HoodieSchema.Vector v1 = HoodieSchema.createVector(1536);
+    assertEquals("vector_float_1536", v1.getAvroSchema().getName());
 
-    // Create vector with empty string name
-    HoodieSchema.Vector v2 = HoodieSchema.createVector("", 768);
-    assertEquals("vector", v2.getAvroSchema().getName());
+    HoodieSchema.Vector v2 = HoodieSchema.createVector(768, HoodieSchema.Vector.VectorElementType.DOUBLE);
+    assertEquals("vector_double_768", v2.getAvroSchema().getName());
+
+    // Null or empty name is rejected
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.createVector(null, 128));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.createVector("", 128));
+  }
+
+  @Test
+  void testMultipleVectorColumnsWithSameDimensionAndType() {
+    // Two vectors with identical dimension and element type share the same FIXED type name,
+    // which Avro allows since the definitions are identical.
+    HoodieSchema.Vector v1 = HoodieSchema.createVector(128);
+    HoodieSchema.Vector v2 = HoodieSchema.createVector(128);
+
+    List<HoodieSchemaField> fields = Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT)),
+        HoodieSchemaField.of("title_embedding", v1),
+        HoodieSchemaField.of("content_embedding", v2)
+    );
+
+    HoodieSchema record = HoodieSchema.createRecord("TestRecord", null, null, fields);
+    assertNotNull(record);
+
+    // Verify both fields survive a JSON round-trip
+    String json = record.toString();
+    HoodieSchema parsed = HoodieSchema.parse(json);
+    assertNotNull(parsed.getAvroSchema().getField("title_embedding"));
+    assertNotNull(parsed.getAvroSchema().getField("content_embedding"));
+    assertVector(HoodieSchema.fromAvroSchema(parsed.getAvroSchema().getField("title_embedding").schema()),
+        128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    assertVector(HoodieSchema.fromAvroSchema(parsed.getAvroSchema().getField("content_embedding").schema()),
+        128, HoodieSchema.Vector.VectorElementType.FLOAT);
+  }
+
+  @Test
+  void testMultipleVectorColumnsWithDifferentDimensions() {
+    // Two vectors with different dimensions use dimension-aware names to avoid Avro collisions
+    HoodieSchema.Vector v128 = HoodieSchema.createVector(128);
+    HoodieSchema.Vector v256 = HoodieSchema.createVector(256);
+
+    List<HoodieSchemaField> fields = Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT)),
+        HoodieSchemaField.of("embedding_small", v128),
+        HoodieSchemaField.of("embedding_large", v256)
+    );
+
+    // A table with two vector columns of different dimensions is a valid use case
+    HoodieSchema record = HoodieSchema.createRecord("TestRecord", null, null, fields);
+    assertNotNull(record);
+
+    // Verify both fields survive a JSON round-trip (schema serialization/parsing)
+    String json = record.toString();
+    HoodieSchema parsed = HoodieSchema.parse(json);
+    assertNotNull(parsed.getAvroSchema().getField("embedding_small"));
+    assertNotNull(parsed.getAvroSchema().getField("embedding_large"));
+    assertVector(HoodieSchema.fromAvroSchema(parsed.getAvroSchema().getField("embedding_small").schema()),
+        128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    assertVector(HoodieSchema.fromAvroSchema(parsed.getAvroSchema().getField("embedding_large").schema()),
+        256, HoodieSchema.Vector.VectorElementType.FLOAT);
   }
 
   @Test
@@ -1132,8 +1189,8 @@ public class TestHoodieSchema {
                                           HoodieSchema.Vector.VectorElementType expectedElementType) {
     Schema avroSchema = vector.getAvroSchema();
     assertEquals(expectedDimension, ((Number) avroSchema.getObjectProp("dimension")).intValue());
-    assertEquals(expectedElementType.getDataType(), avroSchema.getProp("elementType"));
-    assertEquals(HoodieSchema.Vector.StorageBacking.FIXED_BYTES.getBacking(), avroSchema.getProp("storageBacking"));
+    assertEquals(expectedElementType.name(), avroSchema.getProp("elementType"));
+    assertEquals(HoodieSchema.Vector.StorageBacking.FIXED_BYTES.name(), avroSchema.getProp("storageBacking"));
   }
 
   @Test
