@@ -228,6 +228,77 @@ public class TestHoodieSchemaType {
     return variantRecord;
   }
 
+  @Test
+  void testVectorFromSchemaWithStringProperties() {
+    // Manually craft a JSON schema where 'dimension' is a string rather than an integer
+    String jsonSchema = "{"
+        + "\"type\":\"fixed\","
+        + "\"name\":\"vector_float_128\","
+        + "\"size\":512,"
+        + "\"logicalType\":\"vector\","
+        + "\"dimension\":\"128\","
+        + "\"elementType\":\"FLOAT\","
+        + "\"storageBacking\":\"FIXED_BYTES\""
+        + "}";
+
+    Schema avroSchema = new Schema.Parser().parse(jsonSchema);
+    HoodieSchema schema = HoodieSchema.fromAvroSchema(avroSchema);
+
+    assertTrue(schema instanceof HoodieSchema.Vector);
+    HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) schema;
+
+    // Verify it correctly parsed the string "128" into the integer 128
+    assertEquals(128, vectorSchema.getDimension());
+    assertEquals(HoodieSchema.Vector.VectorElementType.FLOAT, vectorSchema.getVectorElementType());
+  }
+
+  @Test
+  void testVectorSizeMismatchValidation() {
+    // Dimension 10, FLOAT (4 bytes) -> expected fixed size is 40.
+    // We intentionally create a FIXED schema with size 42 via JSON parsing
+    // so the VectorLogicalTypeFactory is properly invoked.
+    String jsonSchema = "{"
+        + "\"type\":\"fixed\","
+        + "\"name\":\"bad_vector\","
+        + "\"size\":42,"
+        + "\"logicalType\":\"vector\","
+        + "\"dimension\":10,"
+        + "\"elementType\":\"FLOAT\","
+        + "\"storageBacking\":\"FIXED_BYTES\""
+        + "}";
+
+    Schema avroSchema = new Schema.Parser().parse(jsonSchema);
+
+    IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+        () -> HoodieSchema.fromAvroSchema(avroSchema));
+
+    assertTrue(ex.getMessage().contains("FIXED size mismatch"),
+        "Should throw size mismatch error, got: " + ex.getMessage());
+  }
+
+  @Test
+  void testVectorUnknownElementType() {
+    // Create a FIXED schema with an invalid element type via JSON parsing
+    // so the VectorLogicalTypeFactory is properly invoked.
+    String jsonSchema = "{"
+        + "\"type\":\"fixed\","
+        + "\"name\":\"bad_vector\","
+        + "\"size\":40,"
+        + "\"logicalType\":\"vector\","
+        + "\"dimension\":10,"
+        + "\"elementType\":\"VARCHAR\","
+        + "\"storageBacking\":\"FIXED_BYTES\""
+        + "}";
+
+    Schema avroSchema = new Schema.Parser().parse(jsonSchema);
+
+    IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+        () -> HoodieSchema.fromAvroSchema(avroSchema));
+
+    assertTrue(ex.getMessage().contains("Unknown element type: VARCHAR"),
+        "Should reject unknown element types");
+  }
+
   /**
    * Creates a vector schema manually using Avro APIs.
    *

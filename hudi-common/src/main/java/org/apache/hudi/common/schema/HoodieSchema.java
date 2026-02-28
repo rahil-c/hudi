@@ -1686,7 +1686,7 @@ public class HoodieSchema implements Serializable {
      * @param avroSchema the Avro schema to wrap, must be a valid Vector schema
      * @throws IllegalArgumentException if avroSchema is null or not a valid Vector schema
      */
-    private Vector(Schema avroSchema) {
+    Vector(Schema avroSchema) {
       super(avroSchema);
 
       // Extract properties from LogicalType
@@ -2039,9 +2039,18 @@ public class HoodieSchema implements Serializable {
   private static class VectorLogicalTypeFactory implements LogicalTypes.LogicalTypeFactory {
     @Override
     public LogicalType fromSchema(Schema schema) {
-      // Extract properties from schema
+      // Extract properties from schema, defensively handling string-serialized values
       Object dimObj = schema.getObjectProp(VectorLogicalType.PROP_DIMENSION);
-      int dimension = dimObj instanceof Number ? ((Number) dimObj).intValue() : 0;
+      int dimension = 0;
+      if (dimObj != null) {
+        try {
+          dimension = Integer.parseInt(String.valueOf(dimObj));
+        } catch (NumberFormatException e) {
+          throw new IllegalArgumentException("Invalid vector dimension property: " + dimObj);
+        }
+      }
+      ValidationUtils.checkArgument(dimension > 0,
+          () -> "Missing or invalid 'dimension' property in vector schema");
 
       String elementType = schema.getProp(VectorLogicalType.PROP_ELEMENT_TYPE);
       if (elementType == null) {
