@@ -38,10 +38,12 @@ import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.avro.HoodieAvroUtils.createNewSchemaField;
@@ -104,15 +106,17 @@ public class HoodieSchema implements Serializable {
    * Parameterized types include positional parameters: "VECTOR(128)", "VECTOR(128, DOUBLE)".
    * Default parameters are omitted: VECTOR(dim) implies elementType=FLOAT.
    */
-  public static String toTypeString(HoodieSchema schema) {
-    HoodieSchemaType type = schema.getType();
+  public String toTypeString() {
+    HoodieSchemaType type = getType();
     switch (type) {
       case VECTOR:
-        Vector v = (Vector) schema;
+        Vector v = (Vector) this;
         if (v.getVectorElementType() == Vector.VectorElementType.FLOAT) {
           return "VECTOR(" + v.getDimension() + ")";
         }
         return "VECTOR(" + v.getDimension() + ", " + v.getVectorElementType().getDataType() + ")";
+      case BLOB:
+        return "BLOB";
       default:
         throw new IllegalArgumentException(
             "toTypeString only supports custom logical types, got: " + type);
@@ -124,7 +128,44 @@ public class HoodieSchema implements Serializable {
    * Examples: "VECTOR(128)" or "VECTOR(512, DOUBLE)".
    * Throws for non-custom logical type names.
    */
-  public static TypeDescriptor parseTypeString(String descriptor) {
+  public static HoodieSchema parseTypeString(String descriptor) {
+    Pair<HoodieSchemaType, List<String>> parsedDescriptor = parseTypeDescriptor(descriptor);
+    HoodieSchemaType type = parsedDescriptor.getLeft();
+    List<String> params = parsedDescriptor.getRight();
+    switch (type) {
+      case VECTOR:
+        if (params.isEmpty()) {
+          throw new IllegalArgumentException("VECTOR type descriptor must include a dimension parameter");
+        }
+        if (params.size() > 2) {
+          throw new IllegalArgumentException(
+              "VECTOR type descriptor supports at most 2 parameters: dimension and optional element type");
+        }
+        int dimension;
+        try {
+          dimension = Integer.parseInt(params.get(0));
+        } catch (NumberFormatException e) {
+          throw new IllegalArgumentException("Invalid VECTOR dimension: " + params.get(0), e);
+        }
+        Vector.VectorElementType elementType = params.size() > 1
+            ? Vector.VectorElementType.fromString(params.get(1))
+            : Vector.VectorElementType.FLOAT;
+        return createVector(dimension, elementType);
+      case BLOB:
+        if (!params.isEmpty()) {
+          throw new IllegalArgumentException(
+              "BLOB type descriptor does not support parameters, got: " + params);
+        }
+        return createBlob();
+      default:
+        throw new IllegalArgumentException(
+            "parseTypeString only supports custom logical types, got: " + type);
+    }
+  }
+
+  private static Pair<HoodieSchemaType, List<String>> parseTypeDescriptor(String descriptor) {
+    ValidationUtils.checkArgument(descriptor != null && !descriptor.trim().isEmpty(),
+        "Type descriptor cannot be null or empty");
     int parenStart = descriptor.indexOf('(');
     String typeName;
     List<String> params;
@@ -132,48 +173,29 @@ public class HoodieSchema implements Serializable {
       typeName = descriptor.trim();
       params = Collections.emptyList();
     } else {
+      if (!descriptor.endsWith(")")) {
+        throw new IllegalArgumentException("Malformed type descriptor, missing closing ')': " + descriptor);
+      }
       typeName = descriptor.substring(0, parenStart).trim();
       String paramStr = descriptor.substring(parenStart + 1, descriptor.length() - 1).trim();
-      params = Arrays.stream(paramStr.split(","))
-          .map(String::trim)
-          .collect(Collectors.toList());
+      if (paramStr.isEmpty()) {
+        params = Collections.emptyList();
+      } else {
+        params = Arrays.stream(paramStr.split(","))
+            .map(String::trim)
+            .collect(Collectors.toList());
+      }
     }
-    HoodieSchemaType type = HoodieSchemaType.valueOf(typeName);
+    HoodieSchemaType type = HoodieSchemaType.valueOf(typeName.toUpperCase(Locale.ROOT));
     if (!CUSTOM_LOGICAL_TYPES.contains(type)) {
       throw new IllegalArgumentException(
           "parseTypeString only supports custom logical types, got: " + type);
     }
-    return new TypeDescriptor(type, params);
+    return Pair.of(type, params);
   }
 
-  private static final java.util.Set<HoodieSchemaType> CUSTOM_LOGICAL_TYPES =
-      java.util.EnumSet.of(HoodieSchemaType.VECTOR);
-
-  /**
-   * Descriptor for a parameterized type string for custom Hudi logical types such as VECTOR and BLOB.
-   * For example, "VECTOR(128, DOUBLE)" yields type=VECTOR, params=["128", "DOUBLE"].
-   */
-  public static class TypeDescriptor {
-    private final HoodieSchemaType type;
-    private final List<String> params;
-
-    public TypeDescriptor(HoodieSchemaType type, List<String> params) {
-      this.type = type;
-      this.params = params;
-    }
-
-    public HoodieSchemaType getType() {
-      return type;
-    }
-
-    public List<String> getParams() {
-      return params;
-    }
-
-    public String getParam(int index) {
-      return params.get(index);
-    }
-  }
+  private static final Set<HoodieSchemaType> CUSTOM_LOGICAL_TYPES =
+      EnumSet.of(HoodieSchemaType.VECTOR, HoodieSchemaType.BLOB);
 
 
   /**
@@ -2084,7 +2106,7 @@ public class HoodieSchema implements Serializable {
     }
   }
 
-  static class VectorLogicalType extends LogicalType {
+  public static class VectorLogicalType extends LogicalType {
     private static final String VECTOR_LOGICAL_TYPE_NAME = "vector";
     private static final String PROP_DIMENSION = "dimension";
     private static final String PROP_ELEMENT_TYPE = "elementType";

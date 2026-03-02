@@ -2178,36 +2178,37 @@ public class TestHoodieSchema {
   @Test
   public void testToTypeStringVectorDefaultElementType() {
     HoodieSchema.Vector vector = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
-    assertEquals("VECTOR(128)", HoodieSchema.toTypeString(vector));
+    assertEquals("VECTOR(128)", vector.toTypeString());
   }
 
   @Test
   public void testToTypeStringVectorNonDefaultElementType() {
     HoodieSchema.Vector vector = HoodieSchema.createVector(512, HoodieSchema.Vector.VectorElementType.DOUBLE);
-    assertEquals("VECTOR(512, DOUBLE)", HoodieSchema.toTypeString(vector));
+    assertEquals("VECTOR(512, DOUBLE)", vector.toTypeString());
   }
 
   @Test
   public void testToTypeStringThrowsForNonCustomType() {
     HoodieSchema intSchema = HoodieSchema.create(HoodieSchemaType.INT);
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.toTypeString(intSchema));
+    assertThrows(IllegalArgumentException.class, intSchema::toTypeString);
   }
 
   @Test
   public void testParseTypeStringVector() {
-    HoodieSchema.TypeDescriptor td = HoodieSchema.parseTypeString("VECTOR(128)");
-    assertEquals(HoodieSchemaType.VECTOR, td.getType());
-    assertEquals(1, td.getParams().size());
-    assertEquals("128", td.getParam(0));
+    HoodieSchema parsed = HoodieSchema.parseTypeString("VECTOR(128)");
+    assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
+    HoodieSchema.Vector vector = (HoodieSchema.Vector) parsed;
+    assertEquals(128, vector.getDimension());
+    assertEquals(HoodieSchema.Vector.VectorElementType.FLOAT, vector.getVectorElementType());
   }
 
   @Test
   public void testParseTypeStringVectorWithElementType() {
-    HoodieSchema.TypeDescriptor td = HoodieSchema.parseTypeString("VECTOR(512, DOUBLE)");
-    assertEquals(HoodieSchemaType.VECTOR, td.getType());
-    assertEquals(2, td.getParams().size());
-    assertEquals("512", td.getParam(0));
-    assertEquals("DOUBLE", td.getParam(1));
+    HoodieSchema parsed = HoodieSchema.parseTypeString("VECTOR(512, DOUBLE)");
+    assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
+    HoodieSchema.Vector vector = (HoodieSchema.Vector) parsed;
+    assertEquals(512, vector.getDimension());
+    assertEquals(HoodieSchema.Vector.VectorElementType.DOUBLE, vector.getVectorElementType());
   }
 
   @Test
@@ -2218,20 +2219,22 @@ public class TestHoodieSchema {
   @Test
   public void testTypeStringRoundTrip() {
     HoodieSchema.Vector vector = HoodieSchema.createVector(256, HoodieSchema.Vector.VectorElementType.FLOAT);
-    String typeString = HoodieSchema.toTypeString(vector);
-    HoodieSchema.TypeDescriptor td = HoodieSchema.parseTypeString(typeString);
+    String typeString = vector.toTypeString();
+    HoodieSchema parsed = HoodieSchema.parseTypeString(typeString);
+    HoodieSchema.Vector parsedVector = (HoodieSchema.Vector) parsed;
 
-    assertEquals(HoodieSchemaType.VECTOR, td.getType());
-    assertEquals("256", td.getParam(0));
-    assertEquals(1, td.getParams().size());
+    assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
+    assertEquals(256, parsedVector.getDimension());
+    assertEquals(HoodieSchema.Vector.VectorElementType.FLOAT, parsedVector.getVectorElementType());
 
     // Non-default element type round-trip
     HoodieSchema.Vector vectorDouble = HoodieSchema.createVector(64, HoodieSchema.Vector.VectorElementType.DOUBLE);
-    String typeStringDouble = HoodieSchema.toTypeString(vectorDouble);
-    HoodieSchema.TypeDescriptor tdDouble = HoodieSchema.parseTypeString(typeStringDouble);
+    String typeStringDouble = vectorDouble.toTypeString();
+    HoodieSchema parsedDouble = HoodieSchema.parseTypeString(typeStringDouble);
+    HoodieSchema.Vector parsedDoubleVector = (HoodieSchema.Vector) parsedDouble;
 
-    assertEquals(HoodieSchemaType.VECTOR, tdDouble.getType());
-    assertEquals("64", tdDouble.getParam(0));
-    assertEquals("DOUBLE", tdDouble.getParam(1));
+    assertEquals(HoodieSchemaType.VECTOR, parsedDouble.getType());
+    assertEquals(64, parsedDoubleVector.getDimension());
+    assertEquals(HoodieSchema.Vector.VectorElementType.DOUBLE, parsedDoubleVector.getVectorElementType());
   }
 }

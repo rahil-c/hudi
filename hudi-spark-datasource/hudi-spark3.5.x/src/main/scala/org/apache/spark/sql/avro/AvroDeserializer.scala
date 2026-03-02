@@ -22,6 +22,7 @@ import org.apache.avro.Conversions.DecimalConversion
 import org.apache.avro.LogicalTypes.{LocalTimestampMicros, LocalTimestampMillis, TimestampMicros, TimestampMillis}
 import org.apache.avro.Schema.Type._
 import org.apache.avro.generic._
+import org.apache.hudi.common.schema.HoodieSchema.VectorLogicalType
 import org.apache.avro.util.Utf8
 import org.apache.spark.sql.avro.AvroDeserializer.{createDateRebaseFuncInRead, createTimestampRebaseFuncInRead, RebaseSpec}
 import org.apache.spark.sql.avro.AvroUtils.{toFieldStr, AvroMatchedField}
@@ -35,6 +36,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
 import java.math.BigDecimal
+import java.nio.ByteOrder
 import java.nio.ByteBuffer
 import java.util.TimeZone
 
@@ -165,29 +167,32 @@ private[sql] class AvroDeserializer(rootAvroType: Schema,
       }
 
       // Handle VECTOR logical type
-      case (FIXED, ArrayType(FloatType, false))
-          if avroType.getLogicalType != null &&
-             avroType.getLogicalType.getName == "vector" =>
+      case (FIXED, ArrayType(FloatType, false)) => avroType.getLogicalType match {
+        case vectorLogicalType: VectorLogicalType =>
+          val dimension = vectorLogicalType.getDimension
+          (updater, ordinal, value) => {
+            val bytes = value.asInstanceOf[GenericData.Fixed].bytes()
 
-        val dimension = avroType.getObjectProp("dimension").asInstanceOf[Number].intValue()
+            // Validate size
+            val expectedSize = dimension * 4
+            if (bytes.length != expectedSize) {
+              throw new IncompatibleSchemaException(
+                s"VECTOR byte size mismatch: expected=$expectedSize, actual=${bytes.length}")
+            }
 
-        (updater, ordinal, value) => {
-          val bytes = value.asInstanceOf[GenericData.Fixed].bytes()
+            // Unpack bytes to float array (little-endian)
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            val floats = new Array[Float](dimension)
+            var i = 0
+            while (i < dimension) {
+              floats(i) = buffer.getFloat()
+              i += 1
+            }
 
-          // Validate size
-          val expectedSize = dimension * 4
-          if (bytes.length != expectedSize) {
-            throw new IncompatibleSchemaException(
-              s"VECTOR byte size mismatch: expected=$expectedSize, actual=${bytes.length}")
+            updater.set(ordinal, ArrayData.toArrayData(floats))
           }
-
-          // Unpack bytes to float array (little-endian)
-          val buffer = java.nio.ByteBuffer.wrap(bytes)
-            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-          val floats = (0 until dimension).map(_ => buffer.getFloat()).toArray
-
-          updater.set(ordinal, ArrayData.toArrayData(floats))
-        }
+        case _ => throw new IncompatibleSchemaException(incompatibleMsg)
+      }
 
       // Before we upgrade Avro to 1.8 for logical type support, spark-avro converts Long to Date.
       // For backward compatibility, we still keep this conversion.

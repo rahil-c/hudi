@@ -88,16 +88,16 @@ object HoodieSparkSchemaConverters {
             s"VECTOR type does not support nullable elements (field: $recordName)")
         }
 
-        val typeDescriptor = HoodieSchema.parseTypeString(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
-        val dimension = typeDescriptor.getParam(0).toInt
+        val vectorSchema = HoodieSchema
+          .parseTypeString(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+          .asInstanceOf[HoodieSchema.Vector]
+        val dimension = vectorSchema.getDimension
         if (dimension <= 0) {
           throw new IncompatibleSchemaException(
             s"VECTOR dimension must be positive, got: $dimension (field: $recordName)")
         }
 
-        val elementType = if (typeDescriptor.getParams.size() > 1)
-          HoodieSchema.Vector.VectorElementType.fromString(typeDescriptor.getParam(1))
-        else HoodieSchema.Vector.VectorElementType.FLOAT
+        val elementType = vectorSchema.getVectorElementType
 
         val expectedSparkType = sparkTypeForVectorElementType(elementType)
         if (elementSparkType != expectedSparkType) {
@@ -116,7 +116,7 @@ object HoodieSparkSchemaConverters {
         HoodieSchema.createMap(valueSchema)
 
       case blobStruct: StructType if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
-        metadata.getString(HoodieSchema.TYPE_METADATA_FIELD).equalsIgnoreCase(HoodieSchemaType.BLOB.name()) =>
+        HoodieSchema.parseTypeString(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.BLOB =>
         // Validate blob structure before accepting
         validateBlobStructure(blobStruct)
         HoodieSchema.createBlob()
@@ -215,7 +215,7 @@ object HoodieSparkSchemaConverters {
       case HoodieSchemaType.VECTOR =>
         val vectorSchema = hoodieSchema.asInstanceOf[HoodieSchema.Vector]
         val metadata = new MetadataBuilder()
-          .putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchema.toTypeString(vectorSchema))
+          .putString(HoodieSchema.TYPE_METADATA_FIELD, vectorSchema.toTypeString)
           .build()
 
         val sparkElementType = sparkTypeForVectorElementType(vectorSchema.getVectorElementType)
@@ -233,32 +233,16 @@ object HoodieSparkSchemaConverters {
         val newRecordNames = existingRecordNames + fullName
         val fields = hoodieSchema.getFields.asScala.map { f =>
           val schemaType = toSqlTypeHelper(f.schema(), newRecordNames)
-          val commentMetadata = schemaType.metadata match {
-            case Some(typeMetadata) =>
-              if (f.doc().isPresent && !f.doc().get().isEmpty) {
-                new MetadataBuilder().withMetadata(typeMetadata)
-                  .putString("comment", f.doc().get()).build()
-              } else {
-                typeMetadata
-              }
-            case None =>
-              if (f.doc().isPresent && !f.doc().get().isEmpty) {
-                new MetadataBuilder().putString("comment", f.doc().get()).build()
-              } else {
-                Metadata.empty
-              }
-          }
           val fieldSchema = f.getNonNullSchema
-          val metadata = if (fieldSchema.isBlobField) {
-            // Mark blob fields with metadata for identification.
-            // This assumes blobs are always part of a record and not the top level schema itself
-            new MetadataBuilder()
-              .withMetadata(commentMetadata)
-              .putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchemaType.BLOB.name())
-              .build()
-          } else {
-            commentMetadata
+          val metadataBuilder = new MetadataBuilder()
+            .withMetadata(schemaType.metadata.getOrElse(Metadata.empty))
+          if (f.doc().isPresent && f.doc().get().nonEmpty) {
+            metadataBuilder.putString("comment", f.doc().get())
           }
+          if (fieldSchema.getType == HoodieSchemaType.VECTOR || fieldSchema.isBlobField) {
+            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, fieldSchema.toTypeString())
+          }
+          val metadata = metadataBuilder.build()
           StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)
         }
         SchemaType(StructType(fields.toSeq), nullable = false)

@@ -23,6 +23,7 @@ import org.apache.avro.LogicalTypes.{LocalTimestampMicros, LocalTimestampMillis,
 import org.apache.avro.Schema.Type
 import org.apache.avro.Schema.Type._
 import org.apache.avro.generic.GenericData.{EnumSymbol, Fixed, Record}
+import org.apache.hudi.common.schema.HoodieSchema.VectorLogicalType
 import org.apache.avro.util.Utf8
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.avro.AvroSerializer.{createDateRebaseFuncInWrite, createTimestampRebaseFuncInWrite}
@@ -35,6 +36,7 @@ import org.apache.spark.sql.internal.{LegacyBehaviorPolicy, SQLConf}
 import org.apache.spark.sql.types._
 
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.TimeZone
 
 import scala.collection.JavaConverters._
@@ -145,32 +147,32 @@ private[sql] class AvroSerializer(rootCatalystType: DataType,
             LogicalTypes.decimal(d.precision, d.scale))
 
       // Handle VECTOR logical type
-      case (ArrayType(FloatType, false), FIXED)
-          if avroType.getLogicalType != null &&
-             avroType.getLogicalType.getName == "vector" =>
+      case (ArrayType(FloatType, false), FIXED) => avroType.getLogicalType match {
+        case vectorLogicalType: VectorLogicalType =>
+          val dimension = vectorLogicalType.getDimension
+          (getter, ordinal) => {
+            val arrayData = getter.getArray(ordinal)
 
-        val dimension = avroType.getObjectProp("dimension").asInstanceOf[Number].intValue()
+            // Validate dimension
+            if (arrayData.numElements() != dimension) {
+              throw new IncompatibleSchemaException(
+                s"VECTOR dimension mismatch at ${toFieldStr(catalystPath)}: " +
+                s"expected=$dimension, actual=${arrayData.numElements()}")
+            }
 
-        (getter, ordinal) => {
-          val arrayData = getter.getArray(ordinal)
+            // Pack floats into bytes (little-endian, 4 bytes per float)
+            val buffer = ByteBuffer.allocate(dimension * 4).order(ByteOrder.LITTLE_ENDIAN)
+            var i = 0
+            while (i < dimension) {
+              buffer.putFloat(arrayData.getFloat(i))
+              i += 1
+            }
 
-          // Validate dimension
-          if (arrayData.numElements() != dimension) {
-            throw new IncompatibleSchemaException(
-              s"VECTOR dimension mismatch at ${toFieldStr(catalystPath)}: " +
-              s"expected=$dimension, actual=${arrayData.numElements()}")
+            new Fixed(avroType, buffer.array())
           }
-
-          // Pack floats into bytes (little-endian, 4 bytes per float)
-          val buffer = java.nio.ByteBuffer.allocate(dimension * 4)
-            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-
-          (0 until dimension).foreach { i =>
-            buffer.putFloat(arrayData.getFloat(i))
-          }
-
-          new Fixed(avroType, buffer.array())
-        }
+        case _ => throw new IncompatibleSchemaException(errorPrefix +
+          s"schema is incompatible (sqlType = ${catalystType.sql}, avroType = $avroType)")
+      }
 
       case (StringType, ENUM) =>
         val enumSymbols: Set[String] = avroType.getEnumSymbols.asScala.toSet
