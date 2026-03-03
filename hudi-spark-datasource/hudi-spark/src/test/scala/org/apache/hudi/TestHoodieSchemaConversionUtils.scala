@@ -786,6 +786,50 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     assert(convertedHoodieSchema.getField("metadata").get().isNullable())
   }
 
+  test("test nullable VECTOR round-trip conversion") {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(64)")
+      .build()
+    val originalStruct = new StructType()
+      .add("id", LongType, false)
+      .add("embedding", ArrayType(FloatType, containsNull = false), nullable = true, metadata)
+
+    val hoodieSchema = HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(
+      originalStruct, "NullableVectorTest", "test")
+
+    // Verify the vector field is nullable in HoodieSchema
+    val embeddingField = hoodieSchema.getField("embedding").get()
+    assert(embeddingField.isNullable())
+    val vectorSchema = embeddingField.schema().getNonNullType().asInstanceOf[HoodieSchema.Vector]
+    assert(vectorSchema.getDimension == 64)
+    assert(vectorSchema.getVectorElementType == HoodieSchema.Vector.VectorElementType.FLOAT)
+
+    // Convert back to Spark
+    val convertedStruct = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(hoodieSchema)
+    val convertedField = convertedStruct.fields(1)
+    assert(convertedField.nullable)
+    assert(convertedField.dataType == ArrayType(FloatType, containsNull = false))
+    assert(convertedField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
+    val parsedVector = HoodieSchema.parseTypeString(
+      convertedField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
+    assert(parsedVector.getDimension == 64)
+  }
+
+  test("test VECTOR element type mismatch throws error") {
+    // Metadata says DOUBLE, but Spark array element type is Float
+    val mismatchMetadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(128, DOUBLE)")
+      .build()
+    val struct = new StructType()
+      .add("embedding", ArrayType(FloatType, containsNull = false), nullable = false, mismatchMetadata)
+
+    the[Exception] thrownBy {
+      HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(
+        struct, "MismatchTest", "test")
+    } should have message (
+      "VECTOR element type mismatch for field MismatchTest: metadata requires DOUBLE, Spark array has FloatType")
+  }
+
   private def internalRowCompare(expected: Any, actual: Any, schema: DataType): Unit = {
     schema match {
       case StructType(fields) =>

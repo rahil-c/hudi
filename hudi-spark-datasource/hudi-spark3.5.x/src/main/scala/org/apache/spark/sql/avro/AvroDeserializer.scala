@@ -17,12 +17,13 @@
 
 package org.apache.spark.sql.avro
 
+import org.apache.hudi.common.schema.HoodieSchema.VectorLogicalType
+
 import org.apache.avro.{LogicalTypes, Schema, SchemaBuilder}
 import org.apache.avro.Conversions.DecimalConversion
 import org.apache.avro.LogicalTypes.{LocalTimestampMicros, LocalTimestampMillis, TimestampMicros, TimestampMillis}
 import org.apache.avro.Schema.Type._
 import org.apache.avro.generic._
-import org.apache.hudi.common.schema.HoodieSchema.VectorLogicalType
 import org.apache.avro.util.Utf8
 import org.apache.spark.sql.avro.AvroDeserializer.{createDateRebaseFuncInRead, createTimestampRebaseFuncInRead, RebaseSpec}
 import org.apache.spark.sql.avro.AvroUtils.{toFieldStr, AvroMatchedField}
@@ -36,8 +37,8 @@ import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
 import java.math.BigDecimal
-import java.nio.ByteOrder
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.TimeZone
 
 import scala.collection.JavaConverters._
@@ -166,30 +167,37 @@ private[sql] class AvroDeserializer(rootAvroType: Schema,
           s"Avro logical type $other cannot be converted to SQL type ${TimestampNTZType.sql}.")
       }
 
-      // Handle VECTOR logical type
-      case (FIXED, ArrayType(FloatType, false)) => avroType.getLogicalType match {
+      // Handle VECTOR logical type (FLOAT, DOUBLE, INT8)
+      case (FIXED, ArrayType(elementType, false)) => avroType.getLogicalType match {
         case vectorLogicalType: VectorLogicalType =>
           val dimension = vectorLogicalType.getDimension
+          val elementSize = elementType match {
+            case FloatType => 4
+            case DoubleType => 8
+            case ByteType => 1
+            case _ => throw new IncompatibleSchemaException(incompatibleMsg)
+          }
           (updater, ordinal, value) => {
             val bytes = value.asInstanceOf[GenericData.Fixed].bytes()
-
-            // Validate size
-            val expectedSize = dimension * 4
+            val expectedSize = dimension * elementSize
             if (bytes.length != expectedSize) {
               throw new IncompatibleSchemaException(
                 s"VECTOR byte size mismatch: expected=$expectedSize, actual=${bytes.length}")
             }
-
-            // Unpack bytes to float array (little-endian)
-            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-            val floats = new Array[Float](dimension)
-            var i = 0
-            while (i < dimension) {
-              floats(i) = buffer.getFloat()
-              i += 1
+            elementType match {
+              case FloatType =>
+                val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                val floats = new Array[Float](dimension)
+                var i = 0; while (i < dimension) { floats(i) = buffer.getFloat(); i += 1 }
+                updater.set(ordinal, ArrayData.toArrayData(floats))
+              case DoubleType =>
+                val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                val doubles = new Array[Double](dimension)
+                var i = 0; while (i < dimension) { doubles(i) = buffer.getDouble(); i += 1 }
+                updater.set(ordinal, ArrayData.toArrayData(doubles))
+              case ByteType =>
+                updater.set(ordinal, ArrayData.toArrayData(bytes.clone()))
             }
-
-            updater.set(ordinal, ArrayData.toArrayData(floats))
           }
         case _ => throw new IncompatibleSchemaException(incompatibleMsg)
       }

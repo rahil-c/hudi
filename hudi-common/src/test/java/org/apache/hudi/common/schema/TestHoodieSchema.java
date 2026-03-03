@@ -2237,4 +2237,48 @@ public class TestHoodieSchema {
     assertEquals(64, parsedDoubleVector.getDimension());
     assertEquals(HoodieSchema.Vector.VectorElementType.DOUBLE, parsedDoubleVector.getVectorElementType());
   }
+
+  @Test
+  public void testParseTypeStringMalformed() {
+    // Null and empty inputs
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString(null));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString(""));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("   "));
+
+    // Missing closing parenthesis
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(128"));
+
+    // Non-numeric dimension
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(abc)"));
+
+    // Missing required dimension parameter
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR()"));
+
+    // Too many parameters
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(128, FLOAT, extra)"));
+
+    // Invalid element type
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(128, INVALID)"));
+
+    // BLOB does not accept parameters
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("BLOB(1024)"));
+  }
+
+  @Test
+  public void testParseTypeStringUnknownType() {
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("UNKNOWN_TYPE"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("FOOBAR(123)"));
+  }
+
+  @Test
+  public void testBlobTypeStringRoundTrip() {
+    HoodieSchema.Blob blob = HoodieSchema.createBlob();
+    String typeString = blob.toTypeString();
+    assertEquals("BLOB", typeString);
+
+    HoodieSchema parsed = HoodieSchema.parseTypeString(typeString);
+    assertEquals(HoodieSchemaType.BLOB, parsed.getType());
+    assertInstanceOf(HoodieSchema.Blob.class, parsed);
+  }
 }

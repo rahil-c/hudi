@@ -17,13 +17,14 @@
 
 package org.apache.spark.sql.avro
 
+import org.apache.hudi.common.schema.HoodieSchema.VectorLogicalType
+
 import org.apache.avro.{LogicalTypes, Schema}
 import org.apache.avro.Conversions.DecimalConversion
 import org.apache.avro.LogicalTypes.{LocalTimestampMicros, LocalTimestampMillis, TimestampMicros, TimestampMillis}
 import org.apache.avro.Schema.Type
 import org.apache.avro.Schema.Type._
 import org.apache.avro.generic.GenericData.{EnumSymbol, Fixed, Record}
-import org.apache.hudi.common.schema.HoodieSchema.VectorLogicalType
 import org.apache.avro.util.Utf8
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.avro.AvroSerializer.{createDateRebaseFuncInWrite, createTimestampRebaseFuncInWrite}
@@ -146,29 +147,33 @@ private[sql] class AvroSerializer(rootCatalystType: DataType,
           decimalConversions.toBytes(decimal.toJavaBigDecimal, avroType,
             LogicalTypes.decimal(d.precision, d.scale))
 
-      // Handle VECTOR logical type
-      case (ArrayType(FloatType, false), FIXED) => avroType.getLogicalType match {
+      // Handle VECTOR logical type (FLOAT, DOUBLE, INT8)
+      case (ArrayType(elementType, false), FIXED) => avroType.getLogicalType match {
         case vectorLogicalType: VectorLogicalType =>
           val dimension = vectorLogicalType.getDimension
           (getter, ordinal) => {
             val arrayData = getter.getArray(ordinal)
-
-            // Validate dimension
             if (arrayData.numElements() != dimension) {
               throw new IncompatibleSchemaException(
                 s"VECTOR dimension mismatch at ${toFieldStr(catalystPath)}: " +
                 s"expected=$dimension, actual=${arrayData.numElements()}")
             }
-
-            // Pack floats into bytes (little-endian, 4 bytes per float)
-            val buffer = ByteBuffer.allocate(dimension * 4).order(ByteOrder.LITTLE_ENDIAN)
-            var i = 0
-            while (i < dimension) {
-              buffer.putFloat(arrayData.getFloat(i))
-              i += 1
+            elementType match {
+              case FloatType =>
+                val buffer = ByteBuffer.allocate(dimension * 4).order(ByteOrder.LITTLE_ENDIAN)
+                var i = 0; while (i < dimension) { buffer.putFloat(arrayData.getFloat(i)); i += 1 }
+                new Fixed(avroType, buffer.array())
+              case DoubleType =>
+                val buffer = ByteBuffer.allocate(dimension * 8).order(ByteOrder.LITTLE_ENDIAN)
+                var i = 0; while (i < dimension) { buffer.putDouble(arrayData.getDouble(i)); i += 1 }
+                new Fixed(avroType, buffer.array())
+              case ByteType =>
+                val bytes = new Array[Byte](dimension)
+                var i = 0; while (i < dimension) { bytes(i) = arrayData.getByte(i); i += 1 }
+                new Fixed(avroType, bytes)
+              case _ => throw new IncompatibleSchemaException(errorPrefix +
+                s"schema is incompatible (sqlType = ${catalystType.sql}, avroType = $avroType)")
             }
-
-            new Fixed(avroType, buffer.array())
           }
         case _ => throw new IncompatibleSchemaException(errorPrefix +
           s"schema is incompatible (sqlType = ${catalystType.sql}, avroType = $avroType)")

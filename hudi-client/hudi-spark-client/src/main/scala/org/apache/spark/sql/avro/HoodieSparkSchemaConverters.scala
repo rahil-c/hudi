@@ -79,7 +79,6 @@ object HoodieSparkSchemaConverters {
         HoodieSchema.createDecimal(name, nameSpace, null, d.precision, d.scale, fixedSize)
 
       // Complex types
-      // Check for VECTOR type metadata property in spark struct type
       case ArrayType(elementSparkType, containsNull)
           if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
             metadata.getString(HoodieSchema.TYPE_METADATA_FIELD).startsWith("VECTOR") =>
@@ -245,7 +244,15 @@ object HoodieSparkSchemaConverters {
           val metadata = metadataBuilder.build()
           StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)
         }
-        SchemaType(StructType(fields.toSeq), nullable = false)
+        // For BLOB types, propagate type metadata via SchemaType (consistent with VECTOR handling)
+        val schemaTypeMetadata = if (hoodieSchema.getType == HoodieSchemaType.BLOB) {
+          Some(new MetadataBuilder()
+            .putString(HoodieSchema.TYPE_METADATA_FIELD, hoodieSchema.toTypeString)
+            .build())
+        } else {
+          None
+        }
+        SchemaType(StructType(fields.toSeq), nullable = false, schemaTypeMetadata)
 
       case HoodieSchemaType.ARRAY =>
         val elementSchema = hoodieSchema.getElementType
