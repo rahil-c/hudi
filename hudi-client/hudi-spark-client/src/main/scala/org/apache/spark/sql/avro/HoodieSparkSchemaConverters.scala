@@ -20,6 +20,7 @@ package org.apache.spark.sql.avro
 
 import org.apache.hudi.common.schema.HoodieSchema.TimePrecision
 import org.apache.hudi.common.schema.{HoodieJsonProperties, HoodieSchema, HoodieSchemaField, HoodieSchemaType}
+import org.apache.hudi.internal.schema.HoodieSchemaException
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.sql.types.Decimal.minBytesForPrecision
 import org.apache.spark.sql.types._
@@ -83,7 +84,7 @@ object HoodieSparkSchemaConverters {
           if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
             metadata.getString(HoodieSchema.TYPE_METADATA_FIELD).startsWith("VECTOR") =>
         if (containsNull) {
-          throw new IncompatibleSchemaException(
+          throw new HoodieSchemaException(
             s"VECTOR type does not support nullable elements (field: $recordName)")
         }
 
@@ -92,7 +93,7 @@ object HoodieSparkSchemaConverters {
           .asInstanceOf[HoodieSchema.Vector]
         val dimension = vectorSchema.getDimension
         if (dimension <= 0) {
-          throw new IncompatibleSchemaException(
+          throw new HoodieSchemaException(
             s"VECTOR dimension must be positive, got: $dimension (field: $recordName)")
         }
 
@@ -100,7 +101,7 @@ object HoodieSparkSchemaConverters {
 
         val expectedSparkType = sparkTypeForVectorElementType(elementType)
         if (elementSparkType != expectedSparkType) {
-          throw new IncompatibleSchemaException(
+          throw new HoodieSchemaException(
             s"VECTOR element type mismatch for field $recordName: metadata requires $elementType, Spark array has $elementSparkType")
         }
 

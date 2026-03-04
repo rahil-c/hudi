@@ -827,7 +827,7 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
       HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(
         struct, "MismatchTest", "test")
     } should have message (
-      "VECTOR element type mismatch for field MismatchTest: metadata requires DOUBLE, Spark array has FloatType")
+      "VECTOR element type mismatch for field embedding: metadata requires DOUBLE, Spark array has FloatType")
   }
 
   private def internalRowCompare(expected: Any, actual: Any, schema: DataType): Unit = {
