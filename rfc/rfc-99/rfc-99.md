@@ -138,6 +138,13 @@ These are first-class types designed for modern AI/ML workloads.
 | SPARSE\_VECTOR(indices, values) | A sparse vector represented by indices and values. | Index, Value types |
 | TENSOR(element\_type, shape) | A multi-dimensional array (tensor). | Element type, shape |
 
+#### **3.6. Unstructured Data Types**
+
+These types are designed for large binary objects such as images, videos, audio, and documents.
+
+| Logical Type | Description | Parameters |
+| :---- | :---- | :---- |
+| BLOB | A binary large object for unstructured data (e.g., images, video, audio, documents). Physically represented as a record with a type discriminator, inline data bytes, and an external reference (path, offset, length, managed). | None |
 
 
 ### **Interoperability Mapping**
@@ -175,6 +182,7 @@ The following table defines the canonical mapping from the proposed logical type
 | **DICTIONARY\<K,V\>** | **Dictionary** | Parquet Type for V (w/ Dictionary Encoding) | Avro Type for V (e.g., string, long) | Spark Type for V (e.g., StringType) | Flink Type for V (e.g., STRING) |
 | VECTOR(FLOAT, d) | FixedSizeList\<Float32, d\> | FIXED\_LEN\_BYTE\_ARRAY or LIST | array\<float\> | ArrayType(FloatType) | ARRAY\<FLOAT\> |
 | VARIANT | DenseUnion or LargeBinary | BYTE\_ARRAY \+ JSON | string or union | VariantType | JSON |
+| BLOB | Struct\<type, data, reference\> | Group (BLOB logical type) | record \+ blob logical type | StructType (w/ BLOB metadata) | ROW\<type STRING, data BYTES, reference ROW\> |
 
  
 ## Implementation
