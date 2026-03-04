@@ -239,8 +239,10 @@ object HoodieSparkSchemaConverters {
           if (f.doc().isPresent && f.doc().get().nonEmpty) {
             metadataBuilder.putString("comment", f.doc().get())
           }
-          if (fieldSchema.getType == HoodieSchemaType.VECTOR || fieldSchema.isBlobField) {
+          if (fieldSchema.getType == HoodieSchemaType.VECTOR) {
             metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, fieldSchema.toTypeString())
+          } else if (fieldSchema.isBlobField) {
+            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchemaType.BLOB.name())
           }
           val metadata = metadataBuilder.build()
           StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)
