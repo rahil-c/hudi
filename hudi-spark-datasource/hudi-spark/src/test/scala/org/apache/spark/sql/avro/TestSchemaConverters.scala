@@ -158,7 +158,7 @@ class TestSchemaConverters {
     val originalSchema = HoodieSchema.createRecord("BlobMaps", "test", null, fields)
 
     // Roundtrip
-  val (sparkType, _) = HoodieSparkSchemaConverters.toSqlType(originalSchema)
+    val (sparkType, _) = HoodieSparkSchemaConverters.toSqlType(originalSchema)
     val reconstructed = HoodieSparkSchemaConverters.toHoodieType(sparkType, recordName = "BlobMaps")
 
     // Verify simple map
