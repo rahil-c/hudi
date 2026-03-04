@@ -36,6 +36,7 @@ import com.codahale.metrics.Timer;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.Map;
 import java.util.Set;
 
 import static org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator.MILLIS_INSTANT_TIMESTAMP_FORMAT_LENGTH;
@@ -117,6 +118,7 @@ public class HoodieMetrics {
   private String conflictResolutionFailureCounterName = null;
   private String compactionRequestedCounterName = null;
   private String compactionCompletedCounterName = null;
+  private String rollbackFailureCounterName = null;
   private final HoodieWriteConfig config;
   private final String tableName;
   private Timer rollbackTimer = null;
@@ -135,6 +137,7 @@ public class HoodieMetrics {
   private Counter conflictResolutionFailureCounter = null;
   private Counter compactionRequestedCounter = null;
   private Counter compactionCompletedCounter = null;
+  private Counter rollbackFailureCounter = null;
 
   public HoodieMetrics(HoodieWriteConfig config, HoodieStorage storage) {
     this.config = config;
@@ -157,6 +160,7 @@ public class HoodieMetrics {
       this.conflictResolutionFailureCounterName = getMetricsName(CONFLICT_RESOLUTION_STR, FAILURE_COUNTER);
       this.compactionRequestedCounterName = getMetricsName(HoodieTimeline.COMPACTION_ACTION, HoodieTimeline.REQUESTED_COMPACTION_SUFFIX + COUNTER_METRIC_EXTENSION);
       this.compactionCompletedCounterName = getMetricsName(HoodieTimeline.COMPACTION_ACTION, HoodieTimeline.COMPLETED_COMPACTION_SUFFIX + COUNTER_METRIC_EXTENSION);
+      this.rollbackFailureCounterName = getMetricsName("rollback", FAILURE_COUNTER);
     }
   }
 
@@ -358,6 +362,25 @@ public class HoodieMetrics {
               DELETE_INSTANTS_NUM_STR, numInstantsArchived));
       metrics.registerGauge(getMetricsName(ARCHIVE_ACTION, DURATION_STR), durationInMs);
       metrics.registerGauge(getMetricsName(ARCHIVE_ACTION, DELETE_INSTANTS_NUM_STR), numInstantsArchived);
+    }
+  }
+
+  public void emitRollbackFailure(String exceptionType) {
+    if (config.isMetricsOn()) {
+      rollbackFailureCounter = getCounter(rollbackFailureCounter, rollbackFailureCounterName);
+      rollbackFailureCounter.inc();
+      if (exceptionType != null) {
+        String exceptionCounterName = getMetricsName("rollback", exceptionType + COUNTER_METRIC_EXTENSION);
+        Counter exceptionCounter = metrics.getRegistry().counter(exceptionCounterName);
+        exceptionCounter.inc();
+      }
+    }
+  }
+  
+  public void updateArchivalMetrics(Map<String, Long> archivalMetrics) {
+    if (config.isMetricsOn()) {
+      log.info(String.format("Sending archival metrics %s", archivalMetrics));
+      archivalMetrics.forEach((metricName, metricValue) -> metrics.registerGauge(getMetricsName("archival", metricName), metricValue));
     }
   }
 

@@ -650,6 +650,13 @@ public class FlinkOptions extends HoodieConfig {
           + "**Note** This is being actively worked on. Please use "
           + "`hoodie.datasource.write.keygenerator.class` instead.");
 
+  @AdvancedConfig
+  public static final ConfigOption<String> PARTITION_VALUE_EXTRACTOR = ConfigOptions
+      .key(HoodieTableConfig.PARTITION_EXTRACTOR_CLASS.key())
+      .stringType()
+      .noDefaultValue()
+      .withDescription("Partition value extractor class helps extract the partition value from partition paths");
+
   public static final String PARTITION_FORMAT_HOUR = "yyyyMMddHH";
   public static final String PARTITION_FORMAT_DAY = "yyyyMMdd";
   public static final String PARTITION_FORMAT_DASHED_DAY = "yyyy-MM-dd";
