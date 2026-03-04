@@ -28,6 +28,7 @@ import org.apache.hudi.avro.model.{HoodieMetadataColumnStats, HoodieMetadataReco
 import org.apache.hudi.common.config.HoodieMetadataConfig
 import org.apache.hudi.common.data.{HoodieData, HoodieListData}
 import org.apache.hudi.common.model.{FileSlice, HoodieIndexDefinition, HoodieRecord}
+import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.common.util.{collection, StringUtils}
 import org.apache.hudi.common.util.ValidationUtils.checkState
@@ -81,8 +82,12 @@ class ExpressionIndexSupport(spark: SparkSession,
         val readInMemory = shouldReadInMemory(fileIndex, queryReferencedColumns, inMemoryProjectionThreshold)
         val (prunedPartitions, prunedFileNames) = getPrunedPartitionsAndFileNames(fileIndex, prunedPartitionsAndFileSlices)
         val expressionIndexRecords = loadExpressionIndexRecords(indexPartition, prunedPartitions, readInMemory)
+        val getValidIndexedColumnsFunc: HoodieIndexDefinition => Seq[String] = { indexDefinition =>
+          indexDefinition.getSourceFields.asScala.toSeq
+        }
         loadTransposed(queryReferencedColumns, readInMemory, expressionIndexRecords, expressionIndexQuery) {
-          transposedColStatsDF =>Some(getCandidateFiles(transposedColStatsDF, Seq(expressionIndexQuery), prunedFileNames, isExpressionIndex = true, Option.apply(indexDefinition)))
+          transposedColStatsDF =>Some(getCandidateFiles(transposedColStatsDF, Seq(expressionIndexQuery), prunedFileNames, getValidIndexedColumnsFunc,
+            isExpressionIndex = true, Option.apply(indexDefinition)))
         }
       } else if (indexDefinition.getIndexType.equals(HoodieTableMetadataUtil.PARTITION_NAME_BLOOM_FILTERS)) {
         val prunedPartitionAndFileNames = getPrunedPartitionsAndFileNamesMap(prunedPartitionsAndFileSlices, includeLogFiles = true)
@@ -518,7 +523,7 @@ class ExpressionIndexSupport(spark: SparkSession,
         indexDefinition.getSourceFields.asScala.toSeq, prunedPartitions, indexPartition, shouldReadInMemory)
       //TODO: [HUDI-8303] Explicit conversion might not be required for Scala 2.12+
       val catalystRows: HoodieData[InternalRow] = colStatsRecords.map[InternalRow](JFunction.toJavaSerializableFunction(r => {
-        val converter = AvroConversionUtils.createAvroToInternalRowConverter(HoodieMetadataColumnStats.SCHEMA$, columnStatsRecordStructType)
+        val converter = HoodieSchemaConversionUtils.createGenericRecordToInternalRowConverter(HoodieSchema.fromAvroSchema(HoodieMetadataColumnStats.SCHEMA$), columnStatsRecordStructType)
         converter(r).orNull
       }))
 
@@ -590,7 +595,7 @@ class ExpressionIndexSupport(spark: SparkSession,
             }.toSet
 
             // Update the map with the new partition and its file names
-            partitionToFileMap.updated(partitionPath.path, partitionToFileMap.getOrElse(partitionPath.path, Set.empty) ++ fileNames)
+            partitionToFileMap.updated(partitionPath.getPath, partitionToFileMap.getOrElse(partitionPath.getPath, Set.empty) ++ fileNames)
           case None =>
             partitionToFileMap // Skip if no partition path
         }
@@ -641,5 +646,5 @@ object ExpressionIndexSupport {
     HoodieMetadataPayload.COLUMN_STATS_FIELD_COLUMN_NAME
   )
 
-  private val columnStatsRecordStructType: StructType = AvroConversionUtils.convertAvroSchemaToStructType(HoodieMetadataColumnStats.SCHEMA$)
+  private val columnStatsRecordStructType: StructType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(HoodieSchema.fromAvroSchema(HoodieMetadataColumnStats.SCHEMA$))
 }

@@ -119,7 +119,7 @@ class RecordLevelIndexTestBase extends HoodieStatsIndexTestBase {
   }
 
   protected def getFileGroupCountForRecordIndex(writeConfig: HoodieWriteConfig): Long = {
-    Using(getHoodieTable(metaClient, writeConfig).getMetadataTable.asInstanceOf[HoodieBackedTableMetadata]) { metadataTable =>
+    Using(getHoodieTable(metaClient, writeConfig).getTableMetadata.asInstanceOf[HoodieBackedTableMetadata]) { metadataTable =>
       metadataTable.getMetadataFileSystemView.getAllFileGroups(MetadataPartitionType.RECORD_INDEX.getPartitionPath).count
     }.get
   }
@@ -151,8 +151,8 @@ class RecordLevelIndexTestBase extends HoodieStatsIndexTestBase {
     assertEquals(0, recordIndexMapForDeletedRows.size(), "deleted records should not present in RLI")
 
     assertEquals(rowArr.length, recordIndexMap.keySet.size)
-    val estimatedFileGroupCount = HoodieTableMetadataUtil.estimateFileGroupCount(MetadataPartitionType.RECORD_INDEX, rowArr.length, 48,
-      writeConfig.getRecordIndexMinFileGroupCount, writeConfig.getRecordIndexMaxFileGroupCount,
+    val estimatedFileGroupCount = HoodieTableMetadataUtil.estimateFileGroupCount(MetadataPartitionType.RECORD_INDEX, () => rowArr.length, 48,
+      writeConfig.getGlobalRecordLevelIndexMinFileGroupCount, writeConfig.getGlobalRecordLevelIndexMaxFileGroupCount,
       writeConfig.getRecordIndexGrowthFactor, writeConfig.getRecordIndexMaxFileGroupSizeBytes)
     assertEquals(estimatedFileGroupCount, getFileGroupCountForRecordIndex(writeConfig))
     val prevDf = mergedDfList.last.drop("tip_history", "_hoodie_is_deleted")

@@ -18,6 +18,7 @@
 
 package org.apache.hudi.util;
 
+import org.apache.hudi.client.HoodieFlinkWriteClient;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.model.CommitTimeFlinkRecordMerger;
 import org.apache.hudi.client.model.EventTimeFlinkRecordMerger;
@@ -35,6 +36,7 @@ import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.OverwriteWithLatestAvroPayload;
 import org.apache.hudi.common.model.PartialUpdateAvroPayload;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.HoodieTableVersion;
@@ -61,6 +63,8 @@ import org.apache.hudi.exception.HoodieValidationException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.keygen.ComplexAvroKeyGenerator;
 import org.apache.hudi.keygen.SimpleAvroKeyGenerator;
+import org.apache.hudi.metadata.FlinkHoodieBackedTableMetadataWriter;
+import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.hudi.schema.FilebasedSchemaProvider;
 import org.apache.hudi.sink.transform.ChainedTransformer;
 import org.apache.hudi.sink.transform.Transformer;
@@ -70,7 +74,7 @@ import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.StoragePathInfo;
 import org.apache.hudi.streamer.FlinkStreamerConfig;
 
-import org.apache.avro.Schema;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -78,8 +82,6 @@ import org.apache.hadoop.fs.Path;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.orc.OrcFile;
 import org.apache.parquet.hadoop.ParquetFileWriter;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -104,11 +106,11 @@ import static org.apache.hudi.configuration.FlinkOptions.WRITE_FAIL_FAST;
 /**
  * Utilities for Flink stream read and write.
  */
+@Slf4j
 public class StreamerUtil {
 
-  private static final Logger LOG = LoggerFactory.getLogger(StreamerUtil.class);
-
   public static final String FLINK_CHECKPOINT_ID = "flink_checkpoint_id";
+  public static final String EMPTY_PARTITION_PATH = "";
 
   public static TypedProperties appendKafkaProps(FlinkStreamerConfig config) {
     TypedProperties properties = getProps(config);
@@ -136,12 +138,24 @@ public class StreamerUtil {
     return properties;
   }
 
-  public static Schema getSourceSchema(org.apache.flink.configuration.Configuration conf) {
+  /**
+   * Creates the metadata write client from the given write client for data table.
+   */
+  public static HoodieFlinkWriteClient createMetadataWriteClient(HoodieFlinkWriteClient dataWriteClient) {
+    // Get the metadata writer from the table and use its write client
+    Option<HoodieTableMetadataWriter> metadataWriterOpt =
+        dataWriteClient.getHoodieTable().getMetadataWriter(null, true, true);
+    ValidationUtils.checkArgument(metadataWriterOpt.isPresent(), "Failed to create the metadata writer");
+    FlinkHoodieBackedTableMetadataWriter metadataWriter = (FlinkHoodieBackedTableMetadataWriter) metadataWriterOpt.get();
+    return (HoodieFlinkWriteClient) metadataWriter.getWriteClient();
+  }
+
+  public static HoodieSchema getSourceSchema(org.apache.flink.configuration.Configuration conf) {
     if (conf.getOptional(FlinkOptions.SOURCE_AVRO_SCHEMA_PATH).isPresent()) {
-      return new FilebasedSchemaProvider(conf).getSourceSchema();
+      return new FilebasedSchemaProvider(conf).getSourceHoodieSchema();
     } else if (conf.getOptional(FlinkOptions.SOURCE_AVRO_SCHEMA).isPresent()) {
       final String schemaStr = conf.get(FlinkOptions.SOURCE_AVRO_SCHEMA);
-      return new Schema.Parser().parse(schemaStr);
+      return HoodieSchema.parse(schemaStr);
     } else {
       final String errorMsg = String.format("Either option '%s' or '%s' "
               + "should be specified for avro schema deserialization",
@@ -158,7 +172,7 @@ public class StreamerUtil {
     DFSPropertiesConfiguration conf = new DFSPropertiesConfiguration(hadoopConfig, cfgPath);
     try {
       if (!overriddenProps.isEmpty()) {
-        LOG.info("Adding overridden properties to file properties.");
+        log.info("Adding overridden properties to file properties.");
         conf.addPropsFromStream(new BufferedReader(new StringReader(String.join("\n", overriddenProps))), cfgPath);
       }
     } catch (IOException ioe) {
@@ -174,8 +188,8 @@ public class StreamerUtil {
   public static HoodiePayloadConfig getPayloadConfig(Configuration conf) {
     return HoodiePayloadConfig.newBuilder()
         .withPayloadClass(conf.get(FlinkOptions.PAYLOAD_CLASS_NAME))
-        .withPayloadOrderingFields(conf.get(FlinkOptions.ORDERING_FIELDS))
-        .withPayloadEventTimeField(conf.get(FlinkOptions.ORDERING_FIELDS))
+        .withPayloadOrderingFields(OptionsResolver.getOrderingFieldsStr(conf))
+        .withPayloadEventTimeField(OptionsResolver.getOrderingFieldsStr(conf))
         .build();
   }
 
@@ -300,15 +314,16 @@ public class StreamerUtil {
           .setPartitionFields(conf.getString(FlinkOptions.PARTITION_PATH_FIELD.key(), null))
           .setKeyGeneratorClassProp(
               conf.getOptional(FlinkOptions.KEYGEN_CLASS_NAME).orElse(SimpleAvroKeyGenerator.class.getName()))
+          .setPartitionValueExtractorClass(conf.getString(FlinkOptions.PARTITION_VALUE_EXTRACTOR.key(), null))
           .setHiveStylePartitioningEnable(conf.get(FlinkOptions.HIVE_STYLE_PARTITIONING))
           .setUrlEncodePartitioning(conf.get(FlinkOptions.URL_ENCODE_PARTITIONING))
           .setCDCEnabled(conf.get(FlinkOptions.CDC_ENABLED))
           .setCDCSupplementalLoggingMode(conf.get(FlinkOptions.SUPPLEMENTAL_LOGGING_MODE))
           .setPopulateMetaFields(OptionsResolver.isPopulateMetaFields(conf))
           .initTable(HadoopFSUtils.getStorageConfWithCopy(hadoopConf), basePath);
-      LOG.info("Table initialized under base path {}", basePath);
+      log.info("Table initialized under base path {}", basePath);
     } else {
-      LOG.info("Table [path={}, name={}] already exists, no need to initialize the table",
+      log.info("Table [path={}, name={}] already exists, no need to initialize the table",
           basePath, conf.get(FlinkOptions.TABLE_NAME));
     }
 
@@ -608,21 +623,21 @@ public class StreamerUtil {
     return (long) conf.get(FlinkOptions.COMPACTION_MAX_MEMORY) * 1024 * 1024;
   }
 
-  public static Schema getTableAvroSchema(HoodieTableMetaClient metaClient, boolean includeMetadataFields) throws Exception {
+  public static HoodieSchema getTableSchema(HoodieTableMetaClient metaClient, boolean includeMetadataFields) throws Exception {
     TableSchemaResolver schemaUtil = new TableSchemaResolver(metaClient);
-    return schemaUtil.getTableAvroSchema(includeMetadataFields);
+    return schemaUtil.getTableSchema(includeMetadataFields);
   }
 
-  public static Schema getLatestTableSchema(String path, org.apache.hadoop.conf.Configuration hadoopConf) {
+  public static HoodieSchema getLatestTableSchema(String path, org.apache.hadoop.conf.Configuration hadoopConf) {
     if (StringUtils.isNullOrEmpty(path) || !StreamerUtil.tableExists(path, hadoopConf)) {
       return null;
     }
 
     try {
       HoodieTableMetaClient metaClient = StreamerUtil.createMetaClient(path, hadoopConf);
-      return getTableAvroSchema(metaClient, false);
+      return getTableSchema(metaClient, false);
     } catch (Exception e) {
-      LOG.error("Failed to resolve the latest table schema", e);
+      log.error("Failed to resolve the latest table schema", e);
     }
     return null;
   }
@@ -653,15 +668,18 @@ public class StreamerUtil {
    */
   public static void checkOrderingFields(Configuration conf, List<String> fields) {
     String orderingFields = conf.get(FlinkOptions.ORDERING_FIELDS);
-    if (!fields.contains(orderingFields)) {
+    if (null == orderingFields || !fields.contains(orderingFields)) {
       if (OptionsResolver.isDefaultHoodieRecordPayloadClazz(conf)) {
+        // default payload force set of some columns existed in schema as ordering ones
         throw new HoodieValidationException("Option '" + FlinkOptions.ORDERING_FIELDS.key()
                 + "' is required for payload class: " + DefaultHoodieRecordPayload.class.getName());
       }
-      if (orderingFields.equals(FlinkOptions.ORDERING_FIELDS.defaultValue())) {
+      if (null == orderingFields) {
+        // if there is no ordering fields we set them as no-precombine
         conf.set(FlinkOptions.ORDERING_FIELDS, FlinkOptions.NO_PRE_COMBINE);
       } else if (!orderingFields.equals(FlinkOptions.NO_PRE_COMBINE)) {
-        throw new HoodieValidationException("Field " + orderingFields + " does not exist in the table schema."
+        // but if no-precombine was passed initially then we shouldn't fail here on schema check
+        throw new HoodieValidationException("Field " + orderingFields + " does not exist in the table schema. "
                 + "Please check '" + FlinkOptions.ORDERING_FIELDS.key() + "' option.");
       }
     }
@@ -673,7 +691,7 @@ public class StreamerUtil {
   public static void checkKeygenGenerator(boolean isComplexHoodieKey, Configuration conf) {
     if (isComplexHoodieKey && FlinkOptions.isDefaultValueDefined(conf, FlinkOptions.KEYGEN_CLASS_NAME)) {
       conf.set(FlinkOptions.KEYGEN_CLASS_NAME, ComplexAvroKeyGenerator.class.getName());
-      LOG.info("Table option [{}] is reset to {} because record key or partition path has two or more fields",
+      log.info("Table option [{}] is reset to {} because record key or partition path has two or more fields",
           FlinkOptions.KEYGEN_CLASS_NAME.key(), ComplexAvroKeyGenerator.class.getName());
     }
   }

@@ -20,6 +20,7 @@ package org.apache.hudi.common.util.queue;
 
 import org.apache.hudi.common.util.CustomizedThreadFactory;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.exception.HoodieException;
 
 import com.lmax.disruptor.EventTranslator;
@@ -28,8 +29,7 @@ import com.lmax.disruptor.TimeoutException;
 import com.lmax.disruptor.WaitStrategy;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -41,9 +41,8 @@ import java.util.function.Function;
  * @param <I> Input type.
  * @param <O> Transformed output type.
  */
+@Slf4j
 public class DisruptorMessageQueue<I, O> implements HoodieMessageQueue<I, O> {
-
-  private static final Logger LOG = LoggerFactory.getLogger(DisruptorMessageQueue.class);
 
   private final Disruptor<HoodieDisruptorEvent> queue;
   private final Function<I, O> transformFunction;
@@ -56,6 +55,8 @@ public class DisruptorMessageQueue<I, O> implements HoodieMessageQueue<I, O> {
   private static final long TIMEOUT_WAITING_SECS = 10L;
 
   public DisruptorMessageQueue(int bufferSize, Function<I, O> transformFunction, String waitStrategyId, int totalProducers, Runnable preExecuteRunnable) {
+    ValidationUtils.checkArgument((bufferSize & (bufferSize - 1)) == 0,
+        "Disruptor ring buffer size must be a power of 2, got: " + bufferSize);
     WaitStrategy waitStrategy = WaitStrategyFactory.build(waitStrategyId);
     CustomizedThreadFactory threadFactory = new CustomizedThreadFactory("disruptor", true, preExecuteRunnable);
 
@@ -117,11 +118,11 @@ public class DisruptorMessageQueue<I, O> implements HoodieMessageQueue<I, O> {
         isStarted = false;
         if (Thread.currentThread().isInterrupted()) {
           // if current thread has been interrupted, we still give executor a chance to proceeding.
-          LOG.error("Disruptor Queue has been interrupted! Shutdown now.");
+          log.error("Disruptor Queue has been interrupted! Shutdown now.");
           try {
             queue.shutdown(TIMEOUT_WAITING_SECS, TimeUnit.SECONDS);
           } catch (TimeoutException e) {
-            LOG.error("Disruptor queue shutdown timeout: " + e);
+            log.error("Disruptor queue shutdown timeout: ", e);
             throw new HoodieException(e);
           }
           throw new HoodieException("Disruptor Queue has been interrupted! Shutdown now.");
@@ -132,17 +133,24 @@ public class DisruptorMessageQueue<I, O> implements HoodieMessageQueue<I, O> {
     }
   }
 
-  protected void setHandlers(HoodieConsumer<O, ?> consumer) {
+  /**
+   * Sets the consumer handler for this queue.
+   */
+  public void setHandlers(HoodieConsumer<O, ?> consumer) {
     queue.handleEventsWith((event, sequence, endOfBatch) -> {
       try {
         consumer.consume(event.get());
       } catch (Exception e) {
-        LOG.error("Failed consuming records", e);
+        log.error("Failed consuming records", e);
+        markAsFailed(e);
       }
     });
   }
 
-  protected void start() {
+  /**
+   * Starts the disruptor queue.
+   */
+  public void start() {
     synchronized (this) {
       if (!isStarted) {
         queue.start();

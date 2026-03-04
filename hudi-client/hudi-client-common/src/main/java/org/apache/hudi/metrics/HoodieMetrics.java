@@ -18,6 +18,7 @@
 
 package org.apache.hudi.metrics;
 
+import org.apache.hudi.HoodieVersion;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
@@ -32,9 +33,10 @@ import org.apache.hudi.storage.HoodieStorage;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Timer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
+import java.util.Map;
 import java.util.Set;
 
 import static org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator.MILLIS_INSTANT_TIMESTAMP_FORMAT_LENGTH;
@@ -42,9 +44,8 @@ import static org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator.M
 /**
  * Wrapper for metrics-related operations.
  */
+@Slf4j
 public class HoodieMetrics {
-
-  private static final Logger LOG = LoggerFactory.getLogger(HoodieMetrics.class);
 
   public static final String TOTAL_PARTITIONS_WRITTEN_STR = "totalPartitionsWritten";
   public static final String TOTAL_FILES_INSERT_STR = "totalFilesInsert";
@@ -59,6 +60,8 @@ public class HoodieMetrics {
   public static final String TOTAL_COMPACTED_RECORDS_UPDATED_STR = "totalCompactedRecordsUpdated";
   public static final String TOTAL_LOG_FILES_COMPACTED_STR = "totalLogFilesCompacted";
   public static final String TOTAL_LOG_FILES_SIZE_STR = "totalLogFilesSize";
+  public static final String TOTAL_LOG_BLOCKS_COMPACTED_STR = "totalLogBlocksCompacted";
+  public static final String TOTAL_LOG_RECORDS_COMPACTED_STR = "totalLogRecordsCompacted";
   public static final String TOTAL_RECORDS_DELETED = "totalRecordsDeleted";
   public static final String TOTAL_CORRUPTED_LOG_BLOCKS_STR = "totalCorruptedLogBlocks";
   public static final String TOTAL_ROLLBACK_LOG_BLOCKS_STR = "totalRollbackLogBlocks";
@@ -96,6 +99,7 @@ public class HoodieMetrics {
   public static final String SUCCESS_COUNTER = "success" + COUNTER_METRIC_EXTENSION;
   public static final String FAILURE_COUNTER = "failure" + COUNTER_METRIC_EXTENSION;
 
+  @Getter
   private Metrics metrics;
   // Some timers
   public String rollbackTimerName = null;
@@ -114,6 +118,7 @@ public class HoodieMetrics {
   private String conflictResolutionFailureCounterName = null;
   private String compactionRequestedCounterName = null;
   private String compactionCompletedCounterName = null;
+  private String rollbackFailureCounterName = null;
   private final HoodieWriteConfig config;
   private final String tableName;
   private Timer rollbackTimer = null;
@@ -132,6 +137,7 @@ public class HoodieMetrics {
   private Counter conflictResolutionFailureCounter = null;
   private Counter compactionRequestedCounter = null;
   private Counter compactionCompletedCounter = null;
+  private Counter rollbackFailureCounter = null;
 
   public HoodieMetrics(HoodieWriteConfig config, HoodieStorage storage) {
     this.config = config;
@@ -154,15 +160,12 @@ public class HoodieMetrics {
       this.conflictResolutionFailureCounterName = getMetricsName(CONFLICT_RESOLUTION_STR, FAILURE_COUNTER);
       this.compactionRequestedCounterName = getMetricsName(HoodieTimeline.COMPACTION_ACTION, HoodieTimeline.REQUESTED_COMPACTION_SUFFIX + COUNTER_METRIC_EXTENSION);
       this.compactionCompletedCounterName = getMetricsName(HoodieTimeline.COMPACTION_ACTION, HoodieTimeline.COMPLETED_COMPACTION_SUFFIX + COUNTER_METRIC_EXTENSION);
+      this.rollbackFailureCounterName = getMetricsName("rollback", FAILURE_COUNTER);
     }
   }
 
   private Timer createTimer(String name) {
     return config.isMetricsOn() ? metrics.getRegistry().timer(name) : null;
-  }
-
-  public Metrics getMetrics() {
-    return metrics;
   }
 
   public Timer.Context getRollbackCtx() {
@@ -286,6 +289,7 @@ public class HoodieMetrics {
       long totalTimeTakenForInsert = metadata.getTotalCreateTime();
       long totalTimeTakenForUpsert = metadata.getTotalUpsertTime();
       long totalCompactedRecordsUpdated = metadata.getTotalCompactedRecordsUpdated();
+      long totalLogRecordsCompacted = metadata.getTotalLogRecordsCompacted();
       long totalLogFilesCompacted = metadata.getTotalLogFilesCompacted();
       long totalLogFilesSize = metadata.getTotalLogFilesSize();
       metrics.registerGauge(getMetricsName(actionType, TOTAL_PARTITIONS_WRITTEN_STR), totalPartitionsWritten);
@@ -300,13 +304,16 @@ public class HoodieMetrics {
       metrics.registerGauge(getMetricsName(actionType, TOTAL_UPSERT_TIME_STR), totalTimeTakenForUpsert);
       metrics.registerGauge(getMetricsName(actionType, TOTAL_COMPACTED_RECORDS_UPDATED_STR), totalCompactedRecordsUpdated);
       metrics.registerGauge(getMetricsName(actionType, TOTAL_LOG_FILES_COMPACTED_STR), totalLogFilesCompacted);
+      metrics.registerGauge(getMetricsName(actionType, TOTAL_LOG_RECORDS_COMPACTED_STR), totalLogRecordsCompacted);
       metrics.registerGauge(getMetricsName(actionType, TOTAL_LOG_FILES_SIZE_STR), totalLogFilesSize);
       metrics.registerGauge(getMetricsName(actionType, TOTAL_RECORDS_DELETED), totalRecordsDeleted);
       if (config.isCompactionLogBlockMetricsOn()) {
         long totalCorruptedLogBlocks = metadata.getTotalCorruptLogBlocks();
         long totalRollbackLogBlocks = metadata.getTotalRollbackLogBlocks();
+        long totalLogBlocksCompacted = metadata.getTotalLogBlocksCompacted();
         metrics.registerGauge(getMetricsName(actionType, TOTAL_CORRUPTED_LOG_BLOCKS_STR), totalCorruptedLogBlocks);
         metrics.registerGauge(getMetricsName(actionType, TOTAL_ROLLBACK_LOG_BLOCKS_STR), totalRollbackLogBlocks);
+        metrics.registerGauge(getMetricsName(actionType, TOTAL_LOG_BLOCKS_COMPACTED_STR), totalLogBlocksCompacted);
       }
     }
   }
@@ -330,7 +337,7 @@ public class HoodieMetrics {
 
   public void updateRollbackMetrics(long durationInMs, long numFilesDeleted) {
     if (config.isMetricsOn()) {
-      LOG.info(
+      log.info(
           String.format("Sending rollback metrics (%s=%d, %s=%d)", DURATION_STR, durationInMs,
               DELETE_FILES_NUM_STR, numFilesDeleted));
       metrics.registerGauge(getMetricsName(HoodieTimeline.ROLLBACK_ACTION, DURATION_STR), durationInMs);
@@ -340,7 +347,7 @@ public class HoodieMetrics {
 
   public void updateCleanMetrics(long durationInMs, int numFilesDeleted) {
     if (config.isMetricsOn()) {
-      LOG.info(
+      log.info(
           String.format("Sending clean metrics (%s=%d, %s=%d)", DURATION_STR, durationInMs,
               DELETE_FILES_NUM_STR, numFilesDeleted));
       metrics.registerGauge(getMetricsName(HoodieTimeline.CLEAN_ACTION, DURATION_STR), durationInMs);
@@ -350,7 +357,7 @@ public class HoodieMetrics {
 
   public void updateArchiveMetrics(long durationInMs, int numInstantsArchived) {
     if (config.isMetricsOn()) {
-      LOG.info(
+      log.info(
           String.format("Sending archive metrics (%s=%d, %s=%d)", DURATION_STR, durationInMs,
               DELETE_INSTANTS_NUM_STR, numInstantsArchived));
       metrics.registerGauge(getMetricsName(ARCHIVE_ACTION, DURATION_STR), durationInMs);
@@ -358,9 +365,28 @@ public class HoodieMetrics {
     }
   }
 
+  public void emitRollbackFailure(String exceptionType) {
+    if (config.isMetricsOn()) {
+      rollbackFailureCounter = getCounter(rollbackFailureCounter, rollbackFailureCounterName);
+      rollbackFailureCounter.inc();
+      if (exceptionType != null) {
+        String exceptionCounterName = getMetricsName("rollback", exceptionType + COUNTER_METRIC_EXTENSION);
+        Counter exceptionCounter = metrics.getRegistry().counter(exceptionCounterName);
+        exceptionCounter.inc();
+      }
+    }
+  }
+  
+  public void updateArchivalMetrics(Map<String, Long> archivalMetrics) {
+    if (config.isMetricsOn()) {
+      log.info(String.format("Sending archival metrics %s", archivalMetrics));
+      archivalMetrics.forEach((metricName, metricValue) -> metrics.registerGauge(getMetricsName("archival", metricName), metricValue));
+    }
+  }
+
   public void updateFinalizeWriteMetrics(long durationInMs, long numFilesFinalized) {
     if (config.isMetricsOn()) {
-      LOG.debug("Sending finalize write metrics ({}={}, {}={})", DURATION_STR, durationInMs,
+      log.debug("Sending finalize write metrics ({}={}, {}={})", DURATION_STR, durationInMs,
           FINALIZED_FILES_NUM_STR, numFilesFinalized);
       metrics.registerGauge(getMetricsName(FINALIZE_ACTION, DURATION_STR), durationInMs);
       metrics.registerGauge(getMetricsName(FINALIZE_ACTION, FINALIZED_FILES_NUM_STR), numFilesFinalized);
@@ -369,14 +395,14 @@ public class HoodieMetrics {
 
   public void updateIndexMetrics(final String action, final long durationInMs) {
     if (config.isMetricsOn()) {
-      LOG.debug("Sending index metrics ({}.{}, {})", action, DURATION_STR, durationInMs);
+      log.debug("Sending index metrics ({}.{}, {})", action, DURATION_STR, durationInMs);
       metrics.registerGauge(getMetricsName(INDEX_ACTION, String.format("%s.%s", action, DURATION_STR)), durationInMs);
     }
   }
 
   public void updateSourceReadAndIndexMetrics(final String action, final long durationInMs) {
     if (config.isMetricsOn()) {
-      LOG.debug("Sending {} metrics ({}.duration, {})", SOURCE_READ_AND_INDEX_ACTION, action, durationInMs);
+      log.debug("Sending {} metrics ({}.duration, {})", SOURCE_READ_AND_INDEX_ACTION, action, durationInMs);
       metrics.registerGauge(getMetricsName(SOURCE_READ_AND_INDEX_ACTION, String.format("%s.duration", action)), durationInMs);
     }
   }
@@ -486,7 +512,7 @@ public class HoodieMetrics {
 
   private void updateMetric(final String action, final String metricName, final long metricValue) {
     if (config.isMetricsOn()) {
-      LOG.info(
+      log.info(
           String.format("Updating timeline instant related metrics (%s=%d)", metricName, metricValue));
       metrics.registerGauge(getMetricsName(action, metricName), metricValue);
     }
@@ -508,7 +534,7 @@ public class HoodieMetrics {
 
   public void emitConflictResolutionSuccessful() {
     if (config.isLockingMetricsEnabled()) {
-      LOG.info("Sending conflict resolution success metric");
+      log.info("Sending conflict resolution success metric");
       conflictResolutionSuccessCounter = getCounter(conflictResolutionSuccessCounter, conflictResolutionSuccessCounterName);
       conflictResolutionSuccessCounter.inc();
     }
@@ -516,7 +542,7 @@ public class HoodieMetrics {
 
   public void emitConflictResolutionFailed() {
     if (config.isLockingMetricsEnabled()) {
-      LOG.info("Sending conflict resolution failure metric");
+      log.info("Sending conflict resolution failure metric");
       conflictResolutionFailureCounter = getCounter(conflictResolutionFailureCounter, conflictResolutionFailureCounterName);
       conflictResolutionFailureCounter.inc();
     }
@@ -549,6 +575,14 @@ public class HoodieMetrics {
   public void emitIndexTypeMetrics(int indexTypeOrdinal) {
     if (config.isMetricsOn()) {
       metrics.registerGauge(getMetricsName("index", "type"), indexTypeOrdinal);
+    }
+  }
+
+  public void emitVersionMetrics() {
+    if (config.isMetricsOn()) {
+      final String version = HoodieVersion.get();
+      metrics.registerGauge(getMetricsName("userName", System.getProperty("user.name")), 1);
+      metrics.registerGauge(getMetricsName("version", StringUtils.isNullOrEmpty(version) ? HoodieVersion.HOODIE_DEFAULT_VERSION : version), 1);
     }
   }
 

@@ -176,7 +176,7 @@ class TestMetadataRecordIndex extends HoodieSparkClientTestBase {
   }
 
   def getFileGroupCountForRecordIndex(writeConfig: HoodieWriteConfig): Long = {
-    val tableMetadata = getHoodieTable(metaClient, writeConfig).getMetadataTable
+    val tableMetadata = getHoodieTable(metaClient, writeConfig).getTableMetadata
     tableMetadata.asInstanceOf[HoodieBackedTableMetadata].getNumFileGroupsForPartition(MetadataPartitionType.RECORD_INDEX)
   }
 
@@ -206,8 +206,8 @@ class TestMetadataRecordIndex extends HoodieSparkClientTestBase {
 
     assertEquals(rowArr.length, recordIndexMap.keySet.size)
     val estimatedFileGroupCount = HoodieTableMetadataUtil.estimateFileGroupCount(
-      MetadataPartitionType.RECORD_INDEX, rowArr.length, 48,
-      writeConfig.getRecordIndexMinFileGroupCount, writeConfig.getRecordIndexMaxFileGroupCount,
+      MetadataPartitionType.RECORD_INDEX, () => rowArr.length, 48,
+      writeConfig.getGlobalRecordLevelIndexMinFileGroupCount, writeConfig.getGlobalRecordLevelIndexMaxFileGroupCount,
       writeConfig.getRecordIndexGrowthFactor, writeConfig.getRecordIndexMaxFileGroupSizeBytes)
     assertEquals(estimatedFileGroupCount, getFileGroupCountForRecordIndex(writeConfig))
     val prevDf = mergedDfList.last.drop("tip_history")

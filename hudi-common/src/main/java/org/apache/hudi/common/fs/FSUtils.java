@@ -314,6 +314,17 @@ public class FSUtils {
         .toString();
   }
 
+  public static StoragePath getAbsolutePartitionPath(StoragePath basePath, String partition) {
+    return StringUtils.isNullOrEmpty(partition)
+        ? basePath : new StoragePath(basePath, partition);
+  }
+
+  public static StoragePath getAbsoluteFilePath(StoragePath basePath, String partition, String fileName) {
+    return StringUtils.isNullOrEmpty(partition)
+        ? new StoragePath(basePath, fileName)
+        : new StoragePath(basePath, partition + StoragePath.SEPARATOR + fileName);
+  }
+
   /**
    * Get the file extension from the log file.
    */
@@ -470,6 +481,13 @@ public class FSUtils {
   public static List<StoragePathInfo> getAllDataFilesInPartition(HoodieStorage storage,
                                                                  StoragePath partitionPath)
       throws IOException {
+    return getAllDataFilesInPartitionByPathFilter(storage, partitionPath, Option.empty());
+  }
+
+  public static List<StoragePathInfo> getAllDataFilesInPartitionByPathFilter(HoodieStorage storage,
+                                                                             StoragePath partitionPath,
+                                                                             Option<StoragePathFilter> pathFilterOption)
+      throws IOException {
     final Set<String> validFileExtensions = Arrays.stream(HoodieFileFormat.values())
         .map(HoodieFileFormat::getFileExtension).collect(Collectors.toCollection(HashSet::new));
     final String logFileExtension = HoodieFileFormat.HOODIE_LOG.getFileExtension();
@@ -477,7 +495,8 @@ public class FSUtils {
     try {
       return storage.listDirectEntries(partitionPath, path -> {
         String extension = FSUtils.getFileExtension(path.getName());
-        return validFileExtensions.contains(extension) || path.getName().contains(logFileExtension);
+        return (validFileExtensions.contains(extension) || path.getName().contains(logFileExtension))
+            && pathFilterOption.map(filter -> filter.accept(path)).orElse(true);
       }).stream().filter(StoragePathInfo::isFile).collect(Collectors.toList());
     } catch (FileNotFoundException ex) {
       // return empty FileStatus if partition does not exist already
@@ -683,6 +702,7 @@ public class FSUtils {
       result = hoodieEngineContext.mapToPair(subPaths,
           subPath -> new ImmutablePair<>(subPath, pairFunction.apply(new ImmutablePair<>(subPath, storageConf))),
           actualParallelism);
+      hoodieEngineContext.clearJobStatus();
     }
     return result;
   }
@@ -737,6 +757,17 @@ public class FSUtils {
   // Converts s3a to s3a
   public static String s3aToS3(String s3aUrl) {
     return s3aUrl.replaceFirst("(?i)^s3a://", "s3://");
+  }
+
+  public static StoragePathInfo toStoragePathInfo(HoodieFileStatus fileStatus) {
+    if (null == fileStatus) {
+      return null;
+    }
+
+    return new StoragePathInfo(
+        new StoragePath(fileStatus.getPath().getUri()), fileStatus.getLength(),
+        fileStatus.getIsDir() != null && fileStatus.getIsDir(),
+        fileStatus.getBlockReplication().shortValue(), fileStatus.getBlockSize(), fileStatus.getModificationTime());
   }
 
   /**

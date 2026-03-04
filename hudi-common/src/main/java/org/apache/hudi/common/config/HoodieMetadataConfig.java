@@ -116,6 +116,26 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .sinceVersion("0.7.0")
       .withDocumentation("Controls how often the metadata table is compacted.");
 
+  // Max number of seconds before compaction occurs
+  public static final ConfigProperty<String> COMPACT_TIME_DELTA_SECONDS = ConfigProperty
+      .key(METADATA_PREFIX + ".compact.max.delta.seconds")
+      .defaultValue(String.valueOf(2 * 60 * 60))
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("Number of elapsed seconds after the last compaction, before scheduling a "
+      + "new one (for metadata table). "
+      + "This config takes effect only for the compaction triggering strategy based on the elapsed time, "
+      + "i.e., TIME_ELAPSED, NUM_AND_TIME, and NUM_OR_TIME.");
+
+  // Compaction trigger strategy
+  public static final ConfigProperty<String> COMPACT_TRIGGER_STRATEGY = ConfigProperty
+      .key(METADATA_PREFIX +  ".compact.trigger.strategy")
+      .defaultValue("NUM_COMMITS")
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("Controls how compaction scheduling is triggered for metadata table,"
+      + "by time or num delta commits or combination of both. ");
+
   public static final ConfigProperty<String> ENABLE_LOG_COMPACTION_ON_METADATA_TABLE = ConfigProperty
       .key(METADATA_PREFIX + ".log.compaction.enable")
       .defaultValue("false")
@@ -130,6 +150,13 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .markAdvanced()
       .sinceVersion("0.14.0")
       .withDocumentation("Controls the criteria to log compacted files groups in metadata table.");
+
+  public static final ConfigProperty<Boolean> DERIVE_FROM_DATA_TABLE_CLEAN_POLICY = ConfigProperty
+      .key(METADATA_PREFIX + ".derive.from.datatable.clean.policy")
+      .defaultValue(true)
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("This config determines whether the cleaner policy should use data table's cleaner policy.");
 
   // Regex to filter out matching directories during bootstrap
   public static final ConfigProperty<String> DIR_FILTER_REGEX = ConfigProperty
@@ -199,7 +226,12 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .noDefaultValue()
       .markAdvanced()
       .sinceVersion("0.11.0")
-      .withDocumentation("Comma-separated list of columns for which column stats index will be built. If not set, all columns will be indexed");
+      .withDocumentation("Comma-separated list of columns for which column stats index will be built. "
+          + "If not set, all columns will be indexed. "
+          + "For nested fields within ARRAY types, use: field.list.element "
+          + "(e.g., items.list.element or items.list.element.price). "
+          + "For nested fields within MAP types, use: field.key_value.key for keys or field.key_value.value for values "
+          + "(e.g., metadata.key_value.key, metadata.key_value.value, or metadata.key_value.value.nested_field).");
 
   public static final ConfigProperty<Integer> COLUMN_STATS_INDEX_MAX_COLUMNS = ConfigProperty
       .key(METADATA_PREFIX + ".index.column.stats.max.columns.to.index")
@@ -290,37 +322,41 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .withDocumentation("Create the HUDI Record Index within the Metadata Table for a partitioned dataset where a "
           + "pair of partition path and record key is unique across the entire table");
 
-  public static final ConfigProperty<Integer> RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP = ConfigProperty
-      .key(METADATA_PREFIX + ".record.index.min.filegroup.count")
+  public static final ConfigProperty<Integer> GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".global.record.level.index.min.filegroup.count")
       .defaultValue(10)
+      .withAlternatives(METADATA_PREFIX + ".record.index.min.filegroup.count")
       .markAdvanced()
       .sinceVersion("0.14.0")
       .withDocumentation("Minimum number of file groups to use for Record Index.");
 
-  public static final ConfigProperty<Integer> RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP = ConfigProperty
-      .key(METADATA_PREFIX + ".record.index.max.filegroup.count")
+  public static final ConfigProperty<Integer> GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".global.record.level.index.max.filegroup.count")
       .defaultValue(10000)
+      .withAlternatives(METADATA_PREFIX + ".record.index.max.filegroup.count")
       .markAdvanced()
       .sinceVersion("0.14.0")
       .withDocumentation("Maximum number of file groups to use for Record Index.");
 
-  public static final ConfigProperty<Integer> PARTITIONED_RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP = ConfigProperty
-      .key(METADATA_PREFIX + ".partitioned.record.index.min.filegroup.count")
+  public static final ConfigProperty<Integer> RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".record.level.index.min.filegroup.count")
       .defaultValue(1)
+      .withAlternatives(METADATA_PREFIX + ".partitioned.record.index.min.filegroup.count")
       .markAdvanced()
       .sinceVersion("1.1.0")
       .withDocumentation("Minimum number of file groups to use for Partitioned Record Index.");
 
-  public static final ConfigProperty<Integer> PARTITIONED_RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP = ConfigProperty
-      .key(METADATA_PREFIX + ".partitioned.record.index.max.filegroup.count")
+  public static final ConfigProperty<Integer> RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".record.level.index.max.filegroup.count")
       .defaultValue(10)
+      .withAlternatives(METADATA_PREFIX + ".partitioned.record.index.max.filegroup.count")
       .markAdvanced()
       .sinceVersion("1.1.0")
       .withDocumentation("Maximum number of file groups to use for Partitioned Record Index.");
 
-  public static final ConfigProperty<Integer> RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP = ConfigProperty
+  public static final ConfigProperty<Long> RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP = ConfigProperty
       .key(METADATA_PREFIX + ".record.index.max.filegroup.size")
-      .defaultValue(1024 * 1024 * 1024)
+      .defaultValue(1024 * 1024 * 1024L)
       .markAdvanced()
       .sinceVersion("0.14.0")
       .withDocumentation("Maximum size in bytes of a single file group. Large file group takes longer to compact.");
@@ -580,6 +616,23 @@ public final class HoodieMetadataConfig extends HoodieConfig {
           + "honor the set value for number of tasks. If not, number of write status's from data "
           + "table writes will be used for metadata table record preparation");
 
+  public static final ConfigProperty<Boolean> FAIL_ON_TABLE_SERVICE_FAILURES = ConfigProperty
+      .key(METADATA_PREFIX + ".write.fail.on.table.service.failures")
+      .defaultValue(true)
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("when set to true, it fails the job on metadata table's "
+          + "table services operation failure");
+
+  public static final ConfigProperty<Boolean> RECORD_INDEX_INITIALIZATION_VALIDATION_ENABLE = ConfigProperty
+      .key(METADATA_PREFIX + ".record.index.enable.validation.on.initialization")
+      .defaultValue(false)
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Enable validation of record index after initialization by comparing the expected record count "
+          + "with the actual record count stored in the metadata table. This validation runs in a distributed manner "
+          + "using the compute engine. Disabled by default as it adds overhead to the initialization process.");
+
   public long getMaxLogFileSize() {
     return getLong(MAX_LOG_FILE_SIZE_BYTES_PROP);
   }
@@ -684,28 +737,28 @@ public final class HoodieMetadataConfig extends HoodieConfig {
     return getIntOrDefault(METADATA_MAX_NUM_DELTACOMMITS_WHEN_PENDING);
   }
 
-  public int getRecordIndexMinFileGroupCount() {
-    return getInt(RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP);
+  public int getGlobalRecordLevelIndexMinFileGroupCount() {
+    return getInt(GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP);
   }
 
-  public int getPartitionedRecordIndexMinFileGroupCount() {
-    return getInt(PARTITIONED_RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP);
+  public int getRecordLevelIndexMinFileGroupCount() {
+    return getInt(RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP);
   }
 
-  public int getRecordIndexMaxFileGroupCount() {
-    return getInt(RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP);
+  public int getGlobalRecordLevelIndexMaxFileGroupCount() {
+    return getInt(GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP);
   }
 
-  public int getPartitionedRecordIndexMaxFileGroupCount() {
-    return getInt(PARTITIONED_RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP);
+  public int getRecordLevelIndexMaxFileGroupCount() {
+    return getInt(RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP);
   }
 
   public float getRecordIndexGrowthFactor() {
     return getFloat(RECORD_INDEX_GROWTH_FACTOR_PROP);
   }
 
-  public int getRecordIndexMaxFileGroupSizeBytes() {
-    return getInt(RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP);
+  public long getRecordIndexMaxFileGroupSizeBytes() {
+    return getLong(RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP);
   }
 
   public String getSplliableMapDir() {
@@ -722,6 +775,10 @@ public final class HoodieMetadataConfig extends HoodieConfig {
 
   public int getRecordIndexMaxParallelism() {
     return getInt(RECORD_INDEX_MAX_PARALLELISM);
+  }
+
+  public boolean isRecordIndexInitializationValidationEnabled() {
+    return getBooleanOrDefault(RECORD_INDEX_INITIALIZATION_VALIDATION_ENABLE);
   }
 
   public boolean shouldAutoInitialize() {
@@ -858,6 +915,14 @@ public final class HoodieMetadataConfig extends HoodieConfig {
     return getIntOrDefault(RECORD_PREPARATION_PARALLELISM);
   }
 
+  public boolean shouldDeriveFromDataTableCleanPolicy() {
+    return getBooleanOrDefault(DERIVE_FROM_DATA_TABLE_CLEAN_POLICY);
+  }
+
+  public boolean shouldFailOnTableServiceFailures() {
+    return getBooleanOrDefault(FAIL_ON_TABLE_SERVICE_FAILURES);
+  }
+
   /**
    * Checks if a specific metadata index is marked for dropping based on the metadata configuration.
    * NOTE: Only applicable for secondary indexes (SI) or expression indexes (EI).
@@ -987,6 +1052,11 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       return this;
     }
 
+    public HoodieMetadataConfig.Builder deriveFromDataTableCleanPolicy(boolean deriveFromDataTableCleanPolicy) {
+      metadataConfig.setValue(DERIVE_FROM_DATA_TABLE_CLEAN_POLICY, Boolean.toString(deriveFromDataTableCleanPolicy));
+      return this;
+    }
+
     public Builder withFileListingParallelism(int parallelism) {
       metadataConfig.setValue(FILE_LISTING_PARALLELISM_VALUE, String.valueOf(parallelism));
       return this;
@@ -1032,9 +1102,14 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       return this;
     }
 
+    public Builder withEnableRecordLevelIndex(boolean enabled) {
+      metadataConfig.setValue(RECORD_LEVEL_INDEX_ENABLE_PROP, String.valueOf(enabled));
+      return this;
+    }
+
     public Builder withRecordIndexFileGroupCount(int minCount, int maxCount) {
-      metadataConfig.setValue(RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP, String.valueOf(minCount));
-      metadataConfig.setValue(RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP, String.valueOf(maxCount));
+      metadataConfig.setValue(GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP, String.valueOf(minCount));
+      metadataConfig.setValue(GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP, String.valueOf(maxCount));
       return this;
     }
 
@@ -1162,6 +1237,11 @@ public final class HoodieMetadataConfig extends HoodieConfig {
 
     public Builder withRepartitionDefaultPartitions(int defaultPartitions) {
       metadataConfig.setValue(REPARTITION_DEFAULT_PARTITIONS, String.valueOf(defaultPartitions));
+      return this;
+    }
+
+    public Builder setFailOnTableServiceFailures(boolean failOnTableServiceFailures) {
+      metadataConfig.setValue(FAIL_ON_TABLE_SERVICE_FAILURES, String.valueOf(failOnTableServiceFailures));
       return this;
     }
 

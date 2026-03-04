@@ -106,4 +106,69 @@ class TestHoodieMetadataConfig {
         .build();
     assertTrue(configWithCustomValue.isGlobalRecordLevelIndexEnabled());
   }
+
+  @Test
+  void testRecordIndexMaxFileGroupSizeBytes() {
+    // Test default value (1GB)
+    HoodieMetadataConfig config = HoodieMetadataConfig.newBuilder().build();
+    assertEquals(1024L * 1024L * 1024L, config.getRecordIndexMaxFileGroupSizeBytes());
+
+    // Test custom value using builder method
+    long customSize = 2L * 1024L * 1024L * 1024L; // 2GB
+    HoodieMetadataConfig configWithBuilder = HoodieMetadataConfig.newBuilder()
+        .withRecordIndexMaxFileGroupSizeBytes(customSize)
+        .build();
+    assertEquals(customSize, configWithBuilder.getRecordIndexMaxFileGroupSizeBytes());
+
+    // Test custom value via Properties
+    Properties props = new Properties();
+    props.put(HoodieMetadataConfig.RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP.key(), String.valueOf(customSize));
+    HoodieMetadataConfig configWithProperties = HoodieMetadataConfig.newBuilder()
+        .fromProperties(props)
+        .build();
+    assertEquals(customSize, configWithProperties.getRecordIndexMaxFileGroupSizeBytes());
+
+    // Test value larger than Integer.MAX_VALUE to ensure long is properly handled
+    long largeSize = 3L * 1024L * 1024L * 1024L; // 3GB (exceeds Integer.MAX_VALUE which is ~2.1GB)
+    Properties propsLarge = new Properties();
+    propsLarge.put(HoodieMetadataConfig.RECORD_INDEX_MAX_FILE_GROUP_SIZE_BYTES_PROP.key(), String.valueOf(largeSize));
+    HoodieMetadataConfig configWithLargeValue = HoodieMetadataConfig.newBuilder()
+        .fromProperties(propsLarge)
+        .build();
+    assertEquals(largeSize, configWithLargeValue.getRecordIndexMaxFileGroupSizeBytes());
+
+    // Verify that the value is indeed larger than Integer.MAX_VALUE
+    assertTrue(largeSize > Integer.MAX_VALUE, "Test value should exceed Integer.MAX_VALUE to validate long type");
+  }
+
+  @Test
+  void testFailOnTableServiceFailures() {
+    // Test default value
+    HoodieMetadataConfig config = HoodieMetadataConfig.newBuilder().build();
+    assertTrue(config.shouldFailOnTableServiceFailures());
+
+    // Test setting to false via Properties
+    Properties propsFalse = new Properties();
+    propsFalse.put(HoodieMetadataConfig.FAIL_ON_TABLE_SERVICE_FAILURES.key(), "false");
+    HoodieMetadataConfig configWithFalse = HoodieMetadataConfig.newBuilder()
+        .fromProperties(propsFalse)
+        .build();
+    assertFalse(configWithFalse.shouldFailOnTableServiceFailures());
+
+    // Test setting to true via builder method
+    HoodieMetadataConfig configWithBuilder = HoodieMetadataConfig.newBuilder()
+        .setFailOnTableServiceFailures(true)
+        .build();
+    assertTrue(configWithBuilder.shouldFailOnTableServiceFailures());
+
+    // Test setting to false via builder method
+    HoodieMetadataConfig configWithBuilderFalse = HoodieMetadataConfig.newBuilder()
+        .setFailOnTableServiceFailures(false)
+        .build();
+    assertFalse(configWithBuilderFalse.shouldFailOnTableServiceFailures());
+
+    // Verify the config key is correct
+    assertEquals("hoodie.metadata.write.fail.on.table.service.failures",
+        HoodieMetadataConfig.FAIL_ON_TABLE_SERVICE_FAILURES.key());
+  }
 }

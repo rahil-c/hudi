@@ -44,11 +44,13 @@ import org.apache.hudi.common.model.PartialUpdateAvroPayload;
 import org.apache.hudi.common.model.debezium.DebeziumConstants;
 import org.apache.hudi.common.model.debezium.MySqlDebeziumAvroPayload;
 import org.apache.hudi.common.model.debezium.PostgresDebeziumAvroPayload;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.cdc.HoodieCDCSupplementalLoggingMode;
 import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.util.BinaryUtil;
 import org.apache.hudi.common.util.ConfigUtils;
+import org.apache.hudi.common.util.HoodieTableConfigUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.StringUtils;
@@ -63,7 +65,6 @@ import org.apache.hudi.metadata.MetadataPartitionType;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 
-import org.apache.avro.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -335,6 +336,14 @@ public class HoodieTableConfig extends HoodieConfig {
       .sinceVersion("1.0.0")
       .withDocumentation("Key Generator type to determine key generator class");
 
+  public static final ConfigProperty<String> PARTITION_EXTRACTOR_CLASS = ConfigProperty
+      .key("hoodie.table.partition_extractor_class")
+      .noDefaultValue()
+      .withInferFunction(HoodieTableConfigUtils::inferPartitionValueExtractorClass)
+      .markAdvanced()
+      .withDocumentation("Class which implements PartitionValueExtractor to extract the partition values, "
+          + "default is inferred based on partition configuration.");
+
   // TODO: this has to be UTC. why is it not the default?
   public static final ConfigProperty<HoodieTimelineTimeZone> TIMELINE_TIMEZONE = ConfigProperty
       .key("hoodie.table.timeline.timezone")
@@ -367,6 +376,7 @@ public class HoodieTableConfig extends HoodieConfig {
 
   public static final ConfigProperty<String> URL_ENCODE_PARTITIONING = KeyGeneratorOptions.URL_ENCODE_PARTITIONING;
   public static final ConfigProperty<String> HIVE_STYLE_PARTITIONING_ENABLE = KeyGeneratorOptions.HIVE_STYLE_PARTITIONING_ENABLE;
+  public static final ConfigProperty<String> SLASH_SEPARATED_DATE_PARTITIONING = KeyGeneratorOptions.SLASH_SEPARATED_DATE_PARTITIONING;
 
   public static final List<ConfigProperty<String>> PERSISTED_CONFIG_LIST = Arrays.asList(
       TIMESTAMP_TYPE_FIELD,
@@ -1113,9 +1123,9 @@ public class HoodieTableConfig extends HoodieConfig {
     return Option.ofNullable(getString(BOOTSTRAP_BASE_PATH));
   }
 
-  public Option<Schema> getTableCreateSchema() {
+  public Option<HoodieSchema> getTableCreateSchema() {
     if (contains(CREATE_SCHEMA)) {
-      return Option.of(new Schema.Parser().parse(getString(CREATE_SCHEMA)));
+      return Option.of(HoodieSchema.parse(getString(CREATE_SCHEMA)));
     } else {
       return Option.empty();
     }
@@ -1207,8 +1217,16 @@ public class HoodieTableConfig extends HoodieConfig {
     return KeyGeneratorType.getKeyGeneratorClassName(this);
   }
 
+  public Option<String> getPartitionExtractorClass() {
+    return Option.ofNullable(getString(PARTITION_EXTRACTOR_CLASS));
+  }
+
   public HoodieTimelineTimeZone getTimelineTimezone() {
     return HoodieTimelineTimeZone.valueOf(getStringOrDefault(TIMELINE_TIMEZONE));
+  }
+
+  public boolean getSlashSeparatedDatePartitioning() {
+    return getBooleanOrDefault(KeyGeneratorOptions.SLASH_SEPARATED_DATE_PARTITIONING);
   }
 
   public String getHiveStylePartitioningEnable() {

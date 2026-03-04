@@ -22,13 +22,16 @@ import org.apache.hudi.DataSourceReadOptions._
 import org.apache.hudi.HoodieConversionUtils.toJavaOption
 import org.apache.hudi.SparkHoodieTableFileIndex.{deduceQueryType, extractEqualityPredicatesLiteralValues, generateFieldMap, haveProperPartitionValues, shouldListLazily, shouldUsePartitionPathPrefixAnalysis, shouldValidatePartitionColumns}
 import org.apache.hudi.client.common.HoodieSparkEngineContext
-import org.apache.hudi.common.config.TypedProperties
+import org.apache.hudi.common.config.{HoodieCommonConfig, TypedProperties}
 import org.apache.hudi.common.model.{FileSlice, HoodieTableQueryType}
 import org.apache.hudi.common.model.HoodieRecord.HOODIE_META_COLUMNS_WITH_OPERATION
+import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
+import org.apache.hudi.common.table.timeline.HoodieTimeline
 import org.apache.hudi.common.util.ReflectionUtils
 import org.apache.hudi.common.util.ValidationUtils.checkState
 import org.apache.hudi.config.HoodieBootstrapConfig.DATA_QUERIES_ONLY
+import org.apache.hudi.hadoop.HoodieLatestBaseFilesPathFilter
 import org.apache.hudi.hadoop.fs.HadoopFSUtils
 import org.apache.hudi.internal.schema.Types.RecordType
 import org.apache.hudi.internal.schema.utils.Conversions
@@ -87,6 +90,8 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
     deduceQueryType(configProperties),
     queryPaths.asJava,
     toJavaOption(specifiedQueryInstant),
+    configProperties.getBoolean(FILE_INDEX_LIST_FILE_STATUSES_USING_RO_PATH_FILTER.key,
+      FILE_INDEX_LIST_FILE_STATUSES_USING_RO_PATH_FILTER.defaultValue()),
     false,
     false,
     SparkHoodieTableFileIndex.adapt(fileStatusCache),
@@ -101,17 +106,25 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
    * Get the schema of the table.
    */
   lazy val schema: StructType = if (shouldFastBootstrap) {
-      StructType(rawSchema.fields.filterNot(f => HOODIE_META_COLUMNS_WITH_OPERATION.contains(f.name)))
+      StructType(rawStructSchema.fields.filterNot(f => HOODIE_META_COLUMNS_WITH_OPERATION.contains(f.name)))
     } else {
-      rawSchema
+      rawStructSchema
     }
 
-  private lazy val rawSchema: StructType = schemaSpec.getOrElse({
-      val schemaUtil = new TableSchemaResolver(metaClient)
-      AvroConversionUtils.convertAvroSchemaToStructType(schemaUtil.getTableAvroSchema)
-    })
+  lazy val rawHoodieSchema: HoodieSchema = {
+    val schemaUtil = new TableSchemaResolver(metaClient)
+    schemaUtil.getTableSchema
+  }
+
+  private lazy val rawStructSchema: StructType = schemaSpec.getOrElse {
+    HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(rawHoodieSchema)
+  }
 
   protected lazy val shouldFastBootstrap = configProperties.getBoolean(DATA_QUERIES_ONLY.key, false)
+
+  protected lazy val usePartitionValueExtractorOnRead = configProperties.getBoolean(
+    DataSourceReadOptions.USE_PARTITION_VALUE_EXTRACTOR_ON_READ.key(),
+    DataSourceReadOptions.USE_PARTITION_VALUE_EXTRACTOR_ON_READ.defaultValue().toBoolean)
 
   /**
    * Get the partition schema from the hoodie.properties.
@@ -193,7 +206,7 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
     // Prune the partition path by the partition filters
     val prunedPartitions = listMatchingPartitionPaths(partitionFilters)
     getInputFileSlices(prunedPartitions: _*).asScala.map {
-      case (partition, fileSlices) => (partition.path, fileSlices.asScala.toSeq)
+      case (partition, fileSlices) => (partition.getPath, fileSlices.asScala.toSeq)
     }.toMap
   }
 
@@ -267,7 +280,7 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
               .asInstanceOf[BasePredicate]
         }
         val prunedPartitionPaths = partitionPaths.filter {
-          partitionPath => boundPredicate.eval(InternalRow.fromSeq(partitionPath.values))
+          partitionPath => boundPredicate.eval(InternalRow.fromSeq(partitionPath.getValues))
         }.toSeq
 
         logInfo(s"Using provided predicates to prune number of target table's partitions scanned from" +
@@ -276,7 +289,7 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
         prunedPartitionPaths
       } else {
         logWarning(s"Unable to apply partition pruning, due to failure to parse partition values from the" +
-          s" following path(s): ${partitionPaths.find(_.values.length == 0).map(e => e.getPath)}")
+          s" following path(s): ${partitionPaths.find(_.getValues.length == 0).map(e => e.getPath)}")
 
         partitionPaths.toSeq
       }
@@ -405,11 +418,13 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
     val (staticPartitionColumnNames, staticPartitionColumnValues) = staticPartitionColumnNameValuePairs.unzip
 
     val hiveStylePartitioning = metaClient.getTableConfig.getHiveStylePartitioningEnable.toBoolean
+    val slashSeparatedDatePartitioning = metaClient.getTableConfig.getSlashSeparatedDatePartitioning
 
     val partitionPathFormatter = new StringPartitionPathFormatter(
       JFunction.toJavaSupplier(() => new StringPartitionPathFormatter.JavaStringBuilder()),
       hiveStylePartitioning,
-      arePartitionPathsUrlEncoded
+      arePartitionPathsUrlEncoded,
+      slashSeparatedDatePartitioning
     )
 
     partitionPathFormatter.combine(staticPartitionColumnNames.asJava,
@@ -425,13 +440,30 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
       partitionPath,
       getBasePath,
       schema,
-      metaClient.getTableConfig.propsMap,
+      metaClient.getTableConfig,
       configProperties.getString(DateTimeUtils.TIMEZONE_OPTION, SQLConf.get.sessionLocalTimeZone),
-      shouldValidatePartitionColumns(spark))
+      shouldValidatePartitionColumns(spark),
+      usePartitionValueExtractorOnRead)
   }
 
   private def arePartitionPathsUrlEncoded: Boolean =
     metaClient.getTableConfig.getUrlEncodePartitioning.toBoolean
+
+  override protected def getPartitionPathFilter(activeTimeline: HoodieTimeline): org.apache.hudi.common.util.Option[org.apache.hudi.storage.StoragePathFilter] = {
+    if (useLatestBaseFilesPathFilterForListing && !shouldIncludePendingCommits) {
+      // Use getStorageConfWithCopy to avoid mutating the shared Spark session config
+      val conf = HadoopFSUtils.getStorageConfWithCopy(spark.sparkContext.hadoopConfiguration)
+      if (specifiedQueryInstant.isDefined) {
+        conf.set(HoodieCommonConfig.TIMESTAMP_AS_OF.key(), specifiedQueryInstant.get)
+      }
+      org.apache.hudi.common.util.Option.of(
+        new HoodieLatestBaseFilesPathFilter(conf, metaClient,
+          activeTimeline.filterCompletedInstantsOrRewriteTimeline()))
+    } else {
+      org.apache.hudi.common.util.Option.empty()
+    }
+  }
+
 }
 
 object SparkHoodieTableFileIndex extends SparkAdapterSupport {
@@ -439,7 +471,7 @@ object SparkHoodieTableFileIndex extends SparkAdapterSupport {
   private val PUT_LEAF_FILES_METHOD_NAME = "putLeafFiles"
 
   private def haveProperPartitionValues(partitionPaths: Seq[PartitionPath]) = {
-    partitionPaths.forall(_.values.length > 0)
+    partitionPaths.forall(_.getValues.length > 0)
   }
 
   private def extractEqualityPredicatesLiteralValues(predicates: Seq[Expression], zoneId: String): Map[String, (String, Option[Any])] = {

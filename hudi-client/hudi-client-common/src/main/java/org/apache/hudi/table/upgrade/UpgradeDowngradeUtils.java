@@ -46,7 +46,7 @@ import org.apache.hudi.common.table.timeline.InstantComparison;
 import org.apache.hudi.common.table.timeline.InstantFileNameGenerator;
 import org.apache.hudi.common.table.timeline.TimelineFactory;
 import org.apache.hudi.common.util.CollectionUtils;
-import org.apache.hudi.common.util.FileIOUtils;
+import org.apache.hudi.io.util.FileIOUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.VisibleForTesting;
 import org.apache.hudi.common.util.collection.Pair;
@@ -56,9 +56,9 @@ import org.apache.hudi.config.HoodieLockConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
+import org.apache.hudi.metadata.HoodieIndexVersion;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataUtil;
-import org.apache.hudi.metadata.HoodieIndexVersion;
 import org.apache.hudi.metadata.MetadataPartitionType;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieTable;
@@ -66,8 +66,7 @@ import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.action.compact.CompactionTriggerStrategy;
 import org.apache.hudi.table.action.compact.strategy.UnBoundedCompactionStrategy;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.time.LocalDateTime;
@@ -76,17 +75,16 @@ import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.table.timeline.HoodieTimeline.CLUSTERING_ACTION;
 import static org.apache.hudi.common.table.timeline.HoodieTimeline.REPLACE_COMMIT_ACTION;
 
+@Slf4j
 public class UpgradeDowngradeUtils {
-
-  private static final Logger LOG = LoggerFactory.getLogger(UpgradeDowngradeUtils.class);
   static final String FALSE = "false";
   static final String TRUE = "true";
 
@@ -162,7 +160,7 @@ public class UpgradeDowngradeUtils {
       long millis = Long.parseLong(completionTime.substring(completionTime.length() - 3));
       return ldtInSecs.atZone(zoneId).toEpochSecond() * 1000 + millis;
     } catch (Exception e) {
-      LOG.warn("Failed to parse completion time string for instant {}", instant, e);
+      log.warn("Failed to parse completion time string for instant {}", instant, e);
       return -1;
     }
   }
@@ -265,12 +263,12 @@ public class UpgradeDowngradeUtils {
           if (indexDefinitions.containsKey(HoodieTableMetadataUtil.PARTITION_NAME_RECORD_INDEX)) {
             Map<String, String> options = indexDefinitions.get(HoodieTableMetadataUtil.PARTITION_NAME_RECORD_INDEX).getIndexOptions();
             if (options.getOrDefault("isPartitioned", FALSE).equals(TRUE)) {
-              properties.put(HoodieMetadataConfig.PARTITIONED_RECORD_INDEX_ENABLE_PROP.key(), TRUE);
+              properties.put(HoodieMetadataConfig.RECORD_LEVEL_INDEX_ENABLE_PROP.key(), TRUE);
             } else {
-              properties.put(HoodieMetadataConfig.RECORD_INDEX_ENABLE_PROP.key(), TRUE);
+              properties.put(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), TRUE);
             }
           } else {
-            properties.put(HoodieMetadataConfig.RECORD_INDEX_ENABLE_PROP.key(), TRUE);
+            properties.put(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), TRUE);
           }
           break;
         default:
@@ -343,7 +341,7 @@ public class UpgradeDowngradeUtils {
         mdtPartitions.add(partitionStatsPartition);
       }
 
-      LOG.info("Dropping from MDT partitions for {}: {}", operationType, mdtPartitions);
+      log.info("Dropping from MDT partitions for {}: {}", operationType, mdtPartitions);
       if (!mdtPartitions.isEmpty()) {
         writeClient.dropIndex(mdtPartitions);
       }

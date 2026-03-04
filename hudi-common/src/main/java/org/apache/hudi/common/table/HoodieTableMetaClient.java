@@ -53,7 +53,7 @@ import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.util.CommitUtils;
 import org.apache.hudi.common.util.ConfigUtils;
-import org.apache.hudi.common.util.FileIOUtils;
+import org.apache.hudi.io.util.FileIOUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.StringUtils;
@@ -1070,7 +1070,9 @@ public class HoodieTableMetaClient implements Serializable {
     private Boolean bootstrapIndexEnable;
     private Boolean populateMetaFields;
     private String keyGeneratorClassProp;
+    private String partitionValueExtractorClass;
     private String keyGeneratorType;
+    private Boolean slashSeparatedDatePartitioning;
     private Boolean hiveStylePartitioningEnable;
     private Boolean urlEncodePartitioning;
     private HoodieTimelineTimeZone commitTimeZone;
@@ -1234,6 +1236,16 @@ public class HoodieTableMetaClient implements Serializable {
 
     public TableBuilder setKeyGeneratorType(String keyGeneratorType) {
       this.keyGeneratorType = keyGeneratorType;
+      return this;
+    }
+
+    public TableBuilder setSlashSeparatedDatePartitioning(Boolean slashSeparatedDatePartitioning) {
+      this.slashSeparatedDatePartitioning = slashSeparatedDatePartitioning;
+      return this;
+    }
+
+    public TableBuilder setPartitionValueExtractorClass(String partitionValueExtractorClass) {
+      this.partitionValueExtractorClass = partitionValueExtractorClass;
       return this;
     }
 
@@ -1436,6 +1448,12 @@ public class HoodieTableMetaClient implements Serializable {
       } else if (hoodieConfig.contains(HoodieTableConfig.KEY_GENERATOR_TYPE)) {
         setKeyGeneratorClassProp(KeyGeneratorType.valueOf(hoodieConfig.getString(HoodieTableConfig.KEY_GENERATOR_TYPE)).getClassName());
       }
+      if (hoodieConfig.contains(HoodieTableConfig.SLASH_SEPARATED_DATE_PARTITIONING)) {
+        setSlashSeparatedDatePartitioning(hoodieConfig.getBoolean(HoodieTableConfig.SLASH_SEPARATED_DATE_PARTITIONING));
+      }
+      if (hoodieConfig.contains(HoodieTableConfig.PARTITION_EXTRACTOR_CLASS)) {
+        setPartitionValueExtractorClass(hoodieConfig.getString(HoodieTableConfig.PARTITION_EXTRACTOR_CLASS));
+      }
       if (hoodieConfig.contains(HoodieTableConfig.HIVE_STYLE_PARTITIONING_ENABLE)) {
         setHiveStylePartitioningEnable(hoodieConfig.getBoolean(HoodieTableConfig.HIVE_STYLE_PARTITIONING_ENABLE));
       }
@@ -1575,6 +1593,12 @@ public class HoodieTableMetaClient implements Serializable {
                 USER_PROVIDED.name()));
         KeyGeneratorType type = KeyGeneratorType.valueOf(keyGeneratorType);
         tableConfig.setValue(HoodieTableConfig.KEY_GENERATOR_TYPE, type.name());
+      }
+      if (null != slashSeparatedDatePartitioning) {
+        tableConfig.setValue(HoodieTableConfig.SLASH_SEPARATED_DATE_PARTITIONING, Boolean.toString(slashSeparatedDatePartitioning));
+      }
+      if (null != partitionValueExtractorClass) {
+        tableConfig.setValue(HoodieTableConfig.PARTITION_EXTRACTOR_CLASS, partitionValueExtractorClass);
       }
       if (null != hiveStylePartitioningEnable) {
         tableConfig.setValue(HoodieTableConfig.HIVE_STYLE_PARTITIONING_ENABLE, Boolean.toString(hiveStylePartitioningEnable));

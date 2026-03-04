@@ -56,7 +56,6 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieCompactionConfig;
-import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.HoodieValidationException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
@@ -69,7 +68,6 @@ import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
 import org.apache.hudi.testutils.HoodieSparkClientTestBase;
 import org.apache.hudi.testutils.SparkRDDValidationUtils;
 
-import jodd.io.FileUtil;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -89,6 +87,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -211,8 +210,8 @@ public class TestHoodieMetadataTableValidator extends HoodieSparkClientTestBase 
     inserts.write().format("hudi").options(writeOptions)
         .option(DataSourceWriteOptions.OPERATION().key(), WriteOperationType.BULK_INSERT.value())
         .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), "true")
-        .option(HoodieMetadataConfig.RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
-        .option(HoodieMetadataConfig.RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
+        .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
+        .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
         .mode(SaveMode.Overwrite)
         .save(basePath);
     inserts.unpersist(true);
@@ -220,8 +219,8 @@ public class TestHoodieMetadataTableValidator extends HoodieSparkClientTestBase 
     updates.write().format("hudi").options(writeOptions)
         .option(DataSourceWriteOptions.OPERATION().key(), WriteOperationType.UPSERT.value())
         .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), "true")
-        .option(HoodieMetadataConfig.RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
-        .option(HoodieMetadataConfig.RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
+        .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
+        .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
         .mode(SaveMode.Append)
         .save(basePath);
     updates.unpersist(true);
@@ -270,8 +269,8 @@ public class TestHoodieMetadataTableValidator extends HoodieSparkClientTestBase 
     inserts.write().format("hudi").options(writeOptions)
         .option(DataSourceWriteOptions.OPERATION().key(), WriteOperationType.BULK_INSERT.value())
         .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), "true")
-        .option(HoodieMetadataConfig.RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
-        .option(HoodieMetadataConfig.RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
+        .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
+        .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
         .mode(SaveMode.Overwrite)
         .save(basePath);
     inserts.unpersist(true);
@@ -285,8 +284,8 @@ public class TestHoodieMetadataTableValidator extends HoodieSparkClientTestBase 
     updates.write().format("hudi").options(writeOptions)
         .option(DataSourceWriteOptions.OPERATION().key(), WriteOperationType.UPSERT.value())
         .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), "true")
-        .option(HoodieMetadataConfig.RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
-        .option(HoodieMetadataConfig.RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
+        .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
+        .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
         .mode(SaveMode.Append)
         .save(basePath);
     updates.unpersist(true);
@@ -1398,8 +1397,8 @@ public class TestHoodieMetadataTableValidator extends HoodieSparkClientTestBase 
       inserts.write().format("hudi").options(writeOptions)
           .option(DataSourceWriteOptions.OPERATION().key(), WriteOperationType.BULK_INSERT.value())
           .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), "true")
-          .option(HoodieMetadataConfig.RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
-          .option(HoodieMetadataConfig.RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
+          .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
+          .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
           .mode(SaveMode.Overwrite)
           .save(basePath);
       inserts.unpersist(true);
@@ -1407,8 +1406,8 @@ public class TestHoodieMetadataTableValidator extends HoodieSparkClientTestBase 
       updates.write().format("hudi").options(writeOptions)
           .option(DataSourceWriteOptions.OPERATION().key(), WriteOperationType.UPSERT.value())
           .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), "true")
-          .option(HoodieMetadataConfig.RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
-          .option(HoodieMetadataConfig.RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
+          .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
+          .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
           .mode(SaveMode.Append)
           .save(basePath);
       updates.unpersist(true);
@@ -1417,8 +1416,8 @@ public class TestHoodieMetadataTableValidator extends HoodieSparkClientTestBase 
       inserts2.write().format("hudi").options(writeOptions)
           .option(DataSourceWriteOptions.OPERATION().key(), WriteOperationType.BULK_INSERT.value())
           .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), "true")
-          .option(HoodieMetadataConfig.RECORD_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
-          .option(HoodieMetadataConfig.RECORD_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
+          .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MIN_FILE_GROUP_COUNT_PROP.key(), "1")
+          .option(HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_MAX_FILE_GROUP_COUNT_PROP.key(), "1")
           .mode(SaveMode.Append)
           .save(basePath);
       inserts2.unpersist(true);
@@ -1436,7 +1435,7 @@ public class TestHoodieMetadataTableValidator extends HoodieSparkClientTestBase 
       String latestCompletedCommitMetaFile = basePath + "/.hoodie/timeline/" + INSTANT_FILE_NAME_GENERATOR.getFileName(lastInstant);
       String tempDir = getTempLocation();
       String destFilePath = tempDir + "/" + INSTANT_FILE_NAME_GENERATOR.getFileName(lastInstant);
-      FileUtil.move(latestCompletedCommitMetaFile, destFilePath);
+      new File(latestCompletedCommitMetaFile).renameTo(new File(destFilePath));
 
       MockHoodieMetadataTableValidatorForRli validator = new MockHoodieMetadataTableValidatorForRli(jsc, config);
       validator.setOriginalFilePath(latestCompletedCommitMetaFile);
@@ -1464,12 +1463,8 @@ public class TestHoodieMetadataTableValidator extends HoodieSparkClientTestBase 
                                                                         String basePath,
                                                                         String latestCompletedCommit) {
       // move the completed file back to ".hoodie" to simuate the false positive case.
-      try {
-        FileUtil.move(destFilePath, originalFilePath);
-        return super.getRecordLocationsFromRLI(sparkEngineContext, basePath, latestCompletedCommit);
-      } catch (IOException e) {
-        throw new HoodieException("Move should not have failed");
-      }
+      new File(destFilePath).renameTo(new File(originalFilePath));
+      return super.getRecordLocationsFromRLI(sparkEngineContext, basePath, latestCompletedCommit);
     }
 
     public void setDestFilePath(String destFilePath) {

@@ -85,7 +85,7 @@ abstract class SparkBaseIndexSupport(spark: SparkSession,
                                       Seq[FileSlice])]): (Set[String], Set[String]) = {
     val (prunedPartitions, prunedFiles) = prunedPartitionsAndFileSlices.foldLeft((Set.empty[String], Set.empty[String])) {
       case ((partitionSet, fileSet), (partitionPathOpt, fileSlices)) =>
-        val updatedPartitionSet = partitionPathOpt.map(_.path).map(partitionSet + _).getOrElse(partitionSet)
+        val updatedPartitionSet = partitionPathOpt.map(_.getPath).map(partitionSet + _).getOrElse(partitionSet)
         val updatedFileSet = fileSlices.foldLeft(fileSet) { (fileAcc, fileSlice) =>
           val baseFile = Option(fileSlice.getBaseFile.orElse(null)).map(_.getFileName)
           val logFiles = if (fileIndex.includeLogFiles) {
@@ -102,13 +102,17 @@ abstract class SparkBaseIndexSupport(spark: SparkSession,
   }
 
   protected def getCandidateFiles(indexDf: DataFrame, queryFilters: Seq[Expression], fileNamesFromPrunedPartitions: Set[String],
-                                  isExpressionIndex: Boolean = false, indexDefinitionOpt: Option[HoodieIndexDefinition] = Option.empty): Set[String] = {
-    val indexedCols : Seq[String] = if (indexDefinitionOpt.isDefined) {
-      indexDefinitionOpt.get.getSourceFields.asScala.toSeq
+                                  getValidIndexedColumnsFunc: HoodieIndexDefinition => Seq[String], isExpressionIndex: Boolean = false,
+                                  indexDefinitionOpt: Option[HoodieIndexDefinition] = Option.empty): Set[String] = {
+    val indexDefinition : HoodieIndexDefinition = if (indexDefinitionOpt.isDefined) {
+      indexDefinitionOpt.get
     } else {
-      metaClient.getIndexMetadata.get().getIndexDefinitions.get(PARTITION_NAME_COLUMN_STATS).getSourceFields.asScala.toSeq
+      metaClient.getIndexMetadata.get()
+        .getIndexDefinitions.get(PARTITION_NAME_COLUMN_STATS)
     }
-    val indexFilter = queryFilters.map(translateIntoColumnStatsIndexFilterExpr(_, isExpressionIndex, indexedCols)).reduce(And)
+
+    val validIndexedColumns = getValidIndexedColumnsFunc.apply(indexDefinition)
+    val indexFilter = queryFilters.map(translateIntoColumnStatsIndexFilterExpr(_, isExpressionIndex, validIndexedColumns)).reduce(And)
     if (indexFilter.equals(TrueLiteral)) {
       // if there are any non indexed cols or we can't translate source expr, we have to read all files and may not benefit from col stats lookup.
        fileNamesFromPrunedPartitions

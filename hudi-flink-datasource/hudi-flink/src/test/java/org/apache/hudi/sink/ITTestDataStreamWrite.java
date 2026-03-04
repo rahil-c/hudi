@@ -38,8 +38,8 @@ import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration;
 import org.apache.hudi.table.catalog.HoodieCatalog;
 import org.apache.hudi.table.catalog.TableOptionProperties;
-import org.apache.hudi.util.AvroSchemaConverter;
 import org.apache.hudi.util.HoodiePipeline;
+import org.apache.hudi.util.HoodieSchemaConverter;
 import org.apache.hudi.util.JsonDeserializationFunction;
 import org.apache.hudi.util.StreamerUtil;
 import org.apache.hudi.utils.FlinkMiniCluster;
@@ -169,7 +169,7 @@ public class ITTestDataStreamWrite extends TestLogger {
     conf.set(FlinkOptions.BUCKET_INDEX_NUM_BUCKETS, 4);
     conf.set(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
     // use synchronized compaction to ensure flink job finishing with compaction completed.
-    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.COMPACTION_OPERATION_EXECUTE_ASYNC_ENABLED, false);
     conf.set(FlinkOptions.TABLE_TYPE, HoodieTableType.MERGE_ON_READ.name());
 
     defaultWriteAndCheckExpected(conf, "mor_write_with_compact", 1);
@@ -212,7 +212,7 @@ public class ITTestDataStreamWrite extends TestLogger {
   public void testStreamWriteWithIndexBootstrap(String tableType) throws Exception {
     Configuration conf = TestConfigurations.getDefaultConf(tempFile.toURI().toString());
     // use synchronized compaction to avoid sleeping for async compact.
-    conf.set(FlinkOptions.COMPACTION_ASYNC_ENABLED, false);
+    conf.set(FlinkOptions.COMPACTION_OPERATION_EXECUTE_ASYNC_ENABLED, false);
     conf.set(FlinkOptions.COMPACTION_DELTA_COMMITS, 1);
     conf.set(FlinkOptions.TABLE_TYPE, tableType);
 
@@ -283,7 +283,7 @@ public class ITTestDataStreamWrite extends TestLogger {
 
     // Read from file source
     RowType rowType =
-        (RowType) AvroSchemaConverter.convertToDataType(StreamerUtil.getSourceSchema(conf))
+        (RowType) HoodieSchemaConverter.convertToDataType(StreamerUtil.getSourceSchema(conf))
             .getLogicalType();
 
     String sourcePath = Objects.requireNonNull(Thread.currentThread()
@@ -333,7 +333,7 @@ public class ITTestDataStreamWrite extends TestLogger {
 
     // Read from file source
     RowType rowType =
-        (RowType) AvroSchemaConverter.convertToDataType(StreamerUtil.getSourceSchema(conf))
+        (RowType) HoodieSchemaConverter.convertToDataType(StreamerUtil.getSourceSchema(conf))
             .getLogicalType();
 
     String sourcePath = Objects.requireNonNull(Thread.currentThread()

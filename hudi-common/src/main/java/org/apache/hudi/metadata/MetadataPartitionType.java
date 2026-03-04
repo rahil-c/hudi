@@ -33,6 +33,7 @@ import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.index.expression.HoodieExpressionIndex;
 import org.apache.hudi.stats.ValueMetadata;
 
+import lombok.Getter;
 import org.apache.avro.generic.GenericRecord;
 
 import java.nio.ByteBuffer;
@@ -86,6 +87,7 @@ import static org.apache.hudi.metadata.HoodieTableMetadataUtil.mergeColumnStatsR
 /**
  * Partition types for metadata table.
  */
+@Getter
 public enum MetadataPartitionType {
   FILES(HoodieTableMetadataUtil.PARTITION_NAME_FILES, "files-", 2) {
     @Override
@@ -142,8 +144,8 @@ public enum MetadataPartitionType {
             String.format("Valid %s record expected for type: %s", SCHEMA_FIELD_ID_BLOOM_FILTER, MetadataPartitionType.BLOOM_FILTERS.getRecordType()));
       } else {
         payload.bloomFilterMetadata = new HoodieMetadataBloomFilter(
-            (String) bloomFilterRecord.get(BLOOM_FILTER_FIELD_TYPE),
-            (String) bloomFilterRecord.get(BLOOM_FILTER_FIELD_TIMESTAMP),
+            bloomFilterRecord.get(BLOOM_FILTER_FIELD_TYPE).toString(),
+            bloomFilterRecord.get(BLOOM_FILTER_FIELD_TIMESTAMP).toString(),
             (ByteBuffer) bloomFilterRecord.get(BLOOM_FILTER_FIELD_BLOOM_FILTER),
             (Boolean) bloomFilterRecord.get(BLOOM_FILTER_FIELD_IS_DELETED)
         );
@@ -380,18 +382,6 @@ public enum MetadataPartitionType {
    */
   public String getPartitionPath(HoodieTableMetaClient metaClient, String indexName) {
     return partitionPath;
-  }
-
-  public String getPartitionPath() {
-    return partitionPath;
-  }
-
-  public String getFileIdPrefix() {
-    return fileIdPrefix;
-  }
-
-  public int getRecordType() {
-    return recordType;
   }
 
   /**
