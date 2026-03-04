@@ -114,7 +114,7 @@ public class HoodieSchema implements Serializable {
         if (v.getVectorElementType() == Vector.VectorElementType.FLOAT) {
           return "VECTOR(" + v.getDimension() + ")";
         }
-        return "VECTOR(" + v.getDimension() + ", " + v.getVectorElementType().getDataType() + ")";
+        return "VECTOR(" + v.getDimension() + ", " + v.getVectorElementType() + ")";
       case BLOB:
         return "BLOB";
       default:
@@ -2089,7 +2089,7 @@ public class HoodieSchema implements Serializable {
     }
   }
 
-  static class VectorLogicalType extends LogicalType {
+  public static class VectorLogicalType extends LogicalType {
     private static final String VECTOR_LOGICAL_TYPE_NAME = "vector";
     private static final String PROP_DIMENSION = "dimension";
     private static final String PROP_ELEMENT_TYPE = "elementType";
