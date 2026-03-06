@@ -2233,23 +2233,23 @@ public class TestHoodieSchema {
   }
 
   @Test
-  public void testToTypeStringVectorDefaultElementType() {
+  public void testToTypeDescriptorVectorDefaultElementType() {
     HoodieSchema.Vector vector = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
-    assertEquals("VECTOR(128)", vector.toTypeString());
+    assertEquals("VECTOR(128)", vector.toTypeDescriptor());
   }
 
   @Test
-  public void testToTypeStringVectorNonDefaultElementType() {
+  public void testToTypeDescriptorVectorNonDefaultElementType() {
     HoodieSchema.Vector vector = HoodieSchema.createVector(512, HoodieSchema.Vector.VectorElementType.DOUBLE);
-    assertEquals("VECTOR(512, DOUBLE)", vector.toTypeString());
+    assertEquals("VECTOR(512, DOUBLE)", vector.toTypeDescriptor());
   }
 
   @Test
-  public void testToTypeStringVectorInt8RoundTrip() {
+  public void testToTypeDescriptorVectorInt8RoundTrip() {
     HoodieSchema.Vector vector = HoodieSchema.createVector(32, HoodieSchema.Vector.VectorElementType.INT8);
-    assertEquals("VECTOR(32, INT8)", vector.toTypeString());
+    assertEquals("VECTOR(32, INT8)", vector.toTypeDescriptor());
 
-    HoodieSchema parsed = HoodieSchema.parseTypeString("VECTOR(32, INT8)");
+    HoodieSchema parsed = HoodieSchema.parseTypeDescriptor("VECTOR(32, INT8)");
     assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
     HoodieSchema.Vector parsedVector = (HoodieSchema.Vector) parsed;
     assertEquals(32, parsedVector.getDimension());
@@ -2257,14 +2257,8 @@ public class TestHoodieSchema {
   }
 
   @Test
-  public void testToTypeStringThrowsForNonCustomType() {
-    HoodieSchema intSchema = HoodieSchema.create(HoodieSchemaType.INT);
-    assertThrows(IllegalArgumentException.class, intSchema::toTypeString);
-  }
-
-  @Test
-  public void testParseTypeStringVector() {
-    HoodieSchema parsed = HoodieSchema.parseTypeString("VECTOR(128)");
+  public void testParseTypeDescriptorVector() {
+    HoodieSchema parsed = HoodieSchema.parseTypeDescriptor("VECTOR(128)");
     assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
     HoodieSchema.Vector vector = (HoodieSchema.Vector) parsed;
     assertEquals(128, vector.getDimension());
@@ -2272,8 +2266,8 @@ public class TestHoodieSchema {
   }
 
   @Test
-  public void testParseTypeStringVectorWithElementType() {
-    HoodieSchema parsed = HoodieSchema.parseTypeString("VECTOR(512, DOUBLE)");
+  public void testParseTypeDescriptorVectorWithElementType() {
+    HoodieSchema parsed = HoodieSchema.parseTypeDescriptor("VECTOR(512, DOUBLE)");
     assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
     HoodieSchema.Vector vector = (HoodieSchema.Vector) parsed;
     assertEquals(512, vector.getDimension());
@@ -2281,15 +2275,15 @@ public class TestHoodieSchema {
   }
 
   @Test
-  public void testParseTypeStringThrowsForNonCustomType() {
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("INT"));
+  public void testParseTypeDescriptorThrowsForNonCustomType() {
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("INT"));
   }
 
   @Test
-  public void testTypeStringRoundTrip() {
+  public void testTypeDescriptorRoundTrip() {
     HoodieSchema.Vector vector = HoodieSchema.createVector(256, HoodieSchema.Vector.VectorElementType.FLOAT);
-    String typeString = vector.toTypeString();
-    HoodieSchema parsed = HoodieSchema.parseTypeString(typeString);
+    String typeString = vector.toTypeDescriptor();
+    HoodieSchema parsed = HoodieSchema.parseTypeDescriptor(typeString);
     HoodieSchema.Vector parsedVector = (HoodieSchema.Vector) parsed;
 
     assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
@@ -2298,8 +2292,8 @@ public class TestHoodieSchema {
 
     // Non-default element type round-trip
     HoodieSchema.Vector vectorDouble = HoodieSchema.createVector(64, HoodieSchema.Vector.VectorElementType.DOUBLE);
-    String typeStringDouble = vectorDouble.toTypeString();
-    HoodieSchema parsedDouble = HoodieSchema.parseTypeString(typeStringDouble);
+    String typeStringDouble = vectorDouble.toTypeDescriptor();
+    HoodieSchema parsedDouble = HoodieSchema.parseTypeDescriptor(typeStringDouble);
     HoodieSchema.Vector parsedDoubleVector = (HoodieSchema.Vector) parsedDouble;
 
     assertEquals(HoodieSchemaType.VECTOR, parsedDouble.getType());
@@ -2308,49 +2302,49 @@ public class TestHoodieSchema {
   }
 
   @Test
-  public void testParseTypeStringMalformed() {
+  public void testParseTypeDescriptorMalformed() {
     // Null and empty inputs
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString(null));
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString(""));
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("   "));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor(null));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor(""));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("   "));
 
     // Missing closing parenthesis
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(128"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(128"));
 
     // Non-numeric dimension
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(abc)"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(abc)"));
 
     // Missing required dimension parameter
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR"));
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR()"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR()"));
 
     // Too many parameters
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(128, FLOAT, extra)"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(128, FLOAT, extra)"));
 
     // Invalid element type
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(128, INVALID)"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(128, INVALID)"));
 
     // Zero and negative dimensions
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(0)"));
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(-1)"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(0)"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(-1)"));
 
     // BLOB does not accept parameters
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("BLOB(1024)"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("BLOB(1024)"));
   }
 
   @Test
-  public void testParseTypeStringUnknownType() {
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("UNKNOWN_TYPE"));
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("FOOBAR(123)"));
+  public void testParseTypeDescriptorUnknownType() {
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("UNKNOWN_TYPE"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("FOOBAR(123)"));
   }
 
   @Test
-  public void testBlobTypeStringRoundTrip() {
+  public void testBlobTypeDescriptorRoundTrip() {
     HoodieSchema.Blob blob = HoodieSchema.createBlob();
-    String typeString = blob.toTypeString();
+    String typeString = blob.toTypeDescriptor();
     assertEquals("BLOB", typeString);
 
-    HoodieSchema parsed = HoodieSchema.parseTypeString(typeString);
+    HoodieSchema parsed = HoodieSchema.parseTypeDescriptor(typeString);
     assertEquals(HoodieSchemaType.BLOB, parsed.getType());
     assertInstanceOf(HoodieSchema.Blob.class, parsed);
   }

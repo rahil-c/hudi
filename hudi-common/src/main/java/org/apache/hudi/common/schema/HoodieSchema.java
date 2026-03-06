@@ -102,35 +102,12 @@ public class HoodieSchema implements Serializable {
   public static final String TYPE_METADATA_FIELD = "hudi_type";
 
   /**
-   * Converts a HoodieSchema to its parameterized type string for custom Hudi logical types
-   * such as VECTOR and BLOB. Only supports custom logical types — throws for standard types.
-   * Parameterized types include positional parameters: "VECTOR(128)", "VECTOR(128, DOUBLE)".
-   * Default parameters are omitted: VECTOR(dim) implies elementType=FLOAT.
-   */
-  public String toTypeString() {
-    HoodieSchemaType type = getType();
-    switch (type) {
-      case VECTOR:
-        Vector v = (Vector) this;
-        if (v.getVectorElementType() == Vector.VectorElementType.FLOAT) {
-          return "VECTOR(" + v.getDimension() + ")";
-        }
-        return "VECTOR(" + v.getDimension() + ", " + v.getVectorElementType() + ")";
-      case BLOB:
-        return "BLOB";
-      default:
-        throw new IllegalArgumentException(
-            "toTypeString only supports custom logical types, got: " + type);
-    }
-  }
-
-  /**
-   * Parses a parameterized type string for custom Hudi logical types such as VECTOR and BLOB.
-   * Examples: "VECTOR(128)" or "VECTOR(512, DOUBLE)".
+   * Parses a type descriptor string for custom Hudi logical types such as VECTOR and BLOB.
+   * Examples: "VECTOR(128)", "VECTOR(512, DOUBLE)", "BLOB".
    * Throws for non-custom logical type names.
    */
-  public static HoodieSchema parseTypeString(String descriptor) {
-    Pair<HoodieSchemaType, List<String>> parsedDescriptor = parseTypeDescriptor(descriptor);
+  public static HoodieSchema parseTypeDescriptor(String descriptor) {
+    Pair<HoodieSchemaType, List<String>> parsedDescriptor = tokenizeTypeDescriptor(descriptor);
     HoodieSchemaType type = parsedDescriptor.getLeft();
     List<String> params = parsedDescriptor.getRight();
     switch (type) {
@@ -160,11 +137,11 @@ public class HoodieSchema implements Serializable {
         return createBlob();
       default:
         throw new IllegalArgumentException(
-            "parseTypeString only supports custom logical types, got: " + type);
+            "parseTypeDescriptor only supports custom logical types, got: " + type);
     }
   }
 
-  private static Pair<HoodieSchemaType, List<String>> parseTypeDescriptor(String descriptor) {
+  private static Pair<HoodieSchemaType, List<String>> tokenizeTypeDescriptor(String descriptor) {
     ValidationUtils.checkArgument(descriptor != null && !descriptor.trim().isEmpty(),
         "Type descriptor cannot be null or empty");
     int parenStart = descriptor.indexOf('(');
@@ -195,7 +172,7 @@ public class HoodieSchema implements Serializable {
     }
     if (!CUSTOM_LOGICAL_TYPES.contains(type)) {
       throw new IllegalArgumentException(
-          "parseTypeString only supports custom logical types, got: " + type);
+          "parseTypeDescriptor only supports custom logical types, got: " + type);
     }
     return Pair.of(type, params);
   }
@@ -1839,6 +1816,17 @@ public class HoodieSchema implements Serializable {
     }
 
     /**
+     * Returns the type descriptor string for this vector, e.g. "VECTOR(128)" or "VECTOR(512, DOUBLE)".
+     * Default element type (FLOAT) is omitted.
+     */
+    public String toTypeDescriptor() {
+      if (getVectorElementType() == VectorElementType.FLOAT) {
+        return "VECTOR(" + getDimension() + ")";
+      }
+      return "VECTOR(" + getDimension() + ", " + getVectorElementType() + ")";
+    }
+
+    /**
      * Creates vector schema with specified dimension and element type.
      *
      * @param name fixed type name (not null)
@@ -2458,6 +2446,7 @@ public class HoodieSchema implements Serializable {
    * Blob types represent raw binary data. The data can be stored in-line as a byte array or out-of-line as a reference to a file or offset and length within that file.
    */
   public static class Blob extends HoodieSchema {
+    public static final String TYPE_DESCRIPTOR = "BLOB";
     private static final String DEFAULT_NAME = "blob";
     private static final List<Schema.Field> BLOB_FIELDS = createBlobFields();
 
@@ -2501,6 +2490,13 @@ public class HoodieSchema implements Serializable {
     @Override
     public HoodieSchemaType getType() {
       return HoodieSchemaType.BLOB;
+    }
+
+    /**
+     * Returns the type descriptor string for Blob: "BLOB".
+     */
+    public String toTypeDescriptor() {
+      return TYPE_DESCRIPTOR;
     }
 
     private static Schema createSchema(String name) {

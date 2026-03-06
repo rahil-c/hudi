@@ -645,7 +645,7 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
 
     // Verify metadata contains type descriptor with dimension
     assert(embeddingField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
-    val parsedVector = HoodieSchema.parseTypeString(
+    val parsedVector = HoodieSchema.parseTypeDescriptor(
       embeddingField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
     assert(parsedVector.getType == HoodieSchemaType.VECTOR)
     assert(parsedVector.getDimension == 256)
@@ -663,7 +663,7 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     val doubleField = structType.fields(0)
     assert(doubleField.dataType == ArrayType(DoubleType, containsNull = false))
     assert(doubleField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
-    val parsedDoubleVector = HoodieSchema.parseTypeString(
+    val parsedDoubleVector = HoodieSchema.parseTypeDescriptor(
       doubleField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
     assert(parsedDoubleVector.getType == HoodieSchemaType.VECTOR)
     assert(parsedDoubleVector.getDimension == 64)
@@ -672,7 +672,7 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     val int8Field = structType.fields(1)
     assert(int8Field.dataType == ArrayType(ByteType, containsNull = false))
     assert(int8Field.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
-    val parsedInt8Vector = HoodieSchema.parseTypeString(
+    val parsedInt8Vector = HoodieSchema.parseTypeDescriptor(
       int8Field.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
     assert(parsedInt8Vector.getType == HoodieSchemaType.VECTOR)
     assert(parsedInt8Vector.getDimension == 32)
@@ -706,7 +706,7 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
 
     // Verify metadata is preserved
     assert(convertedVectorField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
-    val roundTripVector = HoodieSchema.parseTypeString(
+    val roundTripVector = HoodieSchema.parseTypeDescriptor(
       convertedVectorField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
     assert(roundTripVector.getType == HoodieSchemaType.VECTOR)
     assert(roundTripVector.getDimension == 512)
@@ -738,7 +738,7 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     assert(convertedDouble.name == originalDouble.name)
     assert(convertedDouble.dataType == originalDouble.dataType)
     assert(convertedDouble.nullable == originalDouble.nullable)
-    val convertedDoubleVector = HoodieSchema.parseTypeString(
+    val convertedDoubleVector = HoodieSchema.parseTypeDescriptor(
       convertedDouble.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
     assert(convertedDoubleVector.getType == HoodieSchemaType.VECTOR)
     assert(convertedDoubleVector.getDimension == 64)
@@ -749,7 +749,7 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     assert(convertedInt8.name == originalInt8.name)
     assert(convertedInt8.dataType == originalInt8.dataType)
     assert(convertedInt8.nullable == originalInt8.nullable)
-    val convertedInt8Vector = HoodieSchema.parseTypeString(
+    val convertedInt8Vector = HoodieSchema.parseTypeDescriptor(
       convertedInt8.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
     assert(convertedInt8Vector.getType == HoodieSchemaType.VECTOR)
     assert(convertedInt8Vector.getDimension == 32)
@@ -810,7 +810,7 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     assert(convertedField.nullable)
     assert(convertedField.dataType == ArrayType(FloatType, containsNull = false))
     assert(convertedField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
-    val parsedVector = HoodieSchema.parseTypeString(
+    val parsedVector = HoodieSchema.parseTypeDescriptor(
       convertedField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
     assert(parsedVector.getDimension == 64)
   }
@@ -833,7 +833,7 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
 
     // The key assertion: metadata must survive the UNION unwrapping (.copy(nullable = true))
     assert(embeddingField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
-    val parsedVector = HoodieSchema.parseTypeString(
+    val parsedVector = HoodieSchema.parseTypeDescriptor(
       embeddingField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
     assert(parsedVector.getDimension == 256)
     assert(parsedVector.getVectorElementType == HoodieSchema.Vector.VectorElementType.FLOAT)

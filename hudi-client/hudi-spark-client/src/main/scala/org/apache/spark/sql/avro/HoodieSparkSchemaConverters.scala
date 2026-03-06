@@ -82,14 +82,14 @@ object HoodieSparkSchemaConverters {
       // Complex types
       case ArrayType(elementSparkType, containsNull)
           if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
-            HoodieSchema.parseTypeString(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.VECTOR =>
+            HoodieSchema.parseTypeDescriptor(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.VECTOR =>
         if (containsNull) {
           throw new HoodieSchemaException(
             s"VECTOR type does not support nullable elements (field: $recordName)")
         }
 
         val vectorSchema = HoodieSchema
-          .parseTypeString(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+          .parseTypeDescriptor(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
           .asInstanceOf[HoodieSchema.Vector]
         val dimension = vectorSchema.getDimension
 
@@ -112,7 +112,7 @@ object HoodieSparkSchemaConverters {
         HoodieSchema.createMap(valueSchema)
 
       case blobStruct: StructType if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
-        HoodieSchema.parseTypeString(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.BLOB =>
+        HoodieSchema.parseTypeDescriptor(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.BLOB =>
         // Validate blob structure before accepting
         validateBlobStructure(blobStruct)
         HoodieSchema.createBlob()
@@ -211,7 +211,7 @@ object HoodieSparkSchemaConverters {
       case HoodieSchemaType.VECTOR =>
         val vectorSchema = hoodieSchema.asInstanceOf[HoodieSchema.Vector]
         val metadata = new MetadataBuilder()
-          .putString(HoodieSchema.TYPE_METADATA_FIELD, vectorSchema.toTypeString)
+          .putString(HoodieSchema.TYPE_METADATA_FIELD, vectorSchema.toTypeDescriptor)
           .build()
 
         val sparkElementType = sparkTypeForVectorElementType(vectorSchema.getVectorElementType)
@@ -236,7 +236,7 @@ object HoodieSparkSchemaConverters {
             metadataBuilder.putString("comment", f.doc().get())
           }
           if (fieldSchema.isBlobField) {
-            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchemaType.BLOB.name())
+            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchema.Blob.TYPE_DESCRIPTOR)
           }
           val metadata = metadataBuilder.build()
           StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)
@@ -244,7 +244,7 @@ object HoodieSparkSchemaConverters {
         // For BLOB types, propagate type metadata via SchemaType
         val schemaTypeMetadata = if (hoodieSchema.getType == HoodieSchemaType.BLOB) {
           Some(new MetadataBuilder()
-            .putString(HoodieSchema.TYPE_METADATA_FIELD, hoodieSchema.toTypeString)
+            .putString(HoodieSchema.TYPE_METADATA_FIELD, hoodieSchema.asInstanceOf[HoodieSchema.Blob].toTypeDescriptor)
             .build())
         } else {
           None
