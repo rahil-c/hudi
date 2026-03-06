@@ -236,7 +236,7 @@ object HoodieSparkSchemaConverters {
             metadataBuilder.putString("comment", f.doc().get())
           }
           if (fieldSchema.isBlobField) {
-            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, fieldSchema.toTypeString)
+            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchemaType.BLOB.name())
           }
           val metadata = metadataBuilder.build()
           StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)

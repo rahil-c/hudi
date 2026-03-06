@@ -2245,6 +2245,18 @@ public class TestHoodieSchema {
   }
 
   @Test
+  public void testToTypeStringVectorInt8RoundTrip() {
+    HoodieSchema.Vector vector = HoodieSchema.createVector(32, HoodieSchema.Vector.VectorElementType.INT8);
+    assertEquals("VECTOR(32, INT8)", vector.toTypeString());
+
+    HoodieSchema parsed = HoodieSchema.parseTypeString("VECTOR(32, INT8)");
+    assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
+    HoodieSchema.Vector parsedVector = (HoodieSchema.Vector) parsed;
+    assertEquals(32, parsedVector.getDimension());
+    assertEquals(HoodieSchema.Vector.VectorElementType.INT8, parsedVector.getVectorElementType());
+  }
+
+  @Test
   public void testToTypeStringThrowsForNonCustomType() {
     HoodieSchema intSchema = HoodieSchema.create(HoodieSchemaType.INT);
     assertThrows(IllegalArgumentException.class, intSchema::toTypeString);
@@ -2317,6 +2329,10 @@ public class TestHoodieSchema {
 
     // Invalid element type
     assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(128, INVALID)"));
+
+    // Zero and negative dimensions
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(0)"));
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("VECTOR(-1)"));
 
     // BLOB does not accept parameters
     assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeString("BLOB(1024)"));

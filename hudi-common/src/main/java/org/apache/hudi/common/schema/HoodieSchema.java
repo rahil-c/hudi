@@ -1718,6 +1718,21 @@ public class HoodieSchema implements Serializable {
     }
   }
 
+  /**
+   * Represents a fixed-dimension, typed-element vector stored as an Avro FIXED field.
+   *
+   * <p>Each element is serialized contiguously in little-endian byte order
+   * ({@link VectorLogicalType#VECTOR_BYTE_ORDER}).
+   *
+   * <p>Supported element types and their per-element byte sizes:
+   * <ul>
+   *   <li>{@link VectorElementType#FLOAT}  — 4 bytes (IEEE 754 single-precision)</li>
+   *   <li>{@link VectorElementType#DOUBLE} — 8 bytes (IEEE 754 double-precision)</li>
+   *   <li>{@link VectorElementType#INT8}   — 1 byte  (signed 8-bit integer)</li>
+   * </ul>
+   *
+   * <p>The total FIXED size is {@code dimension * elementType.getElementSize()} bytes.
+   */
   public static class Vector extends HoodieSchema {
     private static final String DEFAULT_NAME = "vector";
 
