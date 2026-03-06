@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.avro
 
+import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.common.schema.HoodieSchema.VectorLogicalType
 
 import org.apache.avro.{LogicalTypes, Schema}
@@ -151,6 +152,8 @@ private[sql] class AvroSerializer(rootCatalystType: DataType,
       case (ArrayType(elementType, false), FIXED) => avroType.getLogicalType match {
         case vectorLogicalType: VectorLogicalType =>
           val dimension = vectorLogicalType.getDimension
+          val vecElementType = HoodieSchema.Vector.VectorElementType.fromString(vectorLogicalType.getElementType)
+          val bufferSize = Math.multiplyExact(dimension, vecElementType.getElementSize)
           (getter, ordinal) => {
             val arrayData = getter.getArray(ordinal)
             if (arrayData.numElements() != dimension) {
@@ -160,11 +163,11 @@ private[sql] class AvroSerializer(rootCatalystType: DataType,
             }
             elementType match {
               case FloatType =>
-                val buffer = ByteBuffer.allocate(dimension * 4).order(ByteOrder.LITTLE_ENDIAN)
+                val buffer = ByteBuffer.allocate(bufferSize).order(VectorLogicalType.VECTOR_BYTE_ORDER)
                 var i = 0; while (i < dimension) { buffer.putFloat(arrayData.getFloat(i)); i += 1 }
                 new Fixed(avroType, buffer.array())
               case DoubleType =>
-                val buffer = ByteBuffer.allocate(dimension * 8).order(ByteOrder.LITTLE_ENDIAN)
+                val buffer = ByteBuffer.allocate(bufferSize).order(VectorLogicalType.VECTOR_BYTE_ORDER)
                 var i = 0; while (i < dimension) { buffer.putDouble(arrayData.getDouble(i)); i += 1 }
                 new Fixed(avroType, buffer.array())
               case ByteType =>

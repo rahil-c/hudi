@@ -35,6 +35,7 @@ import java.io.InputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -186,7 +187,12 @@ public class HoodieSchema implements Serializable {
             .collect(Collectors.toList());
       }
     }
-    HoodieSchemaType type = HoodieSchemaType.valueOf(typeName.toUpperCase(Locale.ROOT));
+    HoodieSchemaType type;
+    try {
+      type = HoodieSchemaType.valueOf(typeName.toUpperCase(Locale.ROOT));
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException("Unknown Hudi schema type: " + typeName, e);
+    }
     if (!CUSTOM_LOGICAL_TYPES.contains(type)) {
       throw new IllegalArgumentException(
           "parseTypeString only supports custom logical types, got: " + type);
@@ -2094,6 +2100,12 @@ public class HoodieSchema implements Serializable {
     private static final String PROP_DIMENSION = "dimension";
     private static final String PROP_ELEMENT_TYPE = "elementType";
     private static final String PROP_STORAGE_BACKING = "storageBacking";
+
+    /**
+     * Byte order used for serializing/deserializing vector elements (FLOAT, DOUBLE, etc).
+     * Little-endian is chosen for compatibility with file formats.
+     */
+    public static final ByteOrder VECTOR_BYTE_ORDER = ByteOrder.LITTLE_ENDIAN;
 
     private final int dimension;
     private final String elementType;

@@ -815,6 +815,30 @@ class TestHoodieSchemaConversionUtils extends FunSuite with Matchers {
     assert(parsedVector.getDimension == 64)
   }
 
+  test("test nullable VECTOR via UNION preserves metadata in HoodieSchema to Spark conversion") {
+    val vectorSchema = HoodieSchema.createVector(256, HoodieSchema.Vector.VectorElementType.FLOAT)
+    val nullableVectorSchema = HoodieSchema.createNullable(vectorSchema)
+    val fields = java.util.Arrays.asList(
+      HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT)),
+      HoodieSchemaField.of("embedding", nullableVectorSchema)
+    )
+    val hoodieSchema = HoodieSchema.createRecord("NullableVectorUnionTest", "test", null, fields)
+
+    val structType = HoodieSchemaConversionUtils.convertHoodieSchemaToStructType(hoodieSchema)
+
+    val embeddingField = structType.fields(1)
+    assert(embeddingField.name == "embedding")
+    assert(embeddingField.nullable)
+    assert(embeddingField.dataType == ArrayType(FloatType, containsNull = false))
+
+    // The key assertion: metadata must survive the UNION unwrapping (.copy(nullable = true))
+    assert(embeddingField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
+    val parsedVector = HoodieSchema.parseTypeString(
+      embeddingField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).asInstanceOf[HoodieSchema.Vector]
+    assert(parsedVector.getDimension == 256)
+    assert(parsedVector.getVectorElementType == HoodieSchema.Vector.VectorElementType.FLOAT)
+  }
+
   test("test VECTOR element type mismatch throws error") {
     // Metadata says DOUBLE, but Spark array element type is Float
     val mismatchMetadata = new MetadataBuilder()

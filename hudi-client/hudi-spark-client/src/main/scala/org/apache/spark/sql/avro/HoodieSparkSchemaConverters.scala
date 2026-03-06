@@ -82,7 +82,7 @@ object HoodieSparkSchemaConverters {
       // Complex types
       case ArrayType(elementSparkType, containsNull)
           if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
-            metadata.getString(HoodieSchema.TYPE_METADATA_FIELD).startsWith("VECTOR") =>
+            HoodieSchema.parseTypeString(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.VECTOR =>
         if (containsNull) {
           throw new HoodieSchemaException(
             s"VECTOR type does not support nullable elements (field: $recordName)")
@@ -92,10 +92,6 @@ object HoodieSparkSchemaConverters {
           .parseTypeString(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
           .asInstanceOf[HoodieSchema.Vector]
         val dimension = vectorSchema.getDimension
-        if (dimension <= 0) {
-          throw new HoodieSchemaException(
-            s"VECTOR dimension must be positive, got: $dimension (field: $recordName)")
-        }
 
         val elementType = vectorSchema.getVectorElementType
 
@@ -239,15 +235,13 @@ object HoodieSparkSchemaConverters {
           if (f.doc().isPresent && f.doc().get().nonEmpty) {
             metadataBuilder.putString("comment", f.doc().get())
           }
-          if (fieldSchema.getType == HoodieSchemaType.VECTOR) {
-            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, fieldSchema.toTypeString())
-          } else if (fieldSchema.isBlobField) {
-            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchemaType.BLOB.name())
+          if (fieldSchema.isBlobField) {
+            metadataBuilder.putString(HoodieSchema.TYPE_METADATA_FIELD, fieldSchema.toTypeString)
           }
           val metadata = metadataBuilder.build()
           StructField(f.name(), schemaType.dataType, schemaType.nullable, metadata)
         }
-        // For BLOB types, propagate type metadata via SchemaType (consistent with VECTOR handling)
+        // For BLOB types, propagate type metadata via SchemaType
         val schemaTypeMetadata = if (hoodieSchema.getType == HoodieSchemaType.BLOB) {
           Some(new MetadataBuilder()
             .putString(HoodieSchema.TYPE_METADATA_FIELD, hoodieSchema.toTypeString)
