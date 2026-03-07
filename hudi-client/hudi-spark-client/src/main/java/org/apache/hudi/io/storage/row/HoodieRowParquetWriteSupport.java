@@ -26,7 +26,6 @@ import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.schema.HoodieSchema.TimePrecision;
-import org.apache.hudi.common.schema.HoodieSchemaField;
 import org.apache.hudi.common.schema.HoodieSchemaType;
 import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.util.Option;
@@ -73,6 +72,7 @@ import org.apache.spark.util.VersionUtils;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -184,41 +184,11 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
 
   @Override
   public WriteSupport.FinalizedWriteContext finalizeWrite() {
-    Map<String, String> extraMetadata = new HashMap<>();
-    bloomFilterWriteSupportOpt.ifPresent(bf -> extraMetadata.putAll(bf.finalizeMetadata()));
-
-    String vectorColumnsStr = buildVectorColumnsMetadata(schema);
-    if (!vectorColumnsStr.isEmpty()) {
-      extraMetadata.put("hoodie.vector.columns", vectorColumnsStr);
-    }
+    Map<String, String> extraMetadata =
+        bloomFilterWriteSupportOpt.map(HoodieBloomFilterWriteSupport::finalizeMetadata)
+            .orElse(Collections.emptyMap());
 
     return new WriteSupport.FinalizedWriteContext(extraMetadata);
-  }
-
-  /**
-   * Scans the schema for VECTOR fields and builds metadata string.
-   * Format: "colName:dimension:elementType,..." e.g. "embedding:128:FLOAT"
-   */
-  private static String buildVectorColumnsMetadata(HoodieSchema hoodieSchema) {
-    if (hoodieSchema == null || !hoodieSchema.hasFields()) {
-      return "";
-    }
-    StringBuilder sb = new StringBuilder();
-    for (HoodieSchemaField field : hoodieSchema.getFields()) {
-      HoodieSchema fieldSchema = field.schema().getNonNullType();
-      if (fieldSchema.getType() == HoodieSchemaType.VECTOR) {
-        HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) fieldSchema;
-        if (sb.length() > 0) {
-          sb.append(",");
-        }
-        sb.append(field.name())
-                .append(":")
-                .append(vectorSchema.getDimension())
-                .append(":")
-                .append(vectorSchema.getVectorElementType().getDataType());
-      }
-    }
-    return sb.toString();
   }
 
   public void add(UTF8String recordKey) {

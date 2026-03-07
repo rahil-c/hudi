@@ -99,10 +99,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     // 7. Verify vector metadata preserved
     val readMetadata = embeddingField.metadata
     assertTrue(readMetadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
-    val typeDescriptor = HoodieSchema.parseTypeString(
+    val parsedSchema = HoodieSchema.parseTypeDescriptor(
       readMetadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
-    assertEquals(HoodieSchemaType.VECTOR, typeDescriptor.getType)
-    assertEquals("128", typeDescriptor.getParam(0))
+    assertEquals(HoodieSchemaType.VECTOR, parsedSchema.getType)
+    val vectorSchema = parsedSchema.asInstanceOf[HoodieSchema.Vector]
+    assertEquals(128, vectorSchema.getDimension)
 
     // 8. Verify float values match exactly
     val originalRows = df.select("id", "embedding").collect()

@@ -18,13 +18,13 @@
 package org.apache.spark.sql.execution.datasources.parquet
 
 import org.apache.hudi.{HoodieFileIndex, HoodiePartitionCDCFileGroupMapping, HoodiePartitionFileSliceMapping, HoodieSchemaConversionUtils, HoodieSparkUtils, HoodieTableSchema, SparkAdapterSupport, SparkFileFormatInternalRowReaderContext}
-import org.apache.hudi.avro.AvroSchemaUtils
 import org.apache.hudi.cdc.{CDCFileGroupIterator, HoodieCDCFileGroupSplit, HoodieCDCFileIndex}
 import org.apache.hudi.client.common.HoodieSparkEngineContext
 import org.apache.hudi.client.utils.SparkInternalSchemaConverter
 import org.apache.hudi.common.config.{HoodieMemoryConfig, TypedProperties}
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.HoodieFileFormat
+import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType}
 import org.apache.hudi.common.schema.HoodieSchemaUtils
 import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient, ParquetTableSchemaResolver}
 import org.apache.hudi.common.table.read.HoodieFileGroupReader
@@ -41,7 +41,6 @@ import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.hadoop.mapreduce.Job
-import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType}
 import org.apache.parquet.schema.{HoodieSchemaRepair, MessageType}
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.internal.Logging
@@ -136,32 +135,33 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     if (detectVectorColumns(schema).nonEmpty) {
       supportVectorizedRead = false
       supportReturningBatch = false
-      return false
-    }
-    val conf = sparkSession.sessionState.conf
-    val parquetBatchSupported = ParquetUtils.isBatchReadSupportedForSchema(conf, schema) && supportBatchWithTableSchema
-    val orcBatchSupported = conf.orcVectorizedReaderEnabled &&
-      schema.forall(s => OrcUtils.supportColumnarReads(
-        s.dataType, sparkSession.sessionState.conf.orcVectorizedReaderNestedColumnEnabled))
-    // TODO: Implement columnar batch reading https://github.com/apache/hudi/issues/17736
-    val lanceBatchSupported = false
-
-    val supportBatch = if (isMultipleBaseFileFormatsEnabled) {
-      parquetBatchSupported && orcBatchSupported
-    } else if (hoodieFileFormat == HoodieFileFormat.PARQUET) {
-      parquetBatchSupported
-    } else if (hoodieFileFormat == HoodieFileFormat.ORC) {
-      orcBatchSupported
-    } else if (hoodieFileFormat == HoodieFileFormat.LANCE) {
-      lanceBatchSupported
+      false
     } else {
-      throw new HoodieNotSupportedException("Unsupported file format: " + hoodieFileFormat)
+      val conf = sparkSession.sessionState.conf
+      val parquetBatchSupported = ParquetUtils.isBatchReadSupportedForSchema(conf, schema) && supportBatchWithTableSchema
+      val orcBatchSupported = conf.orcVectorizedReaderEnabled &&
+        schema.forall(s => OrcUtils.supportColumnarReads(
+          s.dataType, sparkSession.sessionState.conf.orcVectorizedReaderNestedColumnEnabled))
+      // TODO: Implement columnar batch reading https://github.com/apache/hudi/issues/17736
+      val lanceBatchSupported = false
+
+      val supportBatch = if (isMultipleBaseFileFormatsEnabled) {
+        parquetBatchSupported && orcBatchSupported
+      } else if (hoodieFileFormat == HoodieFileFormat.PARQUET) {
+        parquetBatchSupported
+      } else if (hoodieFileFormat == HoodieFileFormat.ORC) {
+        orcBatchSupported
+      } else if (hoodieFileFormat == HoodieFileFormat.LANCE) {
+        lanceBatchSupported
+      } else {
+        throw new HoodieNotSupportedException("Unsupported file format: " + hoodieFileFormat)
+      }
+      supportVectorizedRead = !isIncremental && !isBootstrap && supportBatch
+      supportReturningBatch = !isMOR && supportVectorizedRead
+      logInfo(s"supportReturningBatch: $supportReturningBatch, supportVectorizedRead: $supportVectorizedRead, isIncremental: $isIncremental, " +
+        s"isBootstrap: $isBootstrap, superSupportBatch: $supportBatch")
+      supportReturningBatch
     }
-    supportVectorizedRead = !isIncremental && !isBootstrap && supportBatch
-    supportReturningBatch = !isMOR && supportVectorizedRead
-    logInfo(s"supportReturningBatch: $supportReturningBatch, supportVectorizedRead: $supportVectorizedRead, isIncremental: $isIncremental, " +
-      s"isBootstrap: $isBootstrap, superSupportBatch: $supportBatch")
-    supportReturningBatch
   }
 
   //for partition columns that we read from the file, we don't want them to be constant column vectors so we
@@ -417,13 +417,10 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
       if (field.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD)) {
         val typeStr = field.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)
         if (typeStr.startsWith("VECTOR")) {
-          val typeDescriptor = HoodieSchema.parseTypeString(typeStr)
-          if (typeDescriptor.getType == HoodieSchemaType.VECTOR) {
-            val dimension = typeDescriptor.getParam(0).toInt
-            val elementType = if (typeDescriptor.getParams.size() > 1)
-              HoodieSchema.Vector.VectorElementType.fromString(typeDescriptor.getParam(1))
-            else HoodieSchema.Vector.VectorElementType.FLOAT
-            Some(idx -> (dimension, elementType))
+          val parsed = HoodieSchema.parseTypeDescriptor(typeStr)
+          if (parsed.getType == HoodieSchemaType.VECTOR) {
+            val vectorSchema = parsed.asInstanceOf[HoodieSchema.Vector]
+            Some(idx -> (vectorSchema.getDimension, vectorSchema.getVectorElementType))
           } else None
         } else None
       } else None
@@ -460,6 +457,9 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
         } else if (vectorCols.contains(i)) {
           val (dim, elemType) = vectorCols(i)
           val bytes = row.getBinary(i)
+          val expectedSize = dim * elemType.getElementSize
+          require(bytes.length == expectedSize,
+            s"Vector byte array length mismatch: expected $expectedSize but got ${bytes.length}")
           val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
           elemType match {
             case HoodieSchema.Vector.VectorElementType.FLOAT =>
@@ -529,8 +529,6 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
       // The raw iterator has BinaryType for vector columns; convert back to ArrayType
       val readSchema = if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {
         StructType(modifiedRequiredSchema.fields ++ partitionSchema.fields)
-      } else if (remainingPartitionSchema.fields.length == 0) {
-        modifiedOutputSchema
       } else {
         modifiedOutputSchema
       }

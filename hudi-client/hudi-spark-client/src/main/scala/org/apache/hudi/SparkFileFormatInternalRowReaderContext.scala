@@ -311,15 +311,16 @@ object SparkFileFormatInternalRowReaderContext {
 
   /**
    * Detects VECTOR columns from HoodieSchema.
-   * @return Map of ordinal to dimension for VECTOR fields.
+   * @return Map of ordinal to (dimension, elementType) for VECTOR fields.
    */
-  private[hudi] def detectVectorColumns(schema: HoodieSchema): Map[Int, Int] = {
+  private[hudi] def detectVectorColumns(schema: HoodieSchema): Map[Int, (Int, HoodieSchema.Vector.VectorElementType)] = {
     if (schema == null) return Map.empty
     import scala.collection.JavaConverters._
     schema.getFields.asScala.zipWithIndex.flatMap { case (field, idx) =>
       val fieldSchema = field.schema().getNonNullType
       if (fieldSchema.getType == HoodieSchemaType.VECTOR) {
-        Some(idx -> fieldSchema.asInstanceOf[HoodieSchema.Vector].getDimension)
+        val v = fieldSchema.asInstanceOf[HoodieSchema.Vector]
+        Some(idx -> (v.getDimension, v.getVectorElementType))
       } else {
         None
       }
@@ -327,10 +328,10 @@ object SparkFileFormatInternalRowReaderContext {
   }
 
   /**
-   * Replaces ArrayType(FloatType) with BinaryType for VECTOR columns so the Parquet reader
+   * Replaces ArrayType with BinaryType for VECTOR columns so the Parquet reader
    * can read FIXED_LEN_BYTE_ARRAY data without type mismatch.
    */
-  private[hudi] def replaceVectorColumnsWithBinary(structType: StructType, vectorColumns: Map[Int, Int]): StructType = {
+  private[hudi] def replaceVectorColumnsWithBinary(structType: StructType, vectorColumns: Map[Int, _]): StructType = {
     StructType(structType.fields.zipWithIndex.map { case (field, idx) =>
       if (vectorColumns.contains(idx)) {
         StructField(field.name, BinaryType, field.nullable, org.apache.spark.sql.types.Metadata.empty)
@@ -341,12 +342,12 @@ object SparkFileFormatInternalRowReaderContext {
   }
 
   /**
-   * Wraps an iterator to convert binary VECTOR columns back to ArrayType(FloatType).
-   * Unpacks little-endian float bytes from FIXED_LEN_BYTE_ARRAY into GenericArrayData.
+   * Wraps an iterator to convert binary VECTOR columns back to typed arrays.
+   * Unpacks little-endian bytes from FIXED_LEN_BYTE_ARRAY into GenericArrayData.
    */
   private[hudi] def wrapWithVectorConversion(
       iterator: ClosableIterator[InternalRow],
-      vectorColumns: Map[Int, Int],
+      vectorColumns: Map[Int, (Int, HoodieSchema.Vector.VectorElementType)],
       readSchema: StructType): ClosableIterator[InternalRow] = {
     val numFields = readSchema.fields.length
     new ClosableIterator[InternalRow] {
@@ -359,16 +360,28 @@ object SparkFileFormatInternalRowReaderContext {
           if (row.isNullAt(i)) {
             result.setNullAt(i)
           } else if (vectorColumns.contains(i)) {
+            val (dim, elemType) = vectorColumns(i)
             val bytes = row.getBinary(i)
-            val dim = vectorColumns(i)
+            val expectedSize = dim * elemType.getElementSize
+            require(bytes.length == expectedSize,
+              s"Vector byte array length mismatch: expected $expectedSize but got ${bytes.length}")
             val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            val floats = new Array[Float](dim)
-            var j = 0
-            while (j < dim) {
-              floats(j) = buffer.getFloat()
-              j += 1
+            elemType match {
+              case HoodieSchema.Vector.VectorElementType.FLOAT =>
+                val arr = new Array[Float](dim)
+                var j = 0
+                while (j < dim) { arr(j) = buffer.getFloat(); j += 1 }
+                result.update(i, new GenericArrayData(arr))
+              case HoodieSchema.Vector.VectorElementType.DOUBLE =>
+                val arr = new Array[Double](dim)
+                var j = 0
+                while (j < dim) { arr(j) = buffer.getDouble(); j += 1 }
+                result.update(i, new GenericArrayData(arr))
+              case HoodieSchema.Vector.VectorElementType.INT8 =>
+                val arr = new Array[Byte](dim)
+                buffer.get(arr)
+                result.update(i, new GenericArrayData(arr))
             }
-            result.update(i, new GenericArrayData(floats))
           } else {
             result.update(i, row.get(i, readSchema(i).dataType))
           }
