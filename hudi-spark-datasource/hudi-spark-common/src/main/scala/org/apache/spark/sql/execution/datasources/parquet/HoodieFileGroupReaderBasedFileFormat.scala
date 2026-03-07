@@ -496,12 +496,13 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
 
     val modifiedRequiredSchema = if (hasVectors) replaceVectorFieldsWithBinary(requiredSchema, vectorCols) else requiredSchema
     val modifiedOutputSchema = if (hasVectors) replaceVectorFieldsWithBinary(outputSchema, vectorCols) else outputSchema
-    val modifiedRequestedSchema = if (hasVectors) {
-      val requestedVectorCols = detectVectorColumns(requestedSchema)
-      replaceVectorFieldsWithBinary(requestedSchema, requestedVectorCols)
-    } else requestedSchema
+    // requestedSchema = requiredSchema + mandatory partition fields appended at end,
+    // so vector columns are at the same indices as in requiredSchema — reuse vectorCols
+    val modifiedRequestedSchema = if (hasVectors) replaceVectorFieldsWithBinary(requestedSchema, vectorCols) else requestedSchema
 
-    // Detect vector columns in the full output schema for post-read conversion
+    // Detect vector columns in the full output schema for post-read conversion.
+    // Output schema may have different indices than requiredSchema (e.g. partition columns interleaved),
+    // so we must detect separately here.
     val outputVectorCols = if (hasVectors) detectVectorColumns(outputSchema) else Map.empty[Int, (Int, HoodieSchema.Vector.VectorElementType)]
 
     val rawIter = if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {

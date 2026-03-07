@@ -312,11 +312,29 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
             && resolvedSchema.getType() == HoodieSchemaType.VECTOR) {
       HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) resolvedSchema;
       int dimension = vectorSchema.getDimension();
+      int elementSize = vectorSchema.getVectorElementType().getElementSize();
+      HoodieSchema.Vector.VectorElementType elemType = vectorSchema.getVectorElementType();
       return (row, ordinal) -> {
         ArrayData array = row.getArray(ordinal);
-        ByteBuffer buffer = ByteBuffer.allocate(dimension * 4).order(ByteOrder.LITTLE_ENDIAN);
-        for (int i = 0; i < dimension; i++) {
-          buffer.putFloat(array.getFloat(i));
+        ByteBuffer buffer = ByteBuffer.allocate(dimension * elementSize).order(ByteOrder.LITTLE_ENDIAN);
+        switch (elemType) {
+          case FLOAT:
+            for (int i = 0; i < dimension; i++) {
+              buffer.putFloat(array.getFloat(i));
+            }
+            break;
+          case DOUBLE:
+            for (int i = 0; i < dimension; i++) {
+              buffer.putDouble(array.getDouble(i));
+            }
+            break;
+          case INT8:
+            for (int i = 0; i < dimension; i++) {
+              buffer.put(array.getByte(i));
+            }
+            break;
+          default:
+            throw new UnsupportedOperationException("Unsupported vector element type: " + elemType);
         }
         recordConsumer.addBinary(Binary.fromReusedByteArray(buffer.array()));
       };
