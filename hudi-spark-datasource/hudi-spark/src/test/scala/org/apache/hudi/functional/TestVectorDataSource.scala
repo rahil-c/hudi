@@ -179,4 +179,65 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     assertEquals(32, key3Embedding.size)
     assertTrue(key3Embedding.forall(_ == 1.0f))
   }
+
+  @Test
+  def testColumnProjectionWithVector(): Unit = {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(16)")
+      .build()
+
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata),
+      StructField("label", StringType, nullable = true),
+      StructField("score", IntegerType, nullable = true)
+    ))
+
+    val data = (0 until 10).map { i =>
+      Row(s"key_$i", Array.fill(16)(i.toFloat).toSeq, s"label_$i", i * 10)
+    }
+
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(data),
+      schema
+    )
+
+    df.write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "id")
+      .option(TABLE_NAME.key, "projection_vector_test")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .mode(SaveMode.Overwrite)
+      .save(basePath + "/projection")
+
+    // Read only non-vector columns (vector column excluded)
+    val nonVectorDf = spark.read.format("hudi").load(basePath + "/projection")
+      .select("id", "label", "score")
+    assertEquals(10, nonVectorDf.count())
+    val row0 = nonVectorDf.filter("id = 'key_0'").collect()(0)
+    assertEquals("label_0", row0.getString(1))
+    assertEquals(0, row0.getInt(2))
+
+    // Read only the vector column with id
+    val vectorOnlyDf = spark.read.format("hudi").load(basePath + "/projection")
+      .select("id", "embedding")
+    assertEquals(10, vectorOnlyDf.count())
+    val vecRow = vectorOnlyDf.filter("id = 'key_5'").collect()(0)
+    val embedding = vecRow.getSeq[Float](1)
+    assertEquals(16, embedding.size)
+    assertTrue(embedding.forall(_ == 5.0f))
+
+    // Read all columns including vector
+    val allDf = spark.read.format("hudi").load(basePath + "/projection")
+      .select("id", "embedding", "label", "score")
+    assertEquals(10, allDf.count())
+    val allRow = allDf.filter("id = 'key_3'").collect()(0)
+    assertEquals("label_3", allRow.getString(2))
+    assertEquals(30, allRow.getInt(3))
+    val allEmbedding = allRow.getSeq[Float](1)
+    assertEquals(16, allEmbedding.size)
+    assertTrue(allEmbedding.forall(_ == 3.0f))
+  }
+
 }
