@@ -318,8 +318,8 @@ public class InternalSchemaConverter {
         HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) schema;
         return Types.VectorType.get(
             vectorSchema.getDimension(),
-            vectorSchema.getVectorElementType().getDataType(),
-            vectorSchema.getStorageBacking().getBacking());
+            vectorSchema.getVectorElementType().name(),
+            vectorSchema.getStorageBacking().name());
       case BYTES:
         return Types.BinaryType.get();
       case UUID:
