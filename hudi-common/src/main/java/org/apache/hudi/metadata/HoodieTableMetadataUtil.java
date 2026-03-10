@@ -1931,6 +1931,7 @@ public class HoodieTableMetadataUtil {
       case NULL:
       case RECORD:
       case ARRAY:
+      case VECTOR:
         return null;
 
       default:
@@ -2048,7 +2049,7 @@ public class HoodieTableMetadataUtil {
     return type != HoodieSchemaType.RECORD && type != HoodieSchemaType.ARRAY && type != HoodieSchemaType.MAP
         && type != HoodieSchemaType.ENUM && type != HoodieSchemaType.BYTES && type != HoodieSchemaType.FIXED
         && type != HoodieSchemaType.DECIMAL // DECIMAL's underlying type is BYTES
-        && type != HoodieSchemaType.BLOB;
+        && type != HoodieSchemaType.BLOB && type != HoodieSchemaType.VECTOR;
   }
 
   private static boolean isColumnTypeSupportedV2(HoodieSchema schema) {
@@ -2056,7 +2057,7 @@ public class HoodieTableMetadataUtil {
     // Check for precision and scale if the schema has a logical decimal type.
     return type != HoodieSchemaType.RECORD && type != HoodieSchemaType.MAP
         && type != HoodieSchemaType.ARRAY && type != HoodieSchemaType.ENUM
-        && type != HoodieSchemaType.BLOB;
+        && type != HoodieSchemaType.BLOB && type != HoodieSchemaType.VECTOR;
   }
 
   public static Set<String> getInflightMetadataPartitions(HoodieTableConfig tableConfig) {
