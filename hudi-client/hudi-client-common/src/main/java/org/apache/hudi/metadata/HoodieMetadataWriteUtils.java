@@ -159,24 +159,32 @@ public class HoodieMetadataWriteUtils {
 
     final long maxLogFileSizeBytes = writeConfig.getMetadataConfig().getMaxLogFileSize();
     // Borrow the cleaner policy from the main table and adjust the cleaner policy based on the main table's cleaner policy
-    HoodieCleaningPolicy dataTableCleaningPolicy = writeConfig.getCleanerPolicy();
+    boolean shouldDeriveFromDataTableCleanPolicy = writeConfig.getMetadataConfig().shouldDeriveFromDataTableCleanPolicy();
     HoodieCleanConfig.Builder cleanConfigBuilder = HoodieCleanConfig.newBuilder()
         .withAsyncClean(DEFAULT_METADATA_ASYNC_CLEAN)
         .withAutoClean(false)
         .withCleanerParallelism(MDT_DEFAULT_PARALLELISM)
         .withFailedWritesCleaningPolicy(failedWritesCleaningPolicy)
         .withMaxCommitsBeforeCleaning(writeConfig.getCleaningMaxCommits())
-        .withCleanerPolicy(dataTableCleaningPolicy);
+        .withCleanOptimizationWithLocalEngineEnabled(
+            writeConfig.isCleanOptimizationWithLocalEngineEnabled());
 
-    if (HoodieCleaningPolicy.KEEP_LATEST_COMMITS.equals(dataTableCleaningPolicy)) {
-      int retainCommits = (int) Math.max(DEFAULT_METADATA_CLEANER_COMMITS_RETAINED, writeConfig.getCleanerCommitsRetained() * 1.2);
-      cleanConfigBuilder.retainCommits(retainCommits);
-    } else if (HoodieCleaningPolicy.KEEP_LATEST_FILE_VERSIONS.equals(dataTableCleaningPolicy)) {
-      int retainFileVersions = (int) Math.ceil(writeConfig.getCleanerFileVersionsRetained() * 1.2);
-      cleanConfigBuilder.retainFileVersions(retainFileVersions);
-    } else if (HoodieCleaningPolicy.KEEP_LATEST_BY_HOURS.equals(dataTableCleaningPolicy)) {
-      int numHoursRetained = (int) Math.ceil(writeConfig.getCleanerHoursRetained() * 1.2);
-      cleanConfigBuilder.cleanerNumHoursRetained(numHoursRetained);
+    if (shouldDeriveFromDataTableCleanPolicy) {
+      HoodieCleaningPolicy dataTableCleaningPolicy = writeConfig.getCleanerPolicy();
+      cleanConfigBuilder.withCleanerPolicy(dataTableCleaningPolicy);
+      if (HoodieCleaningPolicy.KEEP_LATEST_COMMITS.equals(dataTableCleaningPolicy)) {
+        int retainCommits = (int) Math.max(DEFAULT_METADATA_CLEANER_COMMITS_RETAINED, writeConfig.getCleanerCommitsRetained() * 1.2);
+        cleanConfigBuilder.retainCommits(retainCommits);
+      } else if (HoodieCleaningPolicy.KEEP_LATEST_FILE_VERSIONS.equals(dataTableCleaningPolicy)) {
+        int retainFileVersions = (int) Math.ceil(writeConfig.getCleanerFileVersionsRetained() * 1.2);
+        cleanConfigBuilder.retainFileVersions(retainFileVersions);
+      } else if (HoodieCleaningPolicy.KEEP_LATEST_BY_HOURS.equals(dataTableCleaningPolicy)) {
+        int numHoursRetained = (int) Math.ceil(writeConfig.getCleanerHoursRetained() * 1.2);
+        cleanConfigBuilder.cleanerNumHoursRetained(numHoursRetained);
+      }
+    } else {
+      cleanConfigBuilder.withCleanerPolicy(HoodieCleaningPolicy.KEEP_LATEST_FILE_VERSIONS);
+      cleanConfigBuilder.retainFileVersions(2);
     }
 
     // Create the write config for the metadata table by borrowing options from the main write config.
@@ -211,7 +219,6 @@ public class HoodieMetadataWriteUtils {
         .withCompactionConfig(HoodieCompactionConfig.newBuilder()
             .withInlineCompaction(false)
             .withMaxNumDeltaCommitsBeforeCompaction(writeConfig.getMetadataCompactDeltaCommitMax())
-            .withEnableOptimizedLogBlocksScan(String.valueOf(writeConfig.enableOptimizedLogBlocksScan()))
             // Compaction on metadata table is used as a barrier for archiving on main dataset and for validating the
             // deltacommits having corresponding completed commits. Therefore, we need to compact all fileslices of all
             // partitions together requiring UnBoundedCompactionStrategy.
@@ -224,6 +231,7 @@ public class HoodieMetadataWriteUtils {
             .withMaxDeltaSecondsBeforeCompaction(writeConfig.getMetadataMaxDeltaSecondsBeforeCompaction())
             .build())
         .withStorageConfig(HoodieStorageConfig.newBuilder().hfileMaxFileSize(MDT_MAX_HFILE_SIZE_BYTES)
+            .allowDuplicatesWithHfileWrites(writeConfig.allowDuplicatesWithHfileWrites())
             .logFileMaxSize(maxLogFileSizeBytes)
             // Keeping the log blocks as large as the log files themselves reduces the number of HFile blocks to be checked for
             // presence of keys
@@ -374,7 +382,7 @@ public class HoodieMetadataWriteUtils {
                                                                                String instantTime, HoodieTableMetaClient dataMetaClient, HoodieTableMetadata tableMetadata,
                                                                                HoodieMetadataConfig metadataConfig, Set<String> enabledPartitionTypes, String bloomFilterType,
                                                                                int bloomIndexParallelism, int writesFileIdEncoding, EngineType engineType,
-                                                                               Option<HoodieRecord.HoodieRecordType> recordTypeOpt, boolean enableOptimizeLogBlocksScan) {
+                                                                               Option<HoodieRecord.HoodieRecordType> recordTypeOpt) {
     final Map<String, HoodieData<HoodieRecord>> partitionToRecordsMap = new HashMap<>();
     final HoodieData<HoodieRecord> filesPartitionRecordsRDD = context.parallelize(
         convertMetadataToFilesPartitionRecords(commitMetadata, instantTime), 1);
@@ -402,7 +410,7 @@ public class HoodieMetadataWriteUtils {
     }
     if (enabledPartitionTypes.contains(MetadataPartitionType.RECORD_INDEX.getPartitionPath())) {
       partitionToRecordsMap.put(MetadataPartitionType.RECORD_INDEX.getPartitionPath(), convertMetadataToRecordIndexRecords(context, commitMetadata, metadataConfig,
-          dataMetaClient, writesFileIdEncoding, instantTime, engineType, enableOptimizeLogBlocksScan));
+          dataMetaClient, writesFileIdEncoding, instantTime, engineType));
     }
     return partitionToRecordsMap;
   }
@@ -512,7 +520,7 @@ public class HoodieMetadataWriteUtils {
     if (pathInfo != null) {
       return pathInfo;
     }
-    return new StoragePathInfo(baseFile.getStoragePath(), baseFile.getFileLen(), false, (short) 0, 0, 0);
+    return new StoragePathInfo(baseFile.getStoragePath(), baseFile.getFileSize(), false, (short) 0, 0, 0);
   }
 
   private static StoragePathInfo getLogFileStoragePathInfo(HoodieLogFile logFile) {

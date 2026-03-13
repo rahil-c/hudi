@@ -91,6 +91,7 @@ import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.HoodieStorageUtils;
 import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.sync.common.HoodieSyncConfig;
 import org.apache.hudi.sync.common.util.SyncUtilHelpers;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.util.JavaScalaConverters;
@@ -116,7 +117,6 @@ import org.apache.hudi.utilities.streamer.HoodieStreamer.Config;
 import org.apache.hudi.utilities.transform.Transformer;
 
 import com.codahale.metrics.Timer;
-import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -138,6 +138,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -452,7 +453,10 @@ public class StreamSync implements Serializable, Closeable {
       payloadClass = overridingMergeConfigs.get().getMiddle();
       mergeStrategyId = overridingMergeConfigs.get().getRight();
     }
-
+    String partitionValueExtractorClassName = props.getString(
+        DataSourceWriteOptions.PARTITION_EXTRACTOR_CLASS().key(),
+        props.getString(HoodieSyncConfig.META_SYNC_PARTITION_EXTRACTOR_CLASS.key(),
+            HoodieSyncConfig.META_SYNC_PARTITION_EXTRACTOR_CLASS.defaultValue()));
     return tableBuilder.setTableType(cfg.tableType)
         .setTableName(cfg.targetTableName)
         .setArchiveLogFolder(TIMELINE_HISTORY_PATH.defaultValue())
@@ -466,6 +470,7 @@ public class StreamSync implements Serializable, Closeable {
         .setPopulateMetaFields(props.getBoolean(HoodieTableConfig.POPULATE_META_FIELDS.key(),
             HoodieTableConfig.POPULATE_META_FIELDS.defaultValue()))
         .setKeyGeneratorClassProp(keyGenClassName)
+        .setPartitionValueExtractorClass(partitionValueExtractorClassName)
         .setOrderingFields(cfg.sourceOrderingFields)
         .setPartitionMetafileUseBaseFormat(props.getBoolean(HoodieTableConfig.PARTITION_METAFILE_USE_BASE_FORMAT.key(),
             HoodieTableConfig.PARTITION_METAFILE_USE_BASE_FORMAT.defaultValue()))
@@ -1009,7 +1014,7 @@ public class StreamSync implements Serializable, Closeable {
   }
 
   public void runMetaSync() {
-    List<String> syncClientToolClasses = Arrays.stream(cfg.syncClientToolClassNames.split(",")).distinct().collect(Collectors.toList());
+    Set<String> syncClientToolClasses = Arrays.stream(cfg.syncClientToolClassNames.split(",")).collect(Collectors.toSet());
     // for backward compatibility
     if (cfg.enableHiveSync) {
       cfg.enableMetaSync = true;
@@ -1251,17 +1256,18 @@ public class StreamSync implements Serializable, Closeable {
    */
   private void registerAvroSchemas(HoodieSchema sourceSchema, HoodieSchema targetSchema) {
     // register the schemas, so that shuffle does not serialize the full schemas
-    List<Schema> schemas = new ArrayList<>();
+    List<HoodieSchema> schemas = new ArrayList<>(2);
     if (sourceSchema != null) {
-      schemas.add(sourceSchema.toAvroSchema());
+      schemas.add(sourceSchema);
     }
     if (targetSchema != null) {
-      schemas.add(targetSchema.toAvroSchema());
+      schemas.add(targetSchema);
     }
     if (!schemas.isEmpty()) {
       LOG.debug("Registering Schema: {}", schemas);
       // Use the underlying spark context in case the java context is changed during runtime
-      hoodieSparkContext.getJavaSparkContext().sc().getConf().registerAvroSchemas(JavaScalaConverters.convertJavaListToScalaList(schemas).toList());
+      hoodieSparkContext.getJavaSparkContext().sc().getConf()
+          .registerAvroSchemas(JavaScalaConverters.convertJavaListToScalaList(schemas.stream().map(HoodieSchema::toAvroSchema).collect(Collectors.toList())).toList());
     }
   }
 

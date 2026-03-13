@@ -347,6 +347,16 @@ public class HoodieClusteringConfig extends HoodieConfig {
           + "Please exercise caution while setting this config, especially when clustering is done very frequently. This could lead to race condition in "
           + "rare scenarios, for example, when the clustering completes after instants are fetched but before rollback completed.");
 
+  public static final ConfigProperty<Boolean> PLAN_GENERATION_USE_LOCAL_ENGINE_CONTEXT = ConfigProperty
+      .key("hoodie.clustering.plan.generation.use.local.engine.context")
+      .defaultValue(false)
+      .sinceVersion("1.2.0")
+      .withDocumentation("When enabled, uses a local engine context (e.g., driver-side in Spark) instead of the distributed engine context "
+          + "to compute clustering groups for each partition during clustering plan generation. By default this is disabled, meaning the distributed "
+          + "engine context is used (e.g., with Spark, each partition's clustering groups are computed in a separate Spark task). "
+          + "Enable this for cases where there are guaranteed to only be a few partitions with many files in the clustering plan, "
+          + "and it would be more resource-efficient to compute locally on the driver rather than allocate executor resources.");
+
   public static final ConfigProperty<Boolean> FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE = ConfigProperty
       .key(CLUSTERING_STRATEGY_PARAM_PREFIX + "binary.copy.schema.evolution.enable")
       .defaultValue(false)
@@ -627,6 +637,11 @@ public class HoodieClusteringConfig extends HoodieConfig {
 
     public Builder withFileStitchingBinaryCopySchemaEvolutionEnabled(Boolean enabled) {
       clusteringConfig.setValue(FILE_STITCHING_BINARY_COPY_SCHEMA_EVOLUTION_ENABLE, String.valueOf(enabled));
+      return this;
+    }
+
+    public Builder useLocalEngineContextForPlanGeneration(Boolean useLocal) {
+      clusteringConfig.setValue(PLAN_GENERATION_USE_LOCAL_ENGINE_CONTEXT, String.valueOf(useLocal));
       return this;
     }
 

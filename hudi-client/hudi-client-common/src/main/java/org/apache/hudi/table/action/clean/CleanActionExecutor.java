@@ -65,7 +65,7 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
     this.txnManager = new TransactionManager(config, table.getStorage());
   }
 
-  private static boolean deleteFileAndGetResult(HoodieStorage storage, String deletePathStr) throws IOException {
+  private static boolean deleteFileAndGetResult(HoodieStorage storage, String deletePathStr) {
     StoragePath deletePath = new StoragePath(deletePathStr);
     log.debug("Working on delete path: {}", deletePath);
     try {
@@ -83,8 +83,22 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
       }
       return deleteResult;
     } catch (FileNotFoundException fio) {
-      // With cleanPlan being used for retried cleaning operations, its possible to clean a file twice
-      return false;
+      // With cleanPlan being used for retried cleaning operations, its possible to clean a file twice if a file to be
+      // deleted is not found, treat it as a success.  In other words, there is nothing else to be cleaned up on the
+      // FileSystem, except for updating the MDT.  By returning success, we would remove the entry from MDT.
+      return true;
+    } catch (IOException e) {
+      try {
+        if (storage.exists(deletePath)) {
+          log.error("Delete file failed: {} and file still exists", deletePath, e);
+          throw new HoodieIOException(e.getMessage(), e);
+        }
+        log.warn("Delete file failed: {} but file does not exist", deletePath, e);
+        return false;
+      } catch (IOException ex) {
+        log.error("Delete file failed: {} with exception: {} and existence check also failed", deletePath, e, ex);
+        throw new HoodieIOException(ex.getMessage(), ex);
+      }
     }
   }
 
@@ -96,12 +110,7 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
       String partitionPath = partitionDelFileTuple.getLeft();
       StoragePath deletePath = new StoragePath(partitionDelFileTuple.getRight().getFilePath());
       String deletePathStr = deletePath.toString();
-      boolean deletedFileResult = false;
-      try {
-        deletedFileResult = deleteFileAndGetResult(storage, deletePathStr);
-      } catch (IOException e) {
-        log.error("Delete file failed: {}", deletePathStr, e);
-      }
+      boolean deletedFileResult = deleteFileAndGetResult(storage, deletePathStr);
       final PartitionCleanStat partitionCleanStat =
           partitionCleanStatMap.computeIfAbsent(partitionPath, k -> new PartitionCleanStat(partitionPath));
       boolean isBootstrapBasePathFile = partitionDelFileTuple.getRight().isBootstrapBaseFile();
@@ -148,12 +157,8 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
         ? cleanerPlan.getPartitionsToBeDeleted()
         : new ArrayList<>();
     partitionsToBeDeleted.forEach(entry -> {
-      try {
-        if (!isNullOrEmpty(entry)) {
-          deleteFileAndGetResult(table.getStorage(), table.getMetaClient().getBasePath() + "/" + entry);
-        }
-      } catch (IOException e) {
-        log.warn("Partition deletion failed: {}", entry, e);
+      if (!isNullOrEmpty(entry)) {
+        deleteFileAndGetResult(table.getStorage(), table.getMetaClient().getBasePath() + "/" + entry);
       }
     });
 

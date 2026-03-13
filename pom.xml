@@ -96,7 +96,7 @@
 
     <java.version>11</java.version>
     <kryo.shaded.version>4.0.2</kryo.shaded.version>
-    <fasterxml.spark3.version>2.10.0</fasterxml.spark3.version>
+    <fasterxml.spark3.version>2.15.2</fasterxml.spark3.version>
     <fasterxml.spark4.version>2.17.1</fasterxml.spark4.version>
     <fasterxml.version>${fasterxml.spark3.version}</fasterxml.version>
     <fasterxml.jackson.databind.version>${fasterxml.spark3.version}</fasterxml.jackson.databind.version>
@@ -112,7 +112,7 @@
     <confluent.version>5.5.0</confluent.version>
     <glassfish.version>2.17</glassfish.version>
     <glassfish.el.version>3.0.1-b12</glassfish.el.version>
-    <parquet.version>1.10.1</parquet.version>
+    <parquet.version>1.13.1</parquet.version>
     <junit.jupiter.version>5.14.1</junit.jupiter.version>
     <junit.vintage.version>5.14.1</junit.vintage.version>
     <junit.platform.version>1.14.1</junit.platform.version>
@@ -209,7 +209,7 @@
     <spark.bundle.hive.shade.prefix/>
     <utilities.bundle.hive.scope>provided</utilities.bundle.hive.scope>
     <utilities.bundle.hive.shade.prefix/>
-    <argLine>-Xmx2g -Xms128m -XX:-OmitStackTraceInFastThrow</argLine>
+    <argLine>-Xmx3g -Xms128m -XX:-OmitStackTraceInFastThrow</argLine>
     <jacoco.version>0.8.12</jacoco.version>
     <presto.bundle.bootstrap.scope>compile</presto.bundle.bootstrap.scope>
     <presto.bundle.bootstrap.shade.prefix>org.apache.hudi.</presto.bundle.bootstrap.shade.prefix>
@@ -241,7 +241,7 @@
     <spring.shell.version>2.1.1</spring.shell.version>
     <snappy.version>1.1.10.7</snappy.version>
     <arrow.version>18.3.0</arrow.version>
-    <lance.version>0.39.0</lance.version>
+    <lance.version>1.0.2</lance.version>
     <lance.spark.connector.version>0.0.15</lance.spark.connector.version>
     <lance.spark.artifact>lance-spark-3.5_${scala.binary.version}</lance.spark.artifact>
     <lance.skip.tests>false</lance.skip.tests>
@@ -956,7 +956,7 @@
       </dependency>
       <!-- Lance Core SDK -->
       <dependency>
-        <groupId>com.lancedb</groupId>
+        <groupId>org.lance</groupId>
         <artifactId>lance-core</artifactId>
         <version>${lance.version}</version>
       </dependency>
@@ -965,6 +965,12 @@
         <groupId>com.lancedb</groupId>
         <artifactId>${lance.spark.artifact}</artifactId>
         <version>${lance.spark.connector.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>com.lancedb</groupId>
+            <artifactId>lance-core</artifactId>
+          </exclusion>
+        </exclusions>
       </dependency>
       <!-- Apache Arrow -->
       <dependency>
@@ -2072,6 +2078,7 @@
                   <goal>report</goal>
                 </goals>
                 <configuration>
+                  <dataFile>${project.build.directory}/jacoco-agent/${jacoco.agent.dest.filename}</dataFile>
                   <outputDirectory>${project.reporting.outputDirectory}/jacoco-ut</outputDirectory>
                 </configuration>
               </execution>
@@ -2119,6 +2126,7 @@
                   <goal>report</goal>
                 </goals>
                 <configuration>
+                  <dataFile>${project.build.directory}/jacoco-agent/${jacoco.agent.dest.filename}</dataFile>
                   <outputDirectory>${project.reporting.outputDirectory}/jacoco-ft</outputDirectory>
                 </configuration>
               </execution>
@@ -2166,6 +2174,7 @@
                   <goal>report</goal>
                 </goals>
                 <configuration>
+                  <dataFile>${project.build.directory}/jacoco-agent/${jacoco.agent.dest.filename}</dataFile>
                   <outputDirectory>${project.reporting.outputDirectory}/jacoco-ft</outputDirectory>
                 </configuration>
               </execution>
@@ -2213,6 +2222,7 @@
                   <goal>report</goal>
                 </goals>
                 <configuration>
+                  <dataFile>${project.build.directory}/jacoco-agent/${jacoco.agent.dest.filename}</dataFile>
                   <outputDirectory>${project.reporting.outputDirectory}/jacoco-ft</outputDirectory>
                 </configuration>
               </execution>
@@ -2907,7 +2917,7 @@
     <profile>
       <id>java11</id>
       <properties>
-        <argLine>-Xmx2g -Xms512m -XX:+UseParallelGC --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -XX:-OmitStackTraceInFastThrow</argLine>
+        <argLine>-Xmx3g -Xms512m -XX:+UseParallelGC --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -XX:-OmitStackTraceInFastThrow</argLine>
       </properties>
       <activation>
         <jdk>[11,17)</jdk>
@@ -2917,7 +2927,7 @@
     <profile>
       <id>java17</id>
       <properties>
-        <argLine>-Xmx2g -Xms512m -XX:+UseParallelGC --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -Djol.magicFieldOffset=true -XX:-OmitStackTraceInFastThrow</argLine>
+        <argLine>-Xmx3g -Xms512m -XX:+UseParallelGC --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -Djol.magicFieldOffset=true -XX:-OmitStackTraceInFastThrow</argLine>
       </properties>
       <activation>
         <jdk>[17,)</jdk>

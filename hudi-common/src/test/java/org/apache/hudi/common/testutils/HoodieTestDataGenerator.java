@@ -19,7 +19,6 @@
 
 package org.apache.hudi.common.testutils;
 
-import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.avro.model.HoodieCompactionPlan;
 import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
@@ -242,7 +241,7 @@ public class HoodieTestDataGenerator implements AutoCloseable {
   public static final Schema NESTED_AVRO_SCHEMA = new Schema.Parser().parse(TRIP_NESTED_EXAMPLE_SCHEMA);
   public static final HoodieSchema NESTED_SCHEMA = HoodieSchema.fromAvroSchema(NESTED_AVRO_SCHEMA);
   public static final Schema AVRO_SCHEMA_WITH_METADATA_FIELDS =
-      HoodieAvroUtils.addMetadataFields(AVRO_SCHEMA);
+      HoodieSchemaUtils.addMetadataFields(HoodieSchema.fromAvroSchema(AVRO_SCHEMA)).toAvroSchema();
   public static final HoodieSchema HOODIE_SCHEMA_WITH_METADATA_FIELDS = HoodieSchema.fromAvroSchema(AVRO_SCHEMA_WITH_METADATA_FIELDS);
   public static final Schema AVRO_SHORT_TRIP_SCHEMA = new Schema.Parser().parse(SHORT_TRIP_SCHEMA);
   public static final Schema AVRO_TRIP_ENCODED_DECIMAL_SCHEMA = new Schema.Parser().parse(TRIP_ENCODED_DECIMAL_SCHEMA);
@@ -387,6 +386,8 @@ public class HoodieTestDataGenerator implements AutoCloseable {
         return generateRandomValue(key, commitTime, true, timestamp);
       } else if (TRIP_EXAMPLE_SCHEMA.equals(schemaStr)) {
         return generateRandomValue(key, commitTime, isFlattened, timestamp);
+      } else if (TRIP_EXAMPLE_SCHEMA_EVOLVED_1.equals(schemaStr)) {
+        return generateRandomValueForSchemaEvolved1(key, commitTime, isFlattened, timestamp);
       } else if (TRIP_ENCODED_DECIMAL_SCHEMA.equals(schemaStr)) {
         return generatePayloadForTripEncodedDecimalSchema(key, commitTime, timestamp);
       } else if (TRIP_SCHEMA.equals(schemaStr)) {
@@ -457,6 +458,25 @@ public class HoodieTestDataGenerator implements AutoCloseable {
     return generateGenericRecord(
         key.getRecordKey(), key.getPartitionPath(), "rider-" + instantTime, "driver-" + instantTime, timestamp,
         false, isFlattened);
+  }
+
+  private IndexedRecord generateRandomValueForSchemaEvolved1(HoodieKey key, String instantTime, boolean isFlattened, long timestamp) {
+    Schema evolvedSchema = new Schema.Parser().parse(TRIP_EXAMPLE_SCHEMA_EVOLVED_1);
+    GenericRecord rec = new GenericData.Record(evolvedSchema);
+
+    // Reuse existing logic to populate base fields
+    generateTripPrefixValues(rec, key.getRecordKey(), key.getPartitionPath(), "rider-" + instantTime, "driver-" + instantTime, timestamp);
+    generateExtraSchemaValues(rec);
+    generateMapTypeValues(rec);
+    generateFareNestedValues(rec);
+    generateTipNestedValues(rec);
+
+    // Add the evolved column
+    rec.put("extra_column1", "extra_value_" + instantTime);
+
+    generateCustomValues(rec, "customField");
+    generateTripSuffixValues(rec, false);
+    return rec;
   }
 
   private IndexedRecord generateNestedExampleRandomValue(HoodieKey key, String instantTime, long ts) {

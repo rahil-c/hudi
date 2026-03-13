@@ -23,14 +23,16 @@ import org.apache.hudi.avro.HoodieAvroUtils
 import org.apache.hudi.common.config.TimestampKeyGeneratorConfig
 import org.apache.hudi.common.model.HoodieRecord
 import org.apache.hudi.common.schema.HoodieSchema
-import org.apache.hudi.common.util.{Option => HOption}
+import org.apache.hudi.common.util.{StringUtils, Option => HOption}
 import org.apache.hudi.keygen.TimestampBasedAvroKeyGenerator
 import org.apache.hudi.keygen.constant.KeyGeneratorType
 import org.apache.hudi.storage.StoragePath
 import org.apache.hudi.util.ExceptionWrappingIterator
-
 import org.apache.avro.generic.GenericRecord
 import org.apache.hadoop.fs.Path
+import org.apache.hudi.common.table.HoodieTableConfig
+import org.apache.hudi.sync.common.model.PartitionValueExtractor
+
 import org.apache.spark.SPARK_VERSION
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
@@ -43,6 +45,8 @@ import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.unsafe.types.UTF8String
 
+import java.time.LocalDate
+import java.time.format.{DateTimeFormatter, DateTimeParseException}
 import scala.collection.JavaConverters._
 import scala.reflect.ClassTag
 
@@ -65,6 +69,7 @@ private[hudi] trait SparkVersionsSupport {
 object HoodieSparkUtils extends SparkAdapterSupport with SparkVersionsSupport with Logging {
 
   override def getSparkVersion: String = SPARK_VERSION
+  val dateTimeFormatter = DateTimeFormatter.ofPattern("yyyy/MM/dd")
 
   def getMetaSchema: StructType = {
     StructType(HoodieRecord.HOODIE_META_COLUMNS.asScala.map(col => {
@@ -218,14 +223,16 @@ object HoodieSparkUtils extends SparkAdapterSupport with SparkVersionsSupport wi
   }
 
   def parsePartitionColumnValues(partitionColumns: Array[String],
-                                   partitionPath: String,
-                                   tableBasePath: StoragePath,
-                                   tableSchema: StructType,
-                                   tableConfig: java.util.Map[String, String],
-                                   timeZoneId: String,
-                                   shouldValidatePartitionColumns: Boolean): Array[Object] = {
+                                 partitionPath: String,
+                                 tableBasePath: StoragePath,
+                                 tableSchema: StructType,
+                                 tableConfig: HoodieTableConfig,
+                                 timeZoneId: String,
+                                 shouldValidatePartitionColumns: Boolean,
+                                 usePartitionValueExtractorOnRead: Boolean): Array[Object] = {
     val keyGeneratorClass = KeyGeneratorType.getKeyGeneratorClassName(tableConfig)
-    val timestampKeyGeneratorType = tableConfig.get(TimestampKeyGeneratorConfig.TIMESTAMP_TYPE_FIELD.key())
+    val timestampKeyGeneratorType = tableConfig.propsMap().get(TimestampKeyGeneratorConfig.TIMESTAMP_TYPE_FIELD.key())
+    val partitionValueExtractorClass = tableConfig.getPartitionExtractorClass.orElse("")
 
     if (null != keyGeneratorClass
       && null != timestampKeyGeneratorType
@@ -235,18 +242,53 @@ object HoodieSparkUtils extends SparkAdapterSupport with SparkVersionsSupport wi
       // we couldn't reconstruct initial partition column values from partition paths due to lost data after formatting.
       // But the output for these cases is in a string format, so we can pass partitionPath as UTF8String
       Array.fill(partitionColumns.length)(UTF8String.fromString(partitionPath))
+    } else if(usePartitionValueExtractorOnRead && !StringUtils.isNullOrEmpty(partitionValueExtractorClass)) {
+      parsePartitionValuesBasedOnPartitionValueExtractor(partitionValueExtractorClass, partitionPath,
+        partitionColumns, tableSchema)
     } else {
       doParsePartitionColumnValues(partitionColumns, partitionPath, tableBasePath, tableSchema, timeZoneId,
-        shouldValidatePartitionColumns)
+        shouldValidatePartitionColumns, tableConfig.getSlashSeparatedDatePartitioning)
+    }
+  }
+
+  /**
+   * Parses partition values from partition path using a custom PartitionValueExtractor.
+   *
+   * @param partitionValueExtractorClass Fully qualified class name of the PartitionValueExtractor implementation
+   * @param partitionPath The partition path to extract values from
+   * @param partitionColumns Array of partition column names
+   * @param tableSchema The schema of the table
+   * @return Array of partition values as Objects, properly typed according to the schema
+   */
+  private def parsePartitionValuesBasedOnPartitionValueExtractor(
+      partitionValueExtractorClass: String,
+      partitionPath: String,
+      partitionColumns: Array[String],
+      tableSchema: StructType): Array[Object] = {
+    try {
+      val partitionValueExtractor = Class.forName(partitionValueExtractorClass)
+        .getDeclaredConstructor()
+        .newInstance()
+        .asInstanceOf[PartitionValueExtractor]
+      val partitionValues = partitionValueExtractor.extractPartitionValuesInPath(partitionPath).asScala.toArray
+      val partitionSchema = buildPartitionSchemaForNestedFields(tableSchema, partitionColumns)
+      val typedValues = partitionValues.zip(partitionSchema.fields).map { case (stringValue, field) =>
+        castStringToType(stringValue, field.dataType)
+      }
+      typedValues.map(_.asInstanceOf[Object])
+    } catch {
+      case e: Exception =>
+        throw new RuntimeException(s"Failed to extract partition value using $partitionValueExtractorClass class", e)
     }
   }
 
   def doParsePartitionColumnValues(partitionColumns: Array[String],
-                                 partitionPath: String,
-                                 basePath: StoragePath,
-                                 schema: StructType,
-                                 timeZoneId: String,
-                                 shouldValidatePartitionCols: Boolean): Array[Object] = {
+                                   partitionPath: String,
+                                   basePath: StoragePath,
+                                   schema: StructType,
+                                   timeZoneId: String,
+                                   shouldValidatePartitionCols: Boolean,
+                                   slashSeparatedDatePartitioning: Boolean): Array[Object] = {
     if (partitionColumns.length == 0) {
       // This is a non-partitioned table
       Array.empty
@@ -261,6 +303,8 @@ object HoodieSparkUtils extends SparkAdapterSupport with SparkVersionsSupport wi
           val partitionValue = if (partitionPath.startsWith(prefix)) {
             // support hive style partition path
             partitionPath.substring(prefix.length)
+          } else if (slashSeparatedDatePartitioning) {
+            partitionPath.replace('/', '-')
           } else {
             partitionPath
           }
@@ -329,7 +373,7 @@ object HoodieSparkUtils extends SparkAdapterSupport with SparkVersionsSupport wi
     ).toSeq(partitionSchema)
   }
 
-  private def buildPartitionSchemaForNestedFields(schema: StructType, partitionColumns: Array[String]): StructType = {
+  def buildPartitionSchemaForNestedFields(schema: StructType, partitionColumns: Array[String]): StructType = {
     val partitionFields = partitionColumns.flatMap { partitionCol =>
       extractNestedField(schema, partitionCol)
     }
@@ -357,7 +401,7 @@ object HoodieSparkUtils extends SparkAdapterSupport with SparkVersionsSupport wi
     traverseSchema(schema, pathParts.toList, fieldPath)
   }
 
-  private def castStringToType(value: String, dataType: org.apache.spark.sql.types.DataType): Any = {
+  def castStringToType(value: String, dataType: org.apache.spark.sql.types.DataType): Any = {
     import org.apache.spark.sql.types._
 
     // handling cases where the value contains path separators or is complex

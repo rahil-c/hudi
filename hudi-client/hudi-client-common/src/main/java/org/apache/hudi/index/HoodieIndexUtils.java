@@ -60,10 +60,10 @@ import org.apache.hudi.common.util.HoodieRecordUtils;
 import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
+import org.apache.hudi.common.util.VisibleForTesting;
 import org.apache.hudi.common.util.collection.CloseableMappingIterator;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
-import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.HoodieIndexException;
 import org.apache.hudi.exception.HoodieMetadataIndexException;
@@ -84,12 +84,12 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import static java.util.stream.Collectors.toList;
 import static org.apache.hudi.common.config.HoodieMetadataConfig.GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP;
@@ -129,44 +129,11 @@ public class HoodieIndexUtils {
   }
 
   /**
-   * Given table schema and fields to index, checks if each field's data types are supported for secondary index.
-   * Secondary index has stricter requirements than expression index.
-   *
-   * @param sourceFields fields to index
-   * @param tableSchema  table schema
-   * @return true if each field's data type are supported for secondary index, false otherwise
-   */
-  static boolean validateDataTypeForSecondaryIndex(List<String> sourceFields, HoodieSchema tableSchema) {
-    return sourceFields.stream().allMatch(fieldToIndex -> {
-      Pair<String, HoodieSchemaField> schema = HoodieSchemaUtils.getNestedField(tableSchema, fieldToIndex)
-          .orElseThrow(() -> new HoodieException("Failed to get schema. Not a valid field name: " + fieldToIndex));
-      return isSecondaryIndexSupportedType(schema.getRight().schema());
-    });
-  }
-
-  /**
-   * Given table schema and fields to index, checks if each field's data types are supported.
-   *
-   * @param sourceFields fields to index
-   * @param tableSchema  table schema
-   * @return true if each field's data types are supported, false otherwise
-   */
-  public static boolean validateDataTypeForSecondaryOrExpressionIndex(List<String> sourceFields, HoodieSchema tableSchema) {
-    return sourceFields.stream().anyMatch(fieldToIndex -> {
-      Pair<String, HoodieSchemaField> nestedField = HoodieSchemaUtils.getNestedField(tableSchema, fieldToIndex)
-          .orElseThrow(() -> new HoodieException("Failed to get schema. Not a valid field name: " + fieldToIndex));
-      HoodieSchema fieldSchema = nestedField.getRight().schema();
-      return fieldSchema.getType() != HoodieSchemaType.RECORD
-          && fieldSchema.getType() != HoodieSchemaType.ARRAY
-          && fieldSchema.getType() != HoodieSchemaType.MAP;
-    });
-  }
-
-  /**
    * Check if the given schema type is supported for secondary index.
    * Supported types are: String (including CHAR), Integer types (Int, BigInt, Long, Short), and timestamp
    */
-  private static boolean isSecondaryIndexSupportedType(HoodieSchema schema) {
+  @VisibleForTesting
+  static boolean isSecondaryIndexSupportedType(HoodieSchema schema) {
     // Handle union types (nullable fields)
     if (schema.getType() == HoodieSchemaType.UNION) {
       // For union types, check if any of the types is supported
@@ -276,28 +243,27 @@ public class HoodieIndexUtils {
    * @param storage
    * @return List of pairs of candidate keys and positions that are available in the file
    */
-  public static List<Pair<String, Long>> filterKeysFromFile(StoragePath filePath,
-                                                            List<String> candidateRecordKeys,
-                                                            HoodieStorage storage) throws HoodieIndexException {
+  public static Collection<Pair<String, Long>> filterKeysFromFile(StoragePath filePath,
+                                                                  Set<String> candidateRecordKeys,
+                                                                  HoodieStorage storage) throws HoodieIndexException {
     checkArgument(FSUtils.isBaseFile(filePath));
-    List<Pair<String, Long>> foundRecordKeys = new ArrayList<>();
+    if (candidateRecordKeys.isEmpty()) {
+      return Collections.emptyList();
+    }
     log.info("Going to filter {} keys from file {}", candidateRecordKeys.size(), filePath);
     try (HoodieFileReader fileReader = HoodieIOFactory.getIOFactory(storage)
         .getReaderFactory(HoodieRecordType.AVRO)
         .getFileReader(DEFAULT_HUDI_CONFIG_FOR_READER, filePath)) {
       // Load all rowKeys from the file, to double-confirm
-      if (!candidateRecordKeys.isEmpty()) {
-        HoodieTimer timer = HoodieTimer.start();
-        Set<Pair<String, Long>> fileRowKeys = fileReader.filterRowKeys(candidateRecordKeys.stream().collect(Collectors.toSet()));
-        foundRecordKeys.addAll(fileRowKeys);
-        log.info("Checked keys against file {}, in {} ms. #candidates ({}) #found ({})", filePath,
-            timer.endTimer(), candidateRecordKeys.size(), foundRecordKeys.size());
-        log.debug("Keys matching for file {} => {}", filePath, foundRecordKeys);
-      }
+      HoodieTimer timer = HoodieTimer.start();
+      Set<Pair<String, Long>> fileRowKeys = fileReader.filterRowKeys(candidateRecordKeys);
+      log.info("Checked keys against file {}, in {} ms. #candidates ({}) #found ({})", filePath,
+          timer.endTimer(), candidateRecordKeys.size(), fileRowKeys.size());
+      log.debug("Keys matching for file {} => {}", filePath, fileRowKeys);
+      return fileRowKeys;
     } catch (Exception e) {
       throw new HoodieIndexException("Error checking candidate keys against file.", e);
     }
-    return foundRecordKeys;
   }
 
   /**
@@ -362,7 +328,6 @@ public class HoodieIndexUtils {
           .withRequestedSchema(dataSchema)
           .withInternalSchema(internalSchemaOption)
           .withProps(metaClient.getTableConfig().getProps())
-          .withEnableOptimizedLogBlockScan(config.enableOptimizedLogBlocksScan())
           .build();
       try {
         final HoodieRecordLocation currentLocation = new HoodieRecordLocation(fileSlice.getBaseInstantTime(), fileSlice.getFileId());
@@ -719,28 +684,19 @@ public class HoodieIndexUtils {
     String columnName = sourceFields.get(0); // We know there's only one column from the check above
 
     // First check if the field exists
-    Pair<String, HoodieSchemaField> fieldSchema = HoodieSchemaUtils.getNestedField(tableSchema, columnName)
+    Pair<String, HoodieSchemaField> fieldSchemaPair = HoodieSchemaUtils.getNestedField(tableSchema, columnName)
         .orElseThrow(() -> new HoodieMetadataIndexException(String.format(
-          "Cannot create %s index '%s': Column '%s' does not exist in the table schema. "
-              + "Please verify the column name and ensure it exists in the table.",
-          indexType.equals(PARTITION_NAME_SECONDARY_INDEX) ? "secondary" : "expression",
+            "Cannot create %s index '%s': Column '%s' does not exist in the table schema. "
+                + "Please verify the column name and ensure it exists in the table.",
+            indexType.equals(PARTITION_NAME_SECONDARY_INDEX) ? "secondary" : "expression",
             userIndexName, columnName)));
 
-    // Check for complex types (RECORD, ARRAY, MAP) - not supported for any index type
-    if (!validateDataTypeForSecondaryOrExpressionIndex(sourceFields, tableSchema)) {
-      throw new HoodieMetadataIndexException(String.format(
-          "Cannot create %s index '%s': Column '%s' has unsupported data type '%s'. "
-          + "Complex types (RECORD, ARRAY, MAP) are not supported for indexing. "
-          + "Please choose a column with a primitive data type.",
-          indexType.equals(PARTITION_NAME_SECONDARY_INDEX) ? "secondary" : "expression",
-          userIndexName, columnName, fieldSchema.getRight().schema().getType()));
-    }
+    HoodieSchema fieldSchema = fieldSchemaPair.getRight().schema();
 
-    // For secondary index, apply stricter data type validation
     if (indexType.equals(PARTITION_NAME_SECONDARY_INDEX)) {
-      if (!validateDataTypeForSecondaryIndex(sourceFields, tableSchema)) {
-        String actualType = fieldSchema.getRight().schema().getType().toString();
-
+      // Secondary Index Validation: Strict Allow-List/Whitelist
+      if (!isSecondaryIndexSupportedType(fieldSchema)) {
+        String actualType = fieldSchema.getType().toString();
         throw new HoodieMetadataIndexException(String.format(
             "Cannot create secondary index '%s': Column '%s' has unsupported data type '%s'. "
             + "Secondary indexes only support: STRING, CHAR, INT, BIGINT/LONG, SMALLINT, TINYINT, "
@@ -762,6 +718,15 @@ public class HoodieIndexUtils {
             + "Please enable the record index by setting '%s' to 'true' in the index creation options, "
             + "or create a record index first using: CREATE INDEX record_index ON %s USING record_index",
             userIndexName, GLOBAL_RECORD_LEVEL_INDEX_ENABLE_PROP.key(), metaClient.getTableConfig().getTableName()));
+      }
+    } else {
+      // Expression Index Validation: Loose Deny-List/Blacklist
+      if (fieldSchema.getNonNullType().getType().isComplex()) {
+        throw new HoodieMetadataIndexException(String.format(
+            "Cannot create expression index '%s': Column '%s' has unsupported data type '%s'. "
+                + "Complex types (RECORD, ARRAY, MAP) are not supported for indexing. "
+                + "Please choose a column with a primitive data type.",
+            userIndexName, columnName, fieldSchema.getType()));
       }
     }
   }

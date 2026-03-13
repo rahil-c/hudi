@@ -24,6 +24,7 @@ import org.apache.flink.connector.base.source.reader.RecordsWithSplitIds;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitReader;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitsAddition;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitsChange;
+import org.apache.hudi.metrics.FlinkStreamReadMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,20 +50,23 @@ public class HoodieSourceSplitReader<T> implements SplitReader<HoodieRecordWithP
 
   private final SerializableComparator<HoodieSourceSplit> splitComparator;
   private final SplitReaderFunction<T> readerFunction;
-  private final int indexOfSubTask;
   private final Queue<HoodieSourceSplit> splits;
+  private final SourceReaderContext context;
+  private final FlinkStreamReadMetrics readerMetrics;
 
   private HoodieSourceSplit currentSplit;
-  private String currentSplitId;
 
   public HoodieSourceSplitReader(
+      String tableName,
       SourceReaderContext context,
       SplitReaderFunction<T> readerFunction,
       SerializableComparator<HoodieSourceSplit> splitComparator) {
+    this.context = context;
     this.splitComparator = splitComparator;
     this.readerFunction = readerFunction;
-    this.indexOfSubTask = context.getIndexOfSubtask();
     this.splits = new ArrayDeque<>();
+    this.readerMetrics = new FlinkStreamReadMetrics(context.metricGroup(), tableName);
+    this.readerMetrics.registerMetrics();
   }
 
   @Override
@@ -70,7 +74,6 @@ public class HoodieSourceSplitReader<T> implements SplitReader<HoodieRecordWithP
     HoodieSourceSplit nextSplit = splits.poll();
     if (nextSplit != null) {
       currentSplit = nextSplit;
-      currentSplitId = nextSplit.splitId();
       return readerFunction.read(currentSplit);
     } else {
       // return an empty result, which will lead to split fetch to be idle.
@@ -104,7 +107,6 @@ public class HoodieSourceSplitReader<T> implements SplitReader<HoodieRecordWithP
 
   @Override
   public void close() throws Exception {
-    currentSplitId = null;
     readerFunction.close();
   }
 

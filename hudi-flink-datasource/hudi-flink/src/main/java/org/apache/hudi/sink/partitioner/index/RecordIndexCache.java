@@ -30,6 +30,7 @@ import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.util.FlinkWriteClients;
 
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.flink.configuration.Configuration;
 
 import java.io.Closeable;
@@ -43,17 +44,35 @@ import java.util.TreeMap;
  * <p>
  * todo: use map backed by flink managed memory.
  */
+@Slf4j
 public class RecordIndexCache implements Closeable {
   @VisibleForTesting
   @Getter
   private final TreeMap<Long, ExternalSpillableMap<String, HoodieRecordGlobalLocation>> caches;
   private final HoodieWriteConfig writeConfig;
+  @VisibleForTesting
+  @Getter
   private final long maxCacheSizeInBytes;
+  // the minimum checkpoint id retained in the cache.
+  private long minRetainedCheckpointId;
+  private long recordCnt = 0;
+
+  /**
+   * Step size to check the total memory size of the cache.
+   */
+  private static final int NUMBER_OF_RECORDS_TO_CHECK_MEMORY_SIZE = 1000;
+
+  /**
+   * Factor for estimating the real size of memory used by a spilled map.
+   */
+  @VisibleForTesting
+  public static final double FACTOR_FOR_MEMORY_SIZE_OF_SPILLED_MAP = 0.8;
 
   public RecordIndexCache(Configuration conf, long initCheckpointId) {
     this.caches = new TreeMap<>(Comparator.reverseOrder());
     this.writeConfig = FlinkWriteClients.getHoodieClientConfig(conf, false, false);
     this.maxCacheSizeInBytes = conf.get(FlinkOptions.INDEX_RLI_CACHE_SIZE) * 1024 * 1024;
+    this.minRetainedCheckpointId = Integer.MIN_VALUE;
     addCheckpointCache(initCheckpointId);
   }
 
@@ -64,14 +83,21 @@ public class RecordIndexCache implements Closeable {
    */
   public void addCheckpointCache(long checkpointId) {
     try {
-      // Create a new ExternalSpillableMap for this checkpoint
+      long inferredCacheSize = inferMemorySizeForCache();
+      // clean the caches to ensure enough memory for the new cache
+      cleanIfNecessary(inferredCacheSize);
+      // create a new map cache for this checkpoint
       ExternalSpillableMap<String, HoodieRecordGlobalLocation> newCache =
           new ExternalSpillableMap<>(
-              maxCacheSizeInBytes,
+              inferredCacheSize,
               writeConfig.getSpillableMapBasePath(),
               new DefaultSizeEstimator<>(),
               new DefaultSizeEstimator<>(),
-              writeConfig.getCommonConfig().getSpillableDiskMapType(),
+              // using ROCKS_DB disk map always. As BITCASK disk map get extra memory
+              // cost for each key during spilling: key -> ValueMetadata(filePath, valueSize, position, ts).
+              // so it's redundant to use BITCASK disk map since the map is used to store
+              // HoodieRecordGlobalLocation which has similar size as ValueMetadata.
+              ExternalSpillableMap.DiskMapType.ROCKS_DB,
               new DefaultSerializer<>(),
               writeConfig.getBoolean(HoodieCommonConfig.DISK_MAP_BITCASK_COMPRESSION_ENABLED),
               "RecordIndexCache-" + checkpointId);
@@ -79,6 +105,33 @@ public class RecordIndexCache implements Closeable {
     } catch (IOException e) {
       throw new RuntimeException("Failed to create checkpoint cache for checkpoint ID: " + checkpointId, e);
     }
+  }
+
+  /**
+   * Infer the size of memory for the cache:
+   * - The memory size for the first spillable map is MAX_MEM / 2
+   * - The memory size for the following checkpoint cache is the average used memory of all existed caches.
+   * - Clean caches for committed instants if the remaining memory is not enough for the new cache.
+   */
+  @VisibleForTesting
+  long inferMemorySizeForCache() {
+    if (caches.isEmpty()) {
+      return maxCacheSizeInBytes / 2;
+    }
+
+    long totalUsedMemory = caches.values().stream()
+        .map(
+            // if the cache is spilled, adjust the actual used memory by multiplying a factor
+            m -> m.getSizeOfFileOnDiskInBytes() > 0
+                ? (long) (m.getCurrentInMemoryMapSize() / FACTOR_FOR_MEMORY_SIZE_OF_SPILLED_MAP)
+                : m.getCurrentInMemoryMapSize())
+        .reduce(Long::sum).orElse(0L);
+    long avgUsedMemorySize = totalUsedMemory / caches.size();
+
+    if (avgUsedMemorySize <= 0) {
+      avgUsedMemorySize = maxCacheSizeInBytes / 2;
+    }
+    return avgUsedMemorySize;
   }
 
   /**
@@ -106,30 +159,50 @@ public class RecordIndexCache implements Closeable {
    * @param recordGlobalLocation the record location.
    */
   public void update(String recordKey, HoodieRecordGlobalLocation recordGlobalLocation) {
-    ValidationUtils.checkArgument(!caches.isEmpty(), "record index cache should not be empty.");
-    // Get the sub cache with the largest checkpoint ID (first entry in the reverse-ordered TreeMap)
+    ValidationUtils.checkArgument(!caches.isEmpty(), "Record index cache should not be empty.");
+    // get the cache with the largest checkpoint ID (first entry in the reverse-ordered TreeMap).
     caches.firstEntry().getValue().put(recordKey, recordGlobalLocation);
+
+    if ((++recordCnt) % NUMBER_OF_RECORDS_TO_CHECK_MEMORY_SIZE == 0) {
+      cleanIfNecessary(0L);
+      recordCnt = 0;
+    }
   }
 
   /**
-   * Clean all the cache entries for checkpoint whose id is less than the given checkpoint id.
+   * Marks the historical cache entries as evictable.
    *
-   * @param checkpointId the id of checkpoint
+   * @param checkpointId The minimum retained checkpoint id
    */
-  public void clean(long checkpointId) {
-    // Get all entries that are less than or equal to the given checkpointId
-    NavigableMap<Long, ExternalSpillableMap<String, HoodieRecordGlobalLocation>> subMap = caches.tailMap(checkpointId, false);
-    // Close all the ExternalSpillableMap instances before removing them
-    subMap.values().forEach(ExternalSpillableMap::close);
-    // Remove all the entries from the main cache
-    subMap.clear();
+  public void markAsEvictable(long checkpointId) {
+    ValidationUtils.checkArgument(checkpointId >= minRetainedCheckpointId,
+        String.format("The checkpoint id for minium inflight instant should be increased,"
+            + " ckpIdForMinInflightInstant: %s, received checkpointId: %s", minRetainedCheckpointId, checkpointId));
+    minRetainedCheckpointId = checkpointId;
+  }
+
+  /**
+   * Performs the actual cleaning to release memory for new caches.
+   *
+   * @param nextCacheSize the size for the next new cache
+   */
+  private void cleanIfNecessary(long nextCacheSize) {
+    while (!caches.isEmpty() && caches.lastKey() < minRetainedCheckpointId
+        && getInMemoryMapSize() + nextCacheSize > this.maxCacheSizeInBytes) {
+      NavigableMap.Entry<Long, ExternalSpillableMap<String, HoodieRecordGlobalLocation>> lastEntry = caches.pollLastEntry();
+      lastEntry.getValue().close();
+      log.info("Clean record index cache for checkpoint: {}", lastEntry.getKey());
+    }
+  }
+
+  private long getInMemoryMapSize() {
+    return caches.values().stream().map(ExternalSpillableMap::getCurrentInMemoryMapSize).reduce(Long::sum).orElse(0L);
   }
 
   @Override
   public void close() throws IOException {
-    // Close all the ExternalSpillableMap instances before removing them
+    // Close all the map instances before removing them
     caches.values().forEach(ExternalSpillableMap::close);
-    // Close all ExternalSpillableMap instances before clearing the cache
     caches.clear();
   }
 }
