@@ -68,7 +68,6 @@ import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -162,7 +161,8 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
     // so SparkBasicSchemaEvolution sees matching types (file has FIXED_LEN_BYTE_ARRAY → BinaryType)
     StructType readStructSchema = structSchema;
     if (!vectorColumnInfo.isEmpty()) {
-      StructField[] fields = structSchema.fields().clone();
+      StructField[] fields = new StructField[structSchema.fields().length];
+      System.arraycopy(structSchema.fields(), 0, fields, 0, fields.length);
       for (int idx : vectorColumnInfo.keySet()) {
         StructField orig = fields[idx];
         fields[idx] = new StructField(orig.name(), DataTypes.BinaryType, orig.nullable(), Metadata.empty());
@@ -227,6 +227,7 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
               } else if (vectorColumnInfo.containsKey(i)) {
                 converted.update(i, convertBinaryToVectorArray(row.getBinary(i), vectorColumnInfo.get(i)));
               } else {
+                // Non-vector column: copy value as-is using the read schema's data type
                 converted.update(i, row.get(i, finalReadSchema.apply(i).dataType()));
               }
             }
@@ -267,7 +268,7 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
     int expectedSize = dim * vectorSchema.getVectorElementType().getElementSize();
     checkArgument(bytes.length == expectedSize,
         "Vector byte array length mismatch: expected " + expectedSize + " but got " + bytes.length);
-    ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+    ByteBuffer buffer = ByteBuffer.wrap(bytes).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER);
     switch (vectorSchema.getVectorElementType()) {
       case FLOAT:
         float[] floats = new float[dim];

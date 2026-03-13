@@ -70,7 +70,6 @@ import org.apache.spark.unsafe.types.UTF8String;
 import org.apache.spark.util.VersionUtils;
 
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -316,7 +315,8 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
       HoodieSchema.Vector.VectorElementType elemType = vectorSchema.getVectorElementType();
       return (row, ordinal) -> {
         ArrayData array = row.getArray(ordinal);
-        ByteBuffer buffer = ByteBuffer.allocate(dimension * elementSize).order(ByteOrder.LITTLE_ENDIAN);
+        int bufferSize = Math.multiplyExact(dimension, elementSize);
+        ByteBuffer buffer = ByteBuffer.allocate(bufferSize).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER);
         switch (elemType) {
           case FLOAT:
             for (int i = 0; i < dimension; i++) {

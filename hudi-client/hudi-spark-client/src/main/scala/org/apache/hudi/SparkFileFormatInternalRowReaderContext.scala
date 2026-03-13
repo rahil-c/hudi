@@ -43,7 +43,7 @@ import org.apache.spark.sql.hudi.SparkAdapter
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
 import org.apache.spark.sql.catalyst.util.GenericArrayData
-import org.apache.spark.sql.types.{BinaryType, LongType, MetadataBuilder, StructField, StructType}
+import org.apache.spark.sql.types.{BinaryType, LongType, Metadata, MetadataBuilder, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 
 import scala.collection.JavaConverters._
@@ -116,7 +116,7 @@ class SparkFileFormatInternalRowReaderContext(baseFileReader: SparkColumnarFileR
         readSchema, StructType(Seq.empty), getSchemaHandler.getInternalSchemaOpt,
         readFilters, storage.getConf.asInstanceOf[StorageConfiguration[Configuration]], tableSchemaOpt))
 
-      // Post-process: convert binary VECTOR columns back to float arrays
+      // Post-process: convert binary VECTOR columns back to typed arrays
       if (vectorColumnInfo.nonEmpty) {
         SparkFileFormatInternalRowReaderContext.wrapWithVectorConversion(rawIterator, vectorColumnInfo, readSchema)
       } else {
@@ -315,7 +315,6 @@ object SparkFileFormatInternalRowReaderContext {
    */
   private[hudi] def detectVectorColumns(schema: HoodieSchema): Map[Int, (Int, HoodieSchema.Vector.VectorElementType)] = {
     if (schema == null) return Map.empty
-    import scala.collection.JavaConverters._
     schema.getFields.asScala.zipWithIndex.flatMap { case (field, idx) =>
       val fieldSchema = field.schema().getNonNullType
       if (fieldSchema.getType == HoodieSchemaType.VECTOR) {
@@ -328,13 +327,32 @@ object SparkFileFormatInternalRowReaderContext {
   }
 
   /**
+   * Detects VECTOR columns from Spark StructType metadata.
+   * @return Map of ordinal to (dimension, elementType) for VECTOR fields.
+   */
+  def detectVectorColumnsFromMetadata(schema: StructType): Map[Int, (Int, HoodieSchema.Vector.VectorElementType)] = {
+    schema.fields.zipWithIndex.flatMap { case (field, idx) =>
+      if (field.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD)) {
+        val typeStr = field.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)
+        if (typeStr.startsWith("VECTOR")) {
+          val parsed = HoodieSchema.parseTypeDescriptor(typeStr)
+          if (parsed.getType == HoodieSchemaType.VECTOR) {
+            val vectorSchema = parsed.asInstanceOf[HoodieSchema.Vector]
+            Some(idx -> (vectorSchema.getDimension, vectorSchema.getVectorElementType))
+          } else None
+        } else None
+      } else None
+    }.toMap
+  }
+
+  /**
    * Replaces ArrayType with BinaryType for VECTOR columns so the Parquet reader
    * can read FIXED_LEN_BYTE_ARRAY data without type mismatch.
    */
-  private[hudi] def replaceVectorColumnsWithBinary(structType: StructType, vectorColumns: Map[Int, _]): StructType = {
+  def replaceVectorColumnsWithBinary(structType: StructType, vectorColumns: Map[Int, _]): StructType = {
     StructType(structType.fields.zipWithIndex.map { case (field, idx) =>
       if (vectorColumns.contains(idx)) {
-        StructField(field.name, BinaryType, field.nullable, org.apache.spark.sql.types.Metadata.empty)
+        StructField(field.name, BinaryType, field.nullable, Metadata.empty)
       } else {
         field
       }
@@ -342,8 +360,35 @@ object SparkFileFormatInternalRowReaderContext {
   }
 
   /**
+   * Converts binary bytes from a FIXED_LEN_BYTE_ARRAY parquet column back to a typed array
+   * based on the vector's element type and dimension.
+   */
+  def convertBinaryToVectorArray(bytes: Array[Byte], dim: Int, elemType: HoodieSchema.Vector.VectorElementType): GenericArrayData = {
+    val expectedSize = dim * elemType.getElementSize
+    require(bytes.length == expectedSize,
+      s"Vector byte array length mismatch: expected $expectedSize but got ${bytes.length}")
+    val buffer = java.nio.ByteBuffer.wrap(bytes).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER)
+    elemType match {
+      case HoodieSchema.Vector.VectorElementType.FLOAT =>
+        val arr = new Array[Float](dim)
+        var j = 0
+        while (j < dim) { arr(j) = buffer.getFloat(); j += 1 }
+        new GenericArrayData(arr)
+      case HoodieSchema.Vector.VectorElementType.DOUBLE =>
+        val arr = new Array[Double](dim)
+        var j = 0
+        while (j < dim) { arr(j) = buffer.getDouble(); j += 1 }
+        new GenericArrayData(arr)
+      case HoodieSchema.Vector.VectorElementType.INT8 =>
+        val arr = new Array[Byte](dim)
+        buffer.get(arr)
+        new GenericArrayData(arr)
+    }
+  }
+
+  /**
    * Wraps an iterator to convert binary VECTOR columns back to typed arrays.
-   * Unpacks little-endian bytes from FIXED_LEN_BYTE_ARRAY into GenericArrayData.
+   * Unpacks bytes from FIXED_LEN_BYTE_ARRAY into GenericArrayData using the canonical vector byte order.
    */
   private[hudi] def wrapWithVectorConversion(
       iterator: ClosableIterator[InternalRow],
@@ -361,27 +406,7 @@ object SparkFileFormatInternalRowReaderContext {
             result.setNullAt(i)
           } else if (vectorColumns.contains(i)) {
             val (dim, elemType) = vectorColumns(i)
-            val bytes = row.getBinary(i)
-            val expectedSize = dim * elemType.getElementSize
-            require(bytes.length == expectedSize,
-              s"Vector byte array length mismatch: expected $expectedSize but got ${bytes.length}")
-            val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            elemType match {
-              case HoodieSchema.Vector.VectorElementType.FLOAT =>
-                val arr = new Array[Float](dim)
-                var j = 0
-                while (j < dim) { arr(j) = buffer.getFloat(); j += 1 }
-                result.update(i, new GenericArrayData(arr))
-              case HoodieSchema.Vector.VectorElementType.DOUBLE =>
-                val arr = new Array[Double](dim)
-                var j = 0
-                while (j < dim) { arr(j) = buffer.getDouble(); j += 1 }
-                result.update(i, new GenericArrayData(arr))
-              case HoodieSchema.Vector.VectorElementType.INT8 =>
-                val arr = new Array[Byte](dim)
-                buffer.get(arr)
-                result.update(i, new GenericArrayData(arr))
-            }
+            result.update(i, convertBinaryToVectorArray(row.getBinary(i), dim, elemType))
           } else {
             result.update(i, row.get(i, readSchema(i).dataType))
           }

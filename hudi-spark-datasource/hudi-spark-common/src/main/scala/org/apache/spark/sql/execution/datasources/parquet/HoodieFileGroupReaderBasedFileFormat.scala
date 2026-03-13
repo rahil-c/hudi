@@ -24,7 +24,7 @@ import org.apache.hudi.client.utils.SparkInternalSchemaConverter
 import org.apache.hudi.common.config.{HoodieMemoryConfig, TypedProperties}
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.HoodieFileFormat
-import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType}
+import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.common.schema.HoodieSchemaUtils
 import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient, ParquetTableSchemaResolver}
 import org.apache.hudi.common.table.read.HoodieFileGroupReader
@@ -48,19 +48,17 @@ import org.apache.spark.sql.HoodieCatalystExpressionUtils.generateUnsafeProjecti
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, JoinedRow, UnsafeProjection}
-import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.execution.datasources.{OutputWriterFactory, PartitionedFile, SparkColumnarFileReader}
 import org.apache.spark.sql.execution.datasources.orc.OrcUtils
 import org.apache.spark.sql.execution.vectorized.{OffHeapColumnVector, OnHeapColumnVector}
 import org.apache.spark.sql.hudi.MultipleColumnarFileFormatReader
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{BinaryType, StructField, StructType}
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnarBatchUtils}
 import org.apache.spark.util.SerializableConfiguration
 
 import java.io.Closeable
-import java.nio.{ByteBuffer, ByteOrder}
 
 import scala.collection.JavaConverters.mapAsJavaMapConverter
 
@@ -408,36 +406,11 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     }
   }
 
-  /**
-   * Detects vector columns in a StructType by checking for VECTOR metadata.
-   * Returns a map of field index → (dimension, elementType).
-   */
-  private def detectVectorColumns(schema: StructType): Map[Int, (Int, HoodieSchema.Vector.VectorElementType)] = {
-    schema.fields.zipWithIndex.flatMap { case (field, idx) =>
-      if (field.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD)) {
-        val typeStr = field.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)
-        if (typeStr.startsWith("VECTOR")) {
-          val parsed = HoodieSchema.parseTypeDescriptor(typeStr)
-          if (parsed.getType == HoodieSchemaType.VECTOR) {
-            val vectorSchema = parsed.asInstanceOf[HoodieSchema.Vector]
-            Some(idx -> (vectorSchema.getDimension, vectorSchema.getVectorElementType))
-          } else None
-        } else None
-      } else None
-    }.toMap
-  }
+  private def detectVectorColumns(schema: StructType): Map[Int, (Int, HoodieSchema.Vector.VectorElementType)] =
+    SparkFileFormatInternalRowReaderContext.detectVectorColumnsFromMetadata(schema)
 
-  /**
-   * Replaces vector ArrayType fields with BinaryType so the Parquet reader sees
-   * a type matching the file's FIXED_LEN_BYTE_ARRAY.
-   */
-  private def replaceVectorFieldsWithBinary(schema: StructType, vectorCols: Map[Int, _]): StructType = {
-    StructType(schema.fields.zipWithIndex.map { case (field, idx) =>
-      if (vectorCols.contains(idx)) {
-        StructField(field.name, BinaryType, field.nullable)
-      } else field
-    })
-  }
+  private def replaceVectorFieldsWithBinary(schema: StructType, vectorCols: Map[Int, _]): StructType =
+    SparkFileFormatInternalRowReaderContext.replaceVectorColumnsWithBinary(schema, vectorCols)
 
   /**
    * Wraps an iterator to convert binary VECTOR columns back to typed arrays.
@@ -456,27 +429,7 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
           converted.setNullAt(i)
         } else if (vectorCols.contains(i)) {
           val (dim, elemType) = vectorCols(i)
-          val bytes = row.getBinary(i)
-          val expectedSize = dim * elemType.getElementSize
-          require(bytes.length == expectedSize,
-            s"Vector byte array length mismatch: expected $expectedSize but got ${bytes.length}")
-          val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-          elemType match {
-            case HoodieSchema.Vector.VectorElementType.FLOAT =>
-              val arr = new Array[Float](dim)
-              var j = 0
-              while (j < dim) { arr(j) = buffer.getFloat(); j += 1 }
-              converted.update(i, new GenericArrayData(arr))
-            case HoodieSchema.Vector.VectorElementType.DOUBLE =>
-              val arr = new Array[Double](dim)
-              var j = 0
-              while (j < dim) { arr(j) = buffer.getDouble(); j += 1 }
-              converted.update(i, new GenericArrayData(arr))
-            case HoodieSchema.Vector.VectorElementType.INT8 =>
-              val arr = new Array[Byte](dim)
-              buffer.get(arr)
-              converted.update(i, new GenericArrayData(arr))
-          }
+          converted.update(i, SparkFileFormatInternalRowReaderContext.convertBinaryToVectorArray(row.getBinary(i), dim, elemType))
         } else {
           converted.update(i, row.get(i, readSchema.apply(i).dataType))
         }
