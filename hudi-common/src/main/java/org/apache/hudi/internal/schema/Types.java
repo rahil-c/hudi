@@ -301,6 +301,11 @@ public class Types {
   /**
    * Vector type that preserves dimension, element type, and storage backing
    * through InternalSchema round-trips.
+   *
+   * <p>This class is part of the InternalSchema type system (separate from HoodieSchema)
+   * and follows the same pattern as {@link FixedType}, {@link DecimalTypeFixed}, etc.
+   * It cannot be replaced with {@code HoodieSchema.Vector} because they belong to
+   * different type hierarchies.
    */
   public static class VectorType extends PrimitiveType {
     private final int dimension;
