@@ -20,15 +20,16 @@ package org.apache.spark.sql.hudi.analysis
 import org.apache.hudi.{DataSourceReadOptions, DefaultSource, SparkAdapterSupport}
 import org.apache.hudi.storage.StoragePath
 
-import org.apache.spark.sql.{AnalysisException, SparkSession}
+import org.apache.spark.sql.{AnalysisException, DataFrame, SparkSession}
 import org.apache.spark.sql.BaseHoodieCatalystPlanUtils.MatchResolvedTable
 import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, NamedRelation, ResolvedFieldName, UnresolvedAttribute, UnresolvedFieldName, UnresolvedPartitionSpec, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.analysis.SimpleAnalyzer.resolveExpressionByPlanChildren
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogUtils}
-import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.Origin
+import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.sql.connector.catalog.{Table, V1Table}
 import org.apache.spark.sql.connector.catalog.CatalogV2Implicits.IdentifierHelper
 import org.apache.spark.sql.execution.datasources.{DataSource, LogicalRelation}
@@ -149,6 +150,24 @@ case class ResolveReferences(spark: SparkSession) extends Rule[LogicalPlan]
           (catalogTable.location.toString + "/.hoodie/metadata")))
         LogicalRelation(relation, catalogTable)
       }
+    case HoodieVectorSearchTableValuedFunction(args) =>
+      val parsedArgs = HoodieVectorSearchTableValuedFunction.parseArgs(args)
+      parsedArgs match {
+        case HoodieVectorSearchTableValuedFunction.SingleQueryArgs(
+          tableName, embeddingCol, queryVectorExpr, k, metric) =>
+          val corpusDf = resolveTableToDf(tableName)
+          val queryVector = evaluateQueryVector(queryVectorExpr)
+          HoodieVectorSearchPlanBuilder.buildSingleQueryPlan(
+            spark, corpusDf, embeddingCol, queryVector, k, metric)
+
+        case HoodieVectorSearchTableValuedFunction.BatchQueryArgs(
+          corpusTable, corpusEmbeddingCol, queryTable, queryEmbeddingCol, k, metric) =>
+          val corpusDf = resolveTableToDf(corpusTable)
+          val queryDf = resolveTableToDf(queryTable)
+          HoodieVectorSearchPlanBuilder.buildBatchQueryPlan(
+            spark, corpusDf, corpusEmbeddingCol, queryDf, queryEmbeddingCol, k, metric)
+      }
+
     case mO@MatchMergeIntoTable(targetTableO, sourceTableO, _)
       // START: custom Hudi change: don't want to go to the spark mit resolution so we resolve the source and target
       // if they haven't been
@@ -308,6 +327,49 @@ case class ResolveReferences(spark: SparkSession) extends Rule[LogicalPlan]
   private[sql] object MatchMergeIntoTable {
     def unapply(plan: LogicalPlan): Option[(LogicalPlan, LogicalPlan, Expression)] =
       sparkAdapter.getCatalystPlanUtils.unapplyMergeIntoTable(plan)
+  }
+
+  private def resolveTableToDf(tableName: String): DataFrame = {
+    if (tableName.contains(StoragePath.SEPARATOR)) {
+      spark.read.format("hudi").load(tableName)
+    } else {
+      spark.table(tableName)
+    }
+  }
+
+  private def evaluateQueryVector(expr: Expression): Array[Double] = {
+    if (!expr.foldable) {
+      throw new HoodieAnalysisException(
+        s"Function '${HoodieVectorSearchTableValuedFunction.FUNC_NAME}': " +
+          "query vector must be a constant expression (e.g., ARRAY(1.0, 2.0, 3.0))")
+    }
+    val value = expr.eval(null)
+    if (value == null) {
+      throw new HoodieAnalysisException(
+        s"Function '${HoodieVectorSearchTableValuedFunction.FUNC_NAME}': query vector cannot be null")
+    }
+
+    import org.apache.spark.sql.types._
+    val arrayData = value.asInstanceOf[ArrayData]
+    val numElements = arrayData.numElements()
+    val elementType = expr.dataType.asInstanceOf[ArrayType].elementType
+    val result = new Array[Double](numElements)
+    var i = 0
+    elementType match {
+      case DoubleType =>
+        while (i < numElements) { result(i) = arrayData.getDouble(i); i += 1 }
+      case FloatType =>
+        while (i < numElements) { result(i) = arrayData.getFloat(i).toDouble; i += 1 }
+      case IntegerType =>
+        while (i < numElements) { result(i) = arrayData.getInt(i).toDouble; i += 1 }
+      case LongType =>
+        while (i < numElements) { result(i) = arrayData.getLong(i).toDouble; i += 1 }
+      case _ =>
+        throw new HoodieAnalysisException(
+          s"Function '${HoodieVectorSearchTableValuedFunction.FUNC_NAME}': " +
+            s"query vector element type $elementType not supported, expected numeric array")
+    }
+    result
   }
 
 }
