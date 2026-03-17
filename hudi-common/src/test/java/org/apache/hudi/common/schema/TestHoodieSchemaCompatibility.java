@@ -39,6 +39,7 @@ import java.util.stream.Stream;
 import static org.apache.hudi.common.schema.TestHoodieSchemaUtils.EVOLVED_SCHEMA;
 import static org.apache.hudi.common.schema.TestHoodieSchemaUtils.SIMPLE_SCHEMA;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -813,5 +814,42 @@ public class TestHoodieSchemaCompatibility {
     // BLOB vs non-BLOB should not be equivalent
     HoodieSchema stringSchema = HoodieSchema.create(HoodieSchemaType.STRING);
     assertFalse(HoodieSchemaCompatibility.areSchemasProjectionEquivalent(blob1, stringSchema));
+  }
+
+  @Test
+  public void testVectorSchemaCompatibility() {
+    HoodieSchema incomingSchema = HoodieSchema.createRecord("vector_record", null, null, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("embedding", HoodieSchema.createVector(4, HoodieSchema.Vector.VectorElementType.DOUBLE), null, null)
+    ));
+
+    HoodieSchema tableSchema = HoodieSchema.createRecord("vector_record", null, null, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("embedding", HoodieSchema.createVector(4, HoodieSchema.Vector.VectorElementType.DOUBLE), null, null)
+    ));
+
+    HoodieSchemaCompatibilityChecker.SchemaPairCompatibility compatibility =
+        HoodieSchemaCompatibilityChecker.checkReaderWriterCompatibility(incomingSchema, tableSchema, false);
+    assertEquals(HoodieSchemaCompatibilityChecker.SchemaCompatibilityType.COMPATIBLE, compatibility.getType());
+    assertDoesNotThrow(() -> HoodieSchemaCompatibility.checkValidEvolution(incomingSchema, tableSchema));
+  }
+
+  @Test
+  public void testVectorSchemaCompatibilityRejectsElementTypeEvolution() {
+    HoodieSchema incomingSchema = HoodieSchema.createRecord("vector_record", null, null, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("embedding", HoodieSchema.createVector(4, HoodieSchema.Vector.VectorElementType.DOUBLE), null, null)
+    ));
+
+    HoodieSchema tableSchema = HoodieSchema.createRecord("vector_record", null, null, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("embedding", HoodieSchema.createVector(4, HoodieSchema.Vector.VectorElementType.FLOAT), null, null)
+    ));
+
+    HoodieSchemaCompatibilityChecker.SchemaPairCompatibility compatibility =
+        HoodieSchemaCompatibilityChecker.checkReaderWriterCompatibility(incomingSchema, tableSchema, false);
+    assertEquals(HoodieSchemaCompatibilityChecker.SchemaCompatibilityType.INCOMPATIBLE, compatibility.getType());
+    assertThrows(SchemaBackwardsCompatibilityException.class,
+        () -> HoodieSchemaCompatibility.checkValidEvolution(incomingSchema, tableSchema));
   }
 }
