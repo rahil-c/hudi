@@ -331,7 +331,7 @@ object SparkFileFormatInternalRowReaderContext {
    * can read FIXED_LEN_BYTE_ARRAY data without type mismatch.
    * Delegates to [[VectorConversionUtils.replaceVectorColumnsWithBinary]].
    */
-  def replaceVectorColumnsWithBinary(structType: StructType, vectorColumns: Map[Int, _]): StructType = {
+  def replaceVectorColumnsWithBinary(structType: StructType, vectorColumns: Map[Int, HoodieSchema.Vector]): StructType = {
     val javaMap = vectorColumns.map { case (k, v) => (Integer.valueOf(k), v.asInstanceOf[AnyRef]) }.asJava
     VectorConversionUtils.replaceVectorColumnsWithBinary(structType, javaMap)
   }
