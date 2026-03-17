@@ -284,11 +284,14 @@ public class HoodieTableMetadataUtil {
         String fieldName = fieldNameFieldPair.getKey();
         HoodieSchemaField field = fieldNameFieldPair.getValue();
         HoodieSchema fieldSchema = field.schema().getNonNullType();
+        if (!isColumnTypeSupported(fieldSchema, Option.of(record.getRecordType()), indexVersion)) {
+          return;
+        }
         ColumnStats colStats = allColumnStats.computeIfAbsent(fieldName, ignored -> new ColumnStats(getValueMetadata(fieldSchema, indexVersion)));
         Object fieldValue = collectColumnRangeFieldValue(record, colStats.valueMetadata, fieldName, fieldSchema, recordSchema, properties);
 
         colStats.valueCount++;
-        if (fieldValue != null && isColumnTypeSupported(fieldSchema, Option.of(record.getRecordType()), indexVersion)) {
+        if (fieldValue != null) {
           // Set the min value of the field
           if (colStats.minValue == null
               || ConvertingGenericData.INSTANCE.compare(fieldValue, colStats.minValue, fieldSchema.toAvroSchema()) < 0) {
@@ -2056,7 +2059,7 @@ public class HoodieTableMetadataUtil {
     // Check for precision and scale if the schema has a logical decimal type.
     return type != HoodieSchemaType.RECORD && type != HoodieSchemaType.MAP
         && type != HoodieSchemaType.ARRAY && type != HoodieSchemaType.ENUM
-        && type != HoodieSchemaType.BLOB;
+        && type != HoodieSchemaType.BLOB && type != HoodieSchemaType.VECTOR;
   }
 
   public static Set<String> getInflightMetadataPartitions(HoodieTableConfig tableConfig) {

@@ -322,4 +322,13 @@ class TestHoodieTableMetadataUtil {
     assertFalse(HoodieTableMetadataUtil.isTimestampMillisField(stringSchema),
         "Should return false for string");
   }
+
+  @Test
+  void testVectorColumnsAreNotSupportedForV2ColumnStats() {
+    HoodieSchema vectorSchema = HoodieSchema.createNullable(HoodieSchema.createVector(128));
+    HoodieSchema stringSchema = HoodieSchema.createNullable(HoodieSchema.create(HoodieSchemaType.STRING));
+
+    assertFalse(HoodieTableMetadataUtil.isColumnTypeSupported(vectorSchema, Option.empty(), HoodieIndexVersion.V2));
+    assertTrue(HoodieTableMetadataUtil.isColumnTypeSupported(stringSchema, Option.empty(), HoodieIndexVersion.V2));
+  }
 }

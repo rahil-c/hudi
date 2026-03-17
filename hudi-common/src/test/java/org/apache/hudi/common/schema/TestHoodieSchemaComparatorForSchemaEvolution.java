@@ -611,4 +611,22 @@ class TestHoodieSchemaComparatorForSchemaEvolution {
     // BLOB with fields in different order should not be equal (order matters)
     assertFalse(HoodieSchemaComparatorForSchemaEvolution.schemaEquals(blob1, blobWithDifferentOrder));
   }
+
+  @Test
+  void testVectorSchemaEquality() {
+    assertTrue(HoodieSchemaComparatorForSchemaEvolution.schemaEquals(
+        HoodieSchema.createVector(16, HoodieSchema.Vector.VectorElementType.FLOAT),
+        HoodieSchema.createVector(16, HoodieSchema.Vector.VectorElementType.FLOAT)
+    ));
+
+    assertFalse(HoodieSchemaComparatorForSchemaEvolution.schemaEquals(
+        HoodieSchema.createVector(16, HoodieSchema.Vector.VectorElementType.FLOAT),
+        HoodieSchema.createVector(16, HoodieSchema.Vector.VectorElementType.DOUBLE)
+    ));
+
+    assertFalse(HoodieSchemaComparatorForSchemaEvolution.schemaEquals(
+        HoodieSchema.createVector(16, HoodieSchema.Vector.VectorElementType.FLOAT),
+        HoodieSchema.createVector(32, HoodieSchema.Vector.VectorElementType.FLOAT)
+    ));
+  }
 }
