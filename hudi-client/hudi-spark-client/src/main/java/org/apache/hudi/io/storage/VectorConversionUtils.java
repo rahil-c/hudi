@@ -1,0 +1,176 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.hudi.io.storage;
+
+import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaField;
+import org.apache.hudi.common.schema.HoodieSchemaType;
+
+import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.types.BinaryType$;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
+import java.nio.ByteBuffer;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
+
+/**
+ * Shared utility methods for vector column handling during Parquet read/write.
+ *
+ * Vectors are stored as Parquet FIXED_LEN_BYTE_ARRAY columns. On read, Spark maps these
+ * to BinaryType. This class provides the canonical conversion between the binary
+ * representation and Spark's typed ArrayData (float[], double[], byte[]).
+ *
+ * All byte buffers use little-endian order ({@link HoodieSchema.VectorLogicalType#VECTOR_BYTE_ORDER})
+ * for compatibility with common vector search libraries (FAISS, ScaNN, etc.) and to match
+ * native x86/ARM byte order for zero-copy reads.
+ */
+public final class VectorConversionUtils {
+
+  private VectorConversionUtils() {
+  }
+
+  /**
+   * Detects VECTOR columns in a HoodieSchema record and returns a map of field ordinal
+   * to the corresponding {@link HoodieSchema.Vector} schema.
+   *
+   * @param schema a HoodieSchema of type RECORD (or null)
+   * @return map from field index to Vector schema; empty map if schema is null or has no vectors
+   */
+  public static Map<Integer, HoodieSchema.Vector> detectVectorColumns(HoodieSchema schema) {
+    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new HashMap<>();
+    if (schema == null) {
+      return vectorColumnInfo;
+    }
+    List<HoodieSchemaField> fields = schema.getFields();
+    for (int i = 0; i < fields.size(); i++) {
+      HoodieSchema fieldSchema = fields.get(i).schema().getNonNullType();
+      if (fieldSchema.getType() == HoodieSchemaType.VECTOR) {
+        vectorColumnInfo.put(i, (HoodieSchema.Vector) fieldSchema);
+      }
+    }
+    return vectorColumnInfo;
+  }
+
+  /**
+   * Detects VECTOR columns from Spark StructType metadata annotations.
+   * Fields with metadata key {@link HoodieSchema#TYPE_METADATA_FIELD} starting with "VECTOR"
+   * are parsed and included.
+   *
+   * @param schema Spark StructType
+   * @return map from field index to Vector schema; empty map if no vectors found
+   */
+  public static Map<Integer, HoodieSchema.Vector> detectVectorColumnsFromMetadata(StructType schema) {
+    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new HashMap<>();
+    if (schema == null) {
+      return vectorColumnInfo;
+    }
+    StructField[] fields = schema.fields();
+    for (int i = 0; i < fields.length; i++) {
+      StructField field = fields[i];
+      if (field.metadata().contains(HoodieSchema.TYPE_METADATA_FIELD)) {
+        String typeStr = field.metadata().getString(HoodieSchema.TYPE_METADATA_FIELD);
+        if (typeStr.startsWith("VECTOR")) {
+          HoodieSchema parsed = HoodieSchema.parseTypeDescriptor(typeStr);
+          if (parsed.getType() == HoodieSchemaType.VECTOR) {
+            vectorColumnInfo.put(i, (HoodieSchema.Vector) parsed);
+          }
+        }
+      }
+    }
+    return vectorColumnInfo;
+  }
+
+  /**
+   * Replaces ArrayType with BinaryType for VECTOR columns so the Parquet reader
+   * can read FIXED_LEN_BYTE_ARRAY data without type mismatch.
+   *
+   * @param structType     the original Spark schema
+   * @param vectorColumns  map of ordinal to vector info (only the key set is used)
+   * @return a new StructType with vector columns replaced by BinaryType
+   */
+  public static StructType replaceVectorColumnsWithBinary(StructType structType, Map<Integer, ?> vectorColumns) {
+    StructField[] fields = structType.fields();
+    StructField[] newFields = new StructField[fields.length];
+    for (int i = 0; i < fields.length; i++) {
+      if (vectorColumns.containsKey(i)) {
+        newFields[i] = new StructField(fields[i].name(), BinaryType$.MODULE$, fields[i].nullable(), Metadata.empty());
+      } else {
+        newFields[i] = fields[i];
+      }
+    }
+    return new StructType(newFields);
+  }
+
+  /**
+   * Converts binary bytes from a FIXED_LEN_BYTE_ARRAY Parquet column back to a typed array
+   * based on the vector's element type and dimension.
+   *
+   * @param bytes        raw bytes read from Parquet
+   * @param vectorSchema the vector schema describing dimension and element type
+   * @return a GenericArrayData containing the decoded float[], double[], or byte[] array
+   * @throws IllegalArgumentException if byte array length doesn't match expected size
+   */
+  public static GenericArrayData convertBinaryToVectorArray(byte[] bytes, HoodieSchema.Vector vectorSchema) {
+    return convertBinaryToVectorArray(bytes, vectorSchema.getDimension(), vectorSchema.getVectorElementType());
+  }
+
+  /**
+   * Converts binary bytes from a FIXED_LEN_BYTE_ARRAY Parquet column back to a typed array.
+   *
+   * @param bytes    raw bytes read from Parquet
+   * @param dim      vector dimension (number of elements)
+   * @param elemType element type (FLOAT, DOUBLE, or INT8)
+   * @return a GenericArrayData containing the decoded float[], double[], or byte[] array
+   * @throws IllegalArgumentException if byte array length doesn't match expected size
+   */
+  public static GenericArrayData convertBinaryToVectorArray(byte[] bytes, int dim,
+                                                            HoodieSchema.Vector.VectorElementType elemType) {
+    int expectedSize = dim * elemType.getElementSize();
+    checkArgument(bytes.length == expectedSize,
+        "Vector byte array length mismatch: expected " + expectedSize + " but got " + bytes.length);
+    ByteBuffer buffer = ByteBuffer.wrap(bytes).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER);
+    switch (elemType) {
+      case FLOAT:
+        float[] floats = new float[dim];
+        for (int j = 0; j < dim; j++) {
+          floats[j] = buffer.getFloat();
+        }
+        return new GenericArrayData(floats);
+      case DOUBLE:
+        double[] doubles = new double[dim];
+        for (int j = 0; j < dim; j++) {
+          doubles[j] = buffer.getDouble();
+        }
+        return new GenericArrayData(doubles);
+      case INT8:
+        byte[] int8s = new byte[dim];
+        buffer.get(int8s);
+        return new GenericArrayData(int8s);
+      default:
+        throw new UnsupportedOperationException(
+            "Unsupported vector element type: " + elemType);
+    }
+  }
+}

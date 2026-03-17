@@ -315,6 +315,8 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
       HoodieSchema.Vector.VectorElementType elemType = vectorSchema.getVectorElementType();
       return (row, ordinal) -> {
         ArrayData array = row.getArray(ordinal);
+        ValidationUtils.checkArgument(array.numElements() == dimension,
+            () -> String.format("Vector dimension mismatch: schema expects %d elements but got %d", dimension, array.numElements()));
         int bufferSize = Math.multiplyExact(dimension, elementSize);
         ByteBuffer buffer = ByteBuffer.allocate(bufferSize).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER);
         switch (elemType) {

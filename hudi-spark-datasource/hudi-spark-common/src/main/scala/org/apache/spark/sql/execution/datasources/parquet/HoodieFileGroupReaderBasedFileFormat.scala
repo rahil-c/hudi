@@ -406,7 +406,7 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     }
   }
 
-  private def detectVectorColumns(schema: StructType): Map[Int, (Int, HoodieSchema.Vector.VectorElementType)] =
+  private def detectVectorColumns(schema: StructType): Map[Int, HoodieSchema.Vector] =
     SparkFileFormatInternalRowReaderContext.detectVectorColumnsFromMetadata(schema)
 
   private def replaceVectorFieldsWithBinary(schema: StructType, vectorCols: Map[Int, _]): StructType =
@@ -419,7 +419,7 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
   private def wrapWithVectorConversion(iter: Iterator[InternalRow],
                                         readSchema: StructType,
                                         targetSchema: StructType,
-                                        vectorCols: Map[Int, (Int, HoodieSchema.Vector.VectorElementType)]): Iterator[InternalRow] = {
+                                        vectorCols: Map[Int, HoodieSchema.Vector]): Iterator[InternalRow] = {
     val numFields = readSchema.fields.length
     val vectorProjection = UnsafeProjection.create(targetSchema)
     iter.map { row =>
@@ -428,8 +428,7 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
         if (row.isNullAt(i)) {
           converted.setNullAt(i)
         } else if (vectorCols.contains(i)) {
-          val (dim, elemType) = vectorCols(i)
-          converted.update(i, SparkFileFormatInternalRowReaderContext.convertBinaryToVectorArray(row.getBinary(i), dim, elemType))
+          converted.update(i, org.apache.hudi.io.storage.VectorConversionUtils.convertBinaryToVectorArray(row.getBinary(i), vectorCols(i)))
         } else {
           converted.update(i, row.get(i, readSchema.apply(i).dataType))
         }
@@ -456,7 +455,7 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     // Detect vector columns in the full output schema for post-read conversion.
     // Output schema may have different indices than requiredSchema (e.g. partition columns interleaved),
     // so we must detect separately here.
-    val outputVectorCols = if (hasVectors) detectVectorColumns(outputSchema) else Map.empty[Int, (Int, HoodieSchema.Vector.VectorElementType)]
+    val outputVectorCols = if (hasVectors) detectVectorColumns(outputSchema) else Map.empty[Int, HoodieSchema.Vector]
 
     val rawIter = if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {
       //none of partition fields are read from the file, so the reader will do the appending for us
