@@ -409,7 +409,7 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
   private def detectVectorColumns(schema: StructType): Map[Int, HoodieSchema.Vector] =
     SparkFileFormatInternalRowReaderContext.detectVectorColumnsFromMetadata(schema)
 
-  private def replaceVectorFieldsWithBinary(schema: StructType, vectorCols: Map[Int, _]): StructType =
+  private def replaceVectorFieldsWithBinary(schema: StructType, vectorCols: Map[Int, HoodieSchema.Vector]): StructType =
     SparkFileFormatInternalRowReaderContext.replaceVectorColumnsWithBinary(schema, vectorCols)
 
   /**
