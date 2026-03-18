@@ -96,9 +96,11 @@ public class AverageRecordSizeEstimator extends RecordSizeEstimator {
             .toArray(CompletableFuture[]::new);
         CompletableFuture.allOf(futures).get(ESTIMATOR_TIMEOUT_MINUTES, TimeUnit.MINUTES);
       }
-    } catch (Throwable t) {
-      LOG.warn("Got error while trying to compute average bytes/record but will proceed to use the computed value "
-          + "or fallback to default config value ", t);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      log.warn("Interrupted while computing average bytes/record, will use partially computed average or default record size", e);
+    } catch (Exception e) {
+      log.warn("Error computing average bytes/record, will use partially computed average or default record size", e);
     }
     return stats.computeAverageRecordSize();
   }
