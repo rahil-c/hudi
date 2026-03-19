@@ -24,8 +24,6 @@ import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieSparkRecord;
 import org.apache.hudi.common.schema.HoodieSchema;
-import org.apache.hudi.common.schema.HoodieSchemaField;
-import org.apache.hudi.common.schema.HoodieSchemaType;
 import org.apache.hudi.common.schema.HoodieSchemaUtils;
 import org.apache.hudi.common.util.FileFormatUtils;
 import org.apache.hudi.common.util.Option;
@@ -52,7 +50,6 @@ import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
-import org.apache.spark.sql.catalyst.util.GenericArrayData;
 import org.apache.spark.sql.catalyst.util.RebaseDateTime;
 import org.apache.spark.sql.execution.datasources.parquet.HoodieParquetReadSupport;
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFilters;
@@ -61,21 +58,15 @@ import org.apache.spark.sql.execution.datasources.parquet.ParquetToSparkSchemaCo
 import org.apache.spark.sql.execution.datasources.parquet.SparkBasicSchemaEvolution;
 import org.apache.spark.sql.internal.SQLConf;
 import org.apache.spark.sql.sources.Filter;
-import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
-import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
-import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
 
 import scala.Option$;
 
@@ -154,21 +145,14 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
     HoodieSchema nonNullSchema = requestedSchema.getNonNullType();
     StructType structSchema = HoodieInternalRowUtils.getCachedSchema(nonNullSchema);
 
-    // Detect vector columns: ordinal → (dimension, elementType)
-    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = detectVectorColumns(nonNullSchema);
+    // Detect vector columns: ordinal → Vector schema
+    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = VectorConversionUtils.detectVectorColumns(nonNullSchema);
 
     // For vector columns, replace ArrayType(FloatType) with BinaryType in the read schema
     // so SparkBasicSchemaEvolution sees matching types (file has FIXED_LEN_BYTE_ARRAY → BinaryType)
-    StructType readStructSchema = structSchema;
-    if (!vectorColumnInfo.isEmpty()) {
-      StructField[] fields = new StructField[structSchema.fields().length];
-      System.arraycopy(structSchema.fields(), 0, fields, 0, fields.length);
-      for (int idx : vectorColumnInfo.keySet()) {
-        StructField orig = fields[idx];
-        fields[idx] = new StructField(orig.name(), DataTypes.BinaryType, orig.nullable(), Metadata.empty());
-      }
-      readStructSchema = new StructType(fields);
-    }
+    StructType readStructSchema = vectorColumnInfo.isEmpty()
+        ? structSchema
+        : VectorConversionUtils.replaceVectorColumnsWithBinary(structSchema, vectorColumnInfo);
 
     Option<MessageType> messageSchema = Option.of(getAvroSchemaConverter(storage.getConf().unwrapAs(Configuration.class)).convert(nonNullSchema));
     boolean enableTimestampFieldRepair = storage.getConf().getBoolean(ENABLE_LOGICAL_TIMESTAMP_REPAIR, true);
@@ -218,19 +202,11 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
       UnsafeProjection vectorProjection = UnsafeProjection.create(structSchema);
       int numFields = readStructSchema.fields().length;
       StructType finalReadSchema = readStructSchema;
+      // Reuse a single GenericInternalRow across iterations; UnsafeProjection.apply() copies the data
+      GenericInternalRow converted = new GenericInternalRow(numFields);
       CloseableMappingIterator<UnsafeRow, UnsafeRow> vectorIterator =
           new CloseableMappingIterator<>(projectedIterator, row -> {
-            GenericInternalRow converted = new GenericInternalRow(numFields);
-            for (int i = 0; i < numFields; i++) {
-              if (row.isNullAt(i)) {
-                converted.setNullAt(i);
-              } else if (vectorColumnInfo.containsKey(i)) {
-                converted.update(i, convertBinaryToVectorArray(row.getBinary(i), vectorColumnInfo.get(i)));
-              } else {
-                // Non-vector column: copy value as-is using the read schema's data type
-                converted.update(i, row.get(i, finalReadSchema.apply(i).dataType()));
-              }
-            }
+            VectorConversionUtils.convertRowVectorColumns(row, converted, finalReadSchema, vectorColumnInfo);
             return vectorProjection.apply(converted);
           });
       readerIterators.add(vectorIterator);
@@ -239,57 +215,6 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
 
     readerIterators.add(projectedIterator);
     return projectedIterator;
-  }
-
-  /**
-   * Detects vector columns in the schema and returns a map of ordinal to Vector schema.
-   */
-  private static Map<Integer, HoodieSchema.Vector> detectVectorColumns(HoodieSchema schema) {
-    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new HashMap<>();
-    if (schema == null) {
-      return vectorColumnInfo;
-    }
-    List<HoodieSchemaField> fields = schema.getFields();
-    for (int i = 0; i < fields.size(); i++) {
-      HoodieSchema fieldSchema = fields.get(i).schema().getNonNullType();
-      if (fieldSchema.getType() == HoodieSchemaType.VECTOR) {
-        vectorColumnInfo.put(i, (HoodieSchema.Vector) fieldSchema);
-      }
-    }
-    return vectorColumnInfo;
-  }
-
-  /**
-   * Converts binary bytes from a FIXED_LEN_BYTE_ARRAY parquet column back to a typed array
-   * based on the vector's element type and dimension.
-   */
-  private static GenericArrayData convertBinaryToVectorArray(byte[] bytes, HoodieSchema.Vector vectorSchema) {
-    int dim = vectorSchema.getDimension();
-    int expectedSize = dim * vectorSchema.getVectorElementType().getElementSize();
-    checkArgument(bytes.length == expectedSize,
-        "Vector byte array length mismatch: expected " + expectedSize + " but got " + bytes.length);
-    ByteBuffer buffer = ByteBuffer.wrap(bytes).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER);
-    switch (vectorSchema.getVectorElementType()) {
-      case FLOAT:
-        float[] floats = new float[dim];
-        for (int j = 0; j < dim; j++) {
-          floats[j] = buffer.getFloat();
-        }
-        return new GenericArrayData(floats);
-      case DOUBLE:
-        double[] doubles = new double[dim];
-        for (int j = 0; j < dim; j++) {
-          doubles[j] = buffer.getDouble();
-        }
-        return new GenericArrayData(doubles);
-      case INT8:
-        byte[] int8s = new byte[dim];
-        buffer.get(int8s);
-        return new GenericArrayData(int8s);
-      default:
-        throw new UnsupportedOperationException(
-            "Unsupported vector element type: " + vectorSchema.getVectorElementType());
-    }
   }
 
   private MessageType getFileSchema() {

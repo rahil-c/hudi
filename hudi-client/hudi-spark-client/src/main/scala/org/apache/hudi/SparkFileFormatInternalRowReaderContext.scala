@@ -25,12 +25,12 @@ import org.apache.hudi.avro.{AvroSchemaUtils, HoodieAvroUtils}
 import org.apache.hudi.common.engine.HoodieReaderContext
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.HoodieRecord
-import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType, HoodieSchemaUtils}
+import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaUtils}
 import org.apache.hudi.common.table.HoodieTableConfig
 import org.apache.hudi.common.table.read.buffer.PositionBasedFileGroupRecordBuffer.ROW_INDEX_TEMPORARY_COLUMN_NAME
 import org.apache.hudi.common.util.ValidationUtils.checkState
 import org.apache.hudi.common.util.collection.{CachingIterator, ClosableIterator, Pair => HPair}
-import org.apache.hudi.io.storage.{HoodieSparkFileReaderFactory, HoodieSparkParquetReader}
+import org.apache.hudi.io.storage.{HoodieSparkFileReaderFactory, HoodieSparkParquetReader, VectorConversionUtils}
 import org.apache.hudi.storage.{HoodieStorage, StorageConfiguration, StoragePath}
 import org.apache.hudi.util.CloseableInternalRowIterator
 import org.apache.parquet.avro.HoodieAvroParquetSchemaConverter.getAvroSchemaConverter
@@ -42,8 +42,7 @@ import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.hudi.SparkAdapter
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
-import org.apache.spark.sql.catalyst.util.GenericArrayData
-import org.apache.spark.sql.types.{BinaryType, LongType, Metadata, MetadataBuilder, StructField, StructType}
+import org.apache.spark.sql.types.{LongType, MetadataBuilder, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 
 import scala.collection.JavaConverters._
@@ -311,79 +310,30 @@ object SparkFileFormatInternalRowReaderContext {
 
   /**
    * Detects VECTOR columns from HoodieSchema.
-   * @return Map of ordinal to (dimension, elementType) for VECTOR fields.
+   * Delegates to [[VectorConversionUtils.detectVectorColumns]].
+   * @return Map of ordinal to Vector schema for VECTOR fields.
    */
-  private[hudi] def detectVectorColumns(schema: HoodieSchema): Map[Int, (Int, HoodieSchema.Vector.VectorElementType)] = {
-    if (schema == null) return Map.empty
-    schema.getFields.asScala.zipWithIndex.flatMap { case (field, idx) =>
-      val fieldSchema = field.schema().getNonNullType
-      if (fieldSchema.getType == HoodieSchemaType.VECTOR) {
-        val v = fieldSchema.asInstanceOf[HoodieSchema.Vector]
-        Some(idx -> (v.getDimension, v.getVectorElementType))
-      } else {
-        None
-      }
-    }.toMap
+  private[hudi] def detectVectorColumns(schema: HoodieSchema): Map[Int, HoodieSchema.Vector] = {
+    VectorConversionUtils.detectVectorColumns(schema).asScala.map { case (k, v) => (k.intValue(), v) }.toMap
   }
 
   /**
    * Detects VECTOR columns from Spark StructType metadata.
-   * @return Map of ordinal to (dimension, elementType) for VECTOR fields.
+   * Delegates to [[VectorConversionUtils.detectVectorColumnsFromMetadata]].
+   * @return Map of ordinal to Vector schema for VECTOR fields.
    */
-  def detectVectorColumnsFromMetadata(schema: StructType): Map[Int, (Int, HoodieSchema.Vector.VectorElementType)] = {
-    schema.fields.zipWithIndex.flatMap { case (field, idx) =>
-      if (field.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD)) {
-        val typeStr = field.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)
-        if (typeStr.startsWith("VECTOR")) {
-          val parsed = HoodieSchema.parseTypeDescriptor(typeStr)
-          if (parsed.getType == HoodieSchemaType.VECTOR) {
-            val vectorSchema = parsed.asInstanceOf[HoodieSchema.Vector]
-            Some(idx -> (vectorSchema.getDimension, vectorSchema.getVectorElementType))
-          } else None
-        } else None
-      } else None
-    }.toMap
+  def detectVectorColumnsFromMetadata(schema: StructType): Map[Int, HoodieSchema.Vector] = {
+    VectorConversionUtils.detectVectorColumnsFromMetadata(schema).asScala.map { case (k, v) => (k.intValue(), v) }.toMap
   }
 
   /**
    * Replaces ArrayType with BinaryType for VECTOR columns so the Parquet reader
    * can read FIXED_LEN_BYTE_ARRAY data without type mismatch.
+   * Delegates to [[VectorConversionUtils.replaceVectorColumnsWithBinary]].
    */
-  def replaceVectorColumnsWithBinary(structType: StructType, vectorColumns: Map[Int, _]): StructType = {
-    StructType(structType.fields.zipWithIndex.map { case (field, idx) =>
-      if (vectorColumns.contains(idx)) {
-        StructField(field.name, BinaryType, field.nullable, Metadata.empty)
-      } else {
-        field
-      }
-    })
-  }
-
-  /**
-   * Converts binary bytes from a FIXED_LEN_BYTE_ARRAY parquet column back to a typed array
-   * based on the vector's element type and dimension.
-   */
-  def convertBinaryToVectorArray(bytes: Array[Byte], dim: Int, elemType: HoodieSchema.Vector.VectorElementType): GenericArrayData = {
-    val expectedSize = dim * elemType.getElementSize
-    require(bytes.length == expectedSize,
-      s"Vector byte array length mismatch: expected $expectedSize but got ${bytes.length}")
-    val buffer = java.nio.ByteBuffer.wrap(bytes).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER)
-    elemType match {
-      case HoodieSchema.Vector.VectorElementType.FLOAT =>
-        val arr = new Array[Float](dim)
-        var j = 0
-        while (j < dim) { arr(j) = buffer.getFloat(); j += 1 }
-        new GenericArrayData(arr)
-      case HoodieSchema.Vector.VectorElementType.DOUBLE =>
-        val arr = new Array[Double](dim)
-        var j = 0
-        while (j < dim) { arr(j) = buffer.getDouble(); j += 1 }
-        new GenericArrayData(arr)
-      case HoodieSchema.Vector.VectorElementType.INT8 =>
-        val arr = new Array[Byte](dim)
-        buffer.get(arr)
-        new GenericArrayData(arr)
-    }
+  def replaceVectorColumnsWithBinary(structType: StructType, vectorColumns: Map[Int, HoodieSchema.Vector]): StructType = {
+    val javaMap = vectorColumns.map { case (k, v) => (Integer.valueOf(k), v.asInstanceOf[AnyRef]) }.asJava
+    VectorConversionUtils.replaceVectorColumnsWithBinary(structType, javaMap)
   }
 
   /**
@@ -392,26 +342,18 @@ object SparkFileFormatInternalRowReaderContext {
    */
   private[hudi] def wrapWithVectorConversion(
       iterator: ClosableIterator[InternalRow],
-      vectorColumns: Map[Int, (Int, HoodieSchema.Vector.VectorElementType)],
+      vectorColumns: Map[Int, HoodieSchema.Vector],
       readSchema: StructType): ClosableIterator[InternalRow] = {
     val numFields = readSchema.fields.length
+    // Reuse a single GenericInternalRow across iterations to reduce GC pressure
+    val result = new GenericInternalRow(numFields)
+    val javaVectorColumns: java.util.Map[Integer, HoodieSchema.Vector] =
+      vectorColumns.map { case (k, v) => (Integer.valueOf(k), v) }.asJava
     new ClosableIterator[InternalRow] {
       override def hasNext: Boolean = iterator.hasNext
       override def next(): InternalRow = {
         val row = iterator.next()
-        val result = new GenericInternalRow(numFields)
-        var i = 0
-        while (i < numFields) {
-          if (row.isNullAt(i)) {
-            result.setNullAt(i)
-          } else if (vectorColumns.contains(i)) {
-            val (dim, elemType) = vectorColumns(i)
-            result.update(i, convertBinaryToVectorArray(row.getBinary(i), dim, elemType))
-          } else {
-            result.update(i, row.get(i, readSchema(i).dataType))
-          }
-          i += 1
-        }
+        VectorConversionUtils.convertRowVectorColumns(row, result, readSchema, javaVectorColumns)
         result
       }
       override def close(): Unit = iterator.close()

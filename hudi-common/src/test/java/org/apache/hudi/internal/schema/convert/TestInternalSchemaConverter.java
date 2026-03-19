@@ -22,6 +22,8 @@ package org.apache.hudi.internal.schema.convert;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.schema.HoodieSchemaField;
 import org.apache.hudi.common.schema.HoodieSchemaType;
+import org.apache.hudi.internal.schema.InternalSchema;
+import org.apache.hudi.internal.schema.Types;
 
 import org.junit.jupiter.api.Test;
 
@@ -110,5 +112,58 @@ public class TestInternalSchemaConverter {
     expectedOutput = getDeeplyNestedFieldSchemaExpectedColumnNames();
     assertEquals(expectedOutput.size(), fieldNames.size());
     assertTrue(fieldNames.containsAll(expectedOutput));
+  }
+
+  @Test
+  public void testVectorTypeRoundTrip() {
+    // Create a HoodieSchema with a VECTOR field
+    HoodieSchema vectorField = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchema recordSchema = HoodieSchema.createRecord("vectorRecord", null, null, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("embedding", vectorField, null, null)
+    ));
+
+    // HoodieSchema → InternalSchema
+    InternalSchema internalSchema = InternalSchemaConverter.convert(recordSchema);
+
+    // Verify the InternalSchema has a VectorType
+    Types.VectorType internalVectorType = (Types.VectorType) internalSchema.findType("embedding");
+    assertEquals(128, internalVectorType.getDimension());
+    assertEquals("FLOAT", internalVectorType.getElementType());
+
+    // InternalSchema → HoodieSchema
+    HoodieSchema roundTripped = InternalSchemaConverter.convert(internalSchema, "vectorRecord");
+
+    // Verify vector properties survived the round-trip
+    HoodieSchemaField embeddingField = roundTripped.getFields().stream()
+        .filter(f -> f.name().equals("embedding"))
+        .findFirst().get();
+    HoodieSchema embeddingSchema = embeddingField.schema().getNonNullType();
+    assertEquals(HoodieSchemaType.VECTOR, embeddingSchema.getType());
+    HoodieSchema.Vector roundTrippedVector = (HoodieSchema.Vector) embeddingSchema;
+    assertEquals(128, roundTrippedVector.getDimension());
+    assertEquals(HoodieSchema.Vector.VectorElementType.FLOAT, roundTrippedVector.getVectorElementType());
+  }
+
+  @Test
+  public void testVectorTypeRoundTripDouble() {
+    HoodieSchema vectorField = HoodieSchema.createVector(64, HoodieSchema.Vector.VectorElementType.DOUBLE);
+    HoodieSchema recordSchema = HoodieSchema.createRecord("vectorDoubleRecord", null, null, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT), null, null),
+        HoodieSchemaField.of("vec", vectorField, null, null)
+    ));
+
+    InternalSchema internalSchema = InternalSchemaConverter.convert(recordSchema);
+    Types.VectorType internalVec = (Types.VectorType) internalSchema.findType("vec");
+    assertEquals(64, internalVec.getDimension());
+    assertEquals("DOUBLE", internalVec.getElementType());
+
+    HoodieSchema roundTripped = InternalSchemaConverter.convert(internalSchema, "vectorDoubleRecord");
+    HoodieSchemaField vecField = roundTripped.getFields().stream()
+        .filter(f -> f.name().equals("vec"))
+        .findFirst().get();
+    HoodieSchema.Vector rtVec = (HoodieSchema.Vector) vecField.schema().getNonNullType();
+    assertEquals(64, rtVec.getDimension());
+    assertEquals(HoodieSchema.Vector.VectorElementType.DOUBLE, rtVec.getVectorElementType());
   }
 }
