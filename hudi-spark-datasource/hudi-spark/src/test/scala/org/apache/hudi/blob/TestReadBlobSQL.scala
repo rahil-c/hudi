@@ -225,8 +225,8 @@ class TestReadBlobSQL extends HoodieClientTestBase {
     val filePath2 = createTestFile(tempDir, "multi2.bin", 10000)
 
     val df = sparkSession.createDataFrame(Seq(
-      (1, filePath1, 0L, 50L, filePath2, 0L, 50L),
-      (2, filePath1, 100L, 50L, filePath2, 100L, 50L)
+      (1, filePath1, 0L, 50L, filePath2, 500L, 50L),
+      (2, filePath1, 100L, 50L, filePath2, 600L, 50L)
     )).toDF("id", "external_path1", "offset1", "length1", "external_path2", "offset2", "length2")
       .withColumn("file_info1",
         blobStructCol("file_info1", col("external_path1"), col("offset1"), col("length1")))
@@ -248,10 +248,19 @@ class TestReadBlobSQL extends HoodieClientTestBase {
     val rows = result.collect()
     assertEquals(2, rows.length)
 
-    rows.foreach { row =>
-      assertEquals(50, row.getAs[Array[Byte]]("data1").length)
-      assertEquals(50, row.getAs[Array[Byte]]("data2").length)
-    }
+    // Row 1: data1 = file1 at offset 0, data2 = file2 at offset 500
+    val data1_row1 = rows(0).getAs[Array[Byte]]("data1")
+    val data2_row1 = rows(0).getAs[Array[Byte]]("data2")
+    assertEquals(50, data1_row1.length)
+    assertEquals(50, data2_row1.length)
+    assertBytesContent(data1_row1, expectedOffset = 0)
+    assertBytesContent(data2_row1, expectedOffset = 500)
+
+    // Row 2: data1 = file1 at offset 100, data2 = file2 at offset 600
+    val data1_row2 = rows(1).getAs[Array[Byte]]("data1")
+    val data2_row2 = rows(1).getAs[Array[Byte]]("data2")
+    assertBytesContent(data1_row2, expectedOffset = 100)
+    assertBytesContent(data2_row2, expectedOffset = 600)
   }
 
   @Test

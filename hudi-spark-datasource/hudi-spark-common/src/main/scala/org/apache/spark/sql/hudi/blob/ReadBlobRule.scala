@@ -19,8 +19,11 @@
 
 package org.apache.spark.sql.hudi.blob
 
+import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
+
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression, NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, ExprId, Expression, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.rules.Rule
 
@@ -41,20 +44,20 @@ case class ReadBlobRule(spark: SparkSession) extends Rule[LogicalPlan] {
       if containsReadBlobExpression(projectList)
         && !child.isInstanceOf[BatchedBlobRead] =>
 
-      val blobColumn =
-        extractBlobColumnFromExpressions(projectList).getOrElse {
-          throw new IllegalStateException(
-            "read_blob() function found but no valid blob column reference could be extracted. " +
-              "Ensure that read_blob() is called on a BLOB type."
-          )
-        }
+      val blobColumns = extractAllBlobColumns(projectList)
+      if (blobColumns.isEmpty) {
+        throw new IllegalStateException("read_blob() found but no valid blob column reference extracted.")
+      }
 
-      val wrapped = BatchedBlobRead(child, blobColumn)
+      val (wrappedPlan, blobToDataAttr) = blobColumns.foldLeft(
+        (child: LogicalPlan, Map.empty[ExprId, Attribute])
+      ) { case ((currentPlan, mapping), blobAttr) =>
+        val blobRead = BatchedBlobRead(currentPlan, blobAttr)
+        (blobRead, mapping + (blobAttr.exprId -> blobRead.dataAttr))
+      }
 
-      val newProjectList =
-        transformNamedExpressions(projectList, wrapped.dataAttr)
-
-      Project(newProjectList, wrapped)
+      val newProjectList = transformNamedExpressions(projectList, blobToDataAttr)
+      Project(newProjectList, wrappedPlan)
   }
 
   /**
@@ -71,68 +74,44 @@ case class ReadBlobRule(spark: SparkSession) extends Rule[LogicalPlan] {
     }
   }
 
-  private def transformNamedExpressions(expressions: Seq[NamedExpression],
-                                         dataAttr: Attribute): Seq[NamedExpression] = {
+  private def extractAllBlobColumns(expressions: Seq[Expression]): Seq[AttributeReference] = {
+    val seen = mutable.LinkedHashSet.empty[ExprId]
+    val result = ArrayBuffer.empty[AttributeReference]
+    expressions.foreach(collectBlobColumns(_, seen, result))
+    result.toSeq
+  }
 
+  private def collectBlobColumns(
+      expr: Expression,
+      seen: mutable.Set[ExprId],
+      result: ArrayBuffer[AttributeReference]): Unit = expr match {
+    case ReadBlobExpression(attr: AttributeReference) =>
+      if (seen.add(attr.exprId)) result += attr
+    case other =>
+      other.children.foreach(collectBlobColumns(_, seen, result))
+  }
+
+  private def transformNamedExpressions(
+      expressions: Seq[NamedExpression],
+      blobToDataAttr: Map[ExprId, Attribute]): Seq[NamedExpression] = {
     expressions.map {
-
       case alias @ Alias(childExpr, name) =>
-        val rewritten = replaceReadBlobExpression(childExpr, dataAttr)
-        Alias(rewritten, name)(
-          alias.exprId,
-          alias.qualifier,
-          alias.explicitMetadata
-        )
-
-      case attr: AttributeReference =>
-        // No remapping needed anymore
-        attr
-
+        val rewritten = replaceReadBlobExpression(childExpr, blobToDataAttr)
+        Alias(rewritten, name)(alias.exprId, alias.qualifier, alias.explicitMetadata)
+      case attr: AttributeReference => attr
       case other =>
-        replaceReadBlobExpression(other, dataAttr)
-          .asInstanceOf[NamedExpression]
+        replaceReadBlobExpression(other, blobToDataAttr).asInstanceOf[NamedExpression]
     }
   }
 
-  /**
-   * Replace ReadBlobExpression with reference to resolved data column.
-   *
-   * Recursively traverses expression tree and replaces all [[ReadBlobExpression]]
-   * nodes with references to the data column produced by [[BatchedBlobReader]].
-   */
   private def replaceReadBlobExpression(
       expr: Expression,
-      dataAttr: Attribute): Expression = expr match {
-
+      blobToDataAttr: Map[ExprId, Attribute]): Expression = expr match {
+    case ReadBlobExpression(attr: AttributeReference) =>
+      blobToDataAttr(attr.exprId)
     case ReadBlobExpression(_) =>
-      // Replace with reference to the data column
-      dataAttr
-
+      throw new IllegalStateException("read_blob() must be called on a direct column reference")
     case other =>
-      // Recursively process children
-      other.mapChildren(child => replaceReadBlobExpression(child, dataAttr))
-  }
-
-  /**
-   * Extract blob column name from expressions (handles nesting in aggregate functions).
-   */
-  private def extractBlobColumnFromExpressions(expressions: Seq[Expression]): Option[AttributeReference] = {
-    expressions.collectFirst {
-      case expr if containsReadBlobInExpression(expr) =>
-        findBlobColumn(expr)
-    }.flatten
-  }
-
-  /**
-   * Recursively search for ReadBlobExpression and extract column name.
-   */
-  private def findBlobColumn(expr: Expression): Option[AttributeReference] = expr match {
-    case ReadBlobExpression(child) =>
-      child match {
-        case attr: AttributeReference => Some(attr)
-        case _ => None
-      }
-    case other =>
-      other.children.flatMap(findBlobColumn).headOption
+      other.mapChildren(replaceReadBlobExpression(_, blobToDataAttr))
   }
 }
