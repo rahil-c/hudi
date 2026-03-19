@@ -799,6 +799,100 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     assertTrue(r7.getSeq[Double](1).forall(_ == 1.0), "key_7 should have original value 1.0")
   }
 
+  @Test
+  def testDimensionMismatchOnWrite(): Unit = {
+    // Schema declares VECTOR(8) but data has arrays of length 4
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(8)")
+      .build()
+
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata)
+    ))
+
+    val data = Seq(
+      Row("key_1", Seq(1.0f, 2.0f, 3.0f, 4.0f)) // only 4 elements, schema says 8
+    )
+
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(data),
+      schema
+    )
+
+    val ex = assertThrows(classOf[Exception], () => {
+      df.write.format("hudi")
+        .option(RECORDKEY_FIELD.key, "id")
+        .option(PRECOMBINE_FIELD.key, "id")
+        .option(TABLE_NAME.key, "dim_mismatch_test")
+        .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+        .mode(SaveMode.Overwrite)
+        .save(basePath + "/dim_mismatch")
+    })
+    // The root cause should mention dimension mismatch
+    var cause: Throwable = ex
+    var foundMismatch = false
+    while (cause != null && !foundMismatch) {
+      if (cause.getMessage != null && cause.getMessage.contains("dimension mismatch")) {
+        foundMismatch = true
+      }
+      cause = cause.getCause
+    }
+    assertTrue(foundMismatch,
+      s"Expected 'dimension mismatch' in exception chain, got: ${ex.getMessage}")
+  }
+
+  @Test
+  def testSchemaEvolutionRejectsDimensionChange(): Unit = {
+    // Write initial table with VECTOR(4)
+    val metadata4 = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
+      .build()
+
+    val schema4 = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata4),
+      StructField("ts", LongType, nullable = false)
+    ))
+
+    val data1 = Seq(Row("key_1", Seq(1.0f, 2.0f, 3.0f, 4.0f), 1L))
+    spark.createDataFrame(spark.sparkContext.parallelize(data1), schema4)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "ts")
+      .option(TABLE_NAME.key, "schema_evolve_dim_test")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .mode(SaveMode.Overwrite)
+      .save(basePath + "/schema_evolve_dim")
+
+    // Now try to write with VECTOR(8) — different dimension should be rejected
+    val metadata8 = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(8)")
+      .build()
+
+    val schema8 = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata8),
+      StructField("ts", LongType, nullable = false)
+    ))
+
+    val data2 = Seq(Row("key_2", Seq(1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f), 2L))
+
+    assertThrows(classOf[Exception], () => {
+      spark.createDataFrame(spark.sparkContext.parallelize(data2), schema8)
+        .write.format("hudi")
+        .option(RECORDKEY_FIELD.key, "id")
+        .option(PRECOMBINE_FIELD.key, "ts")
+        .option(TABLE_NAME.key, "schema_evolve_dim_test")
+        .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+        .mode(SaveMode.Append)
+        .save(basePath + "/schema_evolve_dim")
+    })
+  }
+
   private def assertArrayEquals(expected: Array[Byte], actual: Array[Byte], message: String): Unit = {
     assertEquals(expected.length, actual.length, s"$message: length mismatch")
     expected.zip(actual).zipWithIndex.foreach { case ((e, a), idx) =>

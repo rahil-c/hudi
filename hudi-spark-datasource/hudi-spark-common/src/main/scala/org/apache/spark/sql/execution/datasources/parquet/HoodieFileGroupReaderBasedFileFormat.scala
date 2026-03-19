@@ -37,10 +37,10 @@ import org.apache.hudi.io.IOUtils
 import org.apache.hudi.io.storage.HoodieSparkParquetReader.ENABLE_LOGICAL_TIMESTAMP_REPAIR
 import org.apache.hudi.storage.StorageConfiguration
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration
-
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.hadoop.mapreduce.Job
+import org.apache.hudi.io.storage.VectorConversionUtils
 import org.apache.parquet.schema.{HoodieSchemaRepair, MessageType}
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.internal.Logging
@@ -59,7 +59,6 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnarBatchUtils}
 import org.apache.spark.util.SerializableConfiguration
 
 import java.io.Closeable
-
 import scala.collection.JavaConverters.mapAsJavaMapConverter
 
 trait HoodieFormatTrait {
@@ -117,6 +116,22 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
   private var supportReturningBatch = false
 
   /**
+   * Cached result of vector column detection keyed by schema identity.
+   * Avoids re-parsing metadata on repeated supportBatch / readBaseFile calls with the same schema.
+   */
+  @transient private var cachedVectorDetection: (StructType, Map[Int, HoodieSchema.Vector]) = _
+
+  private def detectVectorColumnsCached(schema: StructType): Map[Int, HoodieSchema.Vector] = {
+    if (cachedVectorDetection != null && (cachedVectorDetection._1 eq schema)) {
+      cachedVectorDetection._2
+    } else {
+      val result = detectVectorColumns(schema)
+      cachedVectorDetection = (schema, result)
+      result
+    }
+  }
+
+  /**
    * Checks if the file format supports vectorized reading, please refer to SPARK-40918.
    *
    * NOTE: for mor read, even for file-slice with only base file, we can read parquet file with vectorized read,
@@ -130,7 +145,7 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
   override def supportBatch(sparkSession: SparkSession, schema: StructType): Boolean = {
     // Vector columns are stored as FIXED_LEN_BYTE_ARRAY in Parquet but read as ArrayType in Spark.
     // The binary→array conversion requires row-level access, so disable vectorized batch reading.
-    if (detectVectorColumns(schema).nonEmpty) {
+    if (detectVectorColumnsCached(schema).nonEmpty) {
       supportVectorizedRead = false
       supportReturningBatch = false
       false
@@ -422,17 +437,12 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
                                         vectorCols: Map[Int, HoodieSchema.Vector]): Iterator[InternalRow] = {
     val numFields = readSchema.fields.length
     val vectorProjection = UnsafeProjection.create(targetSchema)
+    // Reuse a single GenericInternalRow across iterations; vectorProjection.apply() copies the data
+    val converted = new GenericInternalRow(numFields)
+    val javaVectorCols: java.util.Map[Integer, HoodieSchema.Vector] =
+      vectorCols.map { case (k, v) => (Integer.valueOf(k), v) }.asJava
     iter.map { row =>
-      val converted = new GenericInternalRow(numFields)
-      for (i <- 0 until numFields) {
-        if (row.isNullAt(i)) {
-          converted.setNullAt(i)
-        } else if (vectorCols.contains(i)) {
-          converted.update(i, org.apache.hudi.io.storage.VectorConversionUtils.convertBinaryToVectorArray(row.getBinary(i), vectorCols(i)))
-        } else {
-          converted.update(i, row.get(i, readSchema.apply(i).dataType))
-        }
-      }
+      VectorConversionUtils.convertRowVectorColumns(row, converted, readSchema, javaVectorCols)
       vectorProjection.apply(converted).asInstanceOf[InternalRow]
     }
   }
@@ -448,9 +458,10 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
 
     val modifiedRequiredSchema = if (hasVectors) replaceVectorFieldsWithBinary(requiredSchema, vectorCols) else requiredSchema
     val modifiedOutputSchema = if (hasVectors) replaceVectorFieldsWithBinary(outputSchema, vectorCols) else outputSchema
-    // requestedSchema = requiredSchema + mandatory partition fields appended at end,
-    // so vector columns are at the same indices as in requiredSchema — reuse vectorCols
-    val modifiedRequestedSchema = if (hasVectors) replaceVectorFieldsWithBinary(requestedSchema, vectorCols) else requestedSchema
+    // Detect from requestedSchema independently — don't assume ordinals match requiredSchema
+    // (requestedSchema = requiredSchema + mandatory partition fields; ordinals may differ)
+    val requestedVectorCols = if (hasVectors) detectVectorColumns(requestedSchema) else Map.empty[Int, HoodieSchema.Vector]
+    val modifiedRequestedSchema = if (hasVectors) replaceVectorFieldsWithBinary(requestedSchema, requestedVectorCols) else requestedSchema
 
     // Detect vector columns in the full output schema for post-read conversion.
     // Output schema may have different indices than requiredSchema (e.g. partition columns interleaved),

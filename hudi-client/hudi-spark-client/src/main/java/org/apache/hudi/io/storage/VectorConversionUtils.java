@@ -28,6 +28,9 @@ import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.List;
@@ -171,6 +174,32 @@ public final class VectorConversionUtils {
       default:
         throw new UnsupportedOperationException(
             "Unsupported vector element type: " + elemType);
+    }
+  }
+
+  /**
+   * Converts vector columns in a row from binary (BinaryType) back to typed arrays,
+   * copying non-vector columns as-is. The caller must supply a pre-allocated
+   * {@link GenericInternalRow} for reuse across iterations to reduce GC pressure.
+   *
+   * @param row           the source row (with BinaryType for vector columns)
+   * @param result        a pre-allocated GenericInternalRow to write into (reused across calls)
+   * @param readSchema    the Spark schema of the source row (BinaryType for vector columns)
+   * @param vectorColumns map of ordinal to Vector schema for vector columns
+   */
+  public static void convertRowVectorColumns(InternalRow row, GenericInternalRow result,
+                                             StructType readSchema,
+                                             Map<Integer, HoodieSchema.Vector> vectorColumns) {
+    int numFields = readSchema.fields().length;
+    for (int i = 0; i < numFields; i++) {
+      if (row.isNullAt(i)) {
+        result.setNullAt(i);
+      } else if (vectorColumns.containsKey(i)) {
+        result.update(i, convertBinaryToVectorArray(row.getBinary(i), vectorColumns.get(i)));
+      } else {
+        // Non-vector column: copy value as-is using the read schema's data type
+        result.update(i, row.get(i, readSchema.apply(i).dataType()));
+      }
     }
   }
 }

@@ -345,22 +345,15 @@ object SparkFileFormatInternalRowReaderContext {
       vectorColumns: Map[Int, HoodieSchema.Vector],
       readSchema: StructType): ClosableIterator[InternalRow] = {
     val numFields = readSchema.fields.length
+    // Reuse a single GenericInternalRow across iterations to reduce GC pressure
+    val result = new GenericInternalRow(numFields)
+    val javaVectorColumns: java.util.Map[Integer, HoodieSchema.Vector] =
+      vectorColumns.map { case (k, v) => (Integer.valueOf(k), v) }.asJava
     new ClosableIterator[InternalRow] {
       override def hasNext: Boolean = iterator.hasNext
       override def next(): InternalRow = {
         val row = iterator.next()
-        val result = new GenericInternalRow(numFields)
-        var i = 0
-        while (i < numFields) {
-          if (row.isNullAt(i)) {
-            result.setNullAt(i)
-          } else if (vectorColumns.contains(i)) {
-            result.update(i, VectorConversionUtils.convertBinaryToVectorArray(row.getBinary(i), vectorColumns(i)))
-          } else {
-            result.update(i, row.get(i, readSchema(i).dataType))
-          }
-          i += 1
-        }
+        VectorConversionUtils.convertRowVectorColumns(row, result, readSchema, javaVectorColumns)
         result
       }
       override def close(): Unit = iterator.close()

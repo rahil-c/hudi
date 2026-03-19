@@ -18,6 +18,7 @@
 
 package org.apache.hudi.internal.schema;
 
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.internal.schema.Type.NestedType;
 import org.apache.hudi.internal.schema.Type.PrimitiveType;
 
@@ -317,6 +318,9 @@ public class Types {
     }
 
     private VectorType(int dimension, String elementType, String storageBacking) {
+      // Validate that the strings correspond to known enum values to fail fast on typos
+      HoodieSchema.Vector.VectorElementType.fromString(elementType);
+      HoodieSchema.Vector.StorageBacking.fromString(storageBacking);
       this.dimension = dimension;
       this.elementType = elementType;
       this.storageBacking = storageBacking;

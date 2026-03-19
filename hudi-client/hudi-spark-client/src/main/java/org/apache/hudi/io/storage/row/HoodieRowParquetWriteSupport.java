@@ -311,14 +311,14 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
             && resolvedSchema.getType() == HoodieSchemaType.VECTOR) {
       HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) resolvedSchema;
       int dimension = vectorSchema.getDimension();
-      int elementSize = vectorSchema.getVectorElementType().getElementSize();
       HoodieSchema.Vector.VectorElementType elemType = vectorSchema.getVectorElementType();
+      int bufferSize = Math.multiplyExact(dimension, elemType.getElementSize());
+      ByteBuffer buffer = ByteBuffer.allocate(bufferSize).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER);
       return (row, ordinal) -> {
         ArrayData array = row.getArray(ordinal);
         ValidationUtils.checkArgument(array.numElements() == dimension,
             () -> String.format("Vector dimension mismatch: schema expects %d elements but got %d", dimension, array.numElements()));
-        int bufferSize = Math.multiplyExact(dimension, elementSize);
-        ByteBuffer buffer = ByteBuffer.allocate(bufferSize).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER);
+        buffer.clear();
         switch (elemType) {
           case FLOAT:
             for (int i = 0; i < dimension; i++) {

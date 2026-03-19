@@ -460,6 +460,8 @@ public class HoodieSchemaCompatibilityChecker {
       return checkDecimalWidening(reader, writer, locations);
     }
 
+    // Convention: "expected" = writer (existing data), "found" = reader (evolved schema).
+    // This matches checkFixedSize, checkDecimalWidening, checkTimeCompatibility, etc.
     private SchemaCompatibilityResult checkVectorCompatibility(final HoodieSchema reader, final HoodieSchema writer,
                                                                final Deque<LocationInfo> locations) {
       HoodieSchema.Vector readerVector = (HoodieSchema.Vector) reader;

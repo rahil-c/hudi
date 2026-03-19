@@ -206,16 +206,7 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
       GenericInternalRow converted = new GenericInternalRow(numFields);
       CloseableMappingIterator<UnsafeRow, UnsafeRow> vectorIterator =
           new CloseableMappingIterator<>(projectedIterator, row -> {
-            for (int i = 0; i < numFields; i++) {
-              if (row.isNullAt(i)) {
-                converted.setNullAt(i);
-              } else if (vectorColumnInfo.containsKey(i)) {
-                converted.update(i, VectorConversionUtils.convertBinaryToVectorArray(row.getBinary(i), vectorColumnInfo.get(i)));
-              } else {
-                // Non-vector column: copy value as-is using the read schema's data type
-                converted.update(i, row.get(i, finalReadSchema.apply(i).dataType()));
-              }
-            }
+            VectorConversionUtils.convertRowVectorColumns(row, converted, finalReadSchema, vectorColumnInfo);
             return vectorProjection.apply(converted);
           });
       readerIterators.add(vectorIterator);
