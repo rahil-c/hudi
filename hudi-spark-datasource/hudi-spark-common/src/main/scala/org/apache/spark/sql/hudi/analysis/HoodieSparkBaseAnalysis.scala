@@ -364,6 +364,10 @@ case class ResolveReferences(spark: SparkSession) extends Rule[LogicalPlan]
         while (i < numElements) { result(i) = arrayData.getInt(i).toDouble; i += 1 }
       case LongType =>
         while (i < numElements) { result(i) = arrayData.getLong(i).toDouble; i += 1 }
+      // Spark SQL infers untyped decimal literals (e.g. ARRAY(1.0, 0.5)) as DecimalType,
+      // not DoubleType. Accept any DecimalType and convert to Double.
+      case d: DecimalType =>
+        while (i < numElements) { result(i) = arrayData.getDecimal(i, d.precision, d.scale).toDouble; i += 1 }
       case _ =>
         throw new HoodieAnalysisException(
           s"Function '${HoodieVectorSearchTableValuedFunction.FUNC_NAME}': " +
