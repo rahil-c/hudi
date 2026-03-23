@@ -688,7 +688,162 @@ class TestHoodieVectorSearchFunction extends HoodieSparkClientTestBase {
     assertEquals(1.0, distanceMap("doc_5"), 1e-4)
   }
 
-  // ==================== MOR table ====================
+  @Test
+  def testNullEmbeddingsAreFiltered(): Unit = {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(3)")
+      .build()
+
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = true, metadata),
+      StructField("label", StringType, nullable = true)
+    ))
+
+    val data = Seq(
+      Row("n1", Seq(1.0f, 0.0f, 0.0f), "has-vector"),
+      Row("n2", null, "null-vector"),
+      Row("n3", Seq(0.0f, 1.0f, 0.0f), "has-vector")
+    )
+
+    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "id")
+      .option(TABLE_NAME.key, "null_vec_search")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .mode(SaveMode.Overwrite)
+      .save(basePath + "/null_search")
+
+    spark.read.format("hudi").load(basePath + "/null_search")
+      .createOrReplaceTempView("null_corpus")
+
+    // Should not throw NPE — null rows are filtered out
+    val result = spark.sql(
+      """
+        |SELECT id, _distance
+        |FROM hudi_vector_search(
+        |  'null_corpus',
+        |  'embedding',
+        |  ARRAY(1.0, 0.0, 0.0),
+        |  5,
+        |  'cosine'
+        |)
+        |ORDER BY _distance
+        |""".stripMargin
+    ).collect()
+
+    // Only non-null rows returned
+    assertEquals(2, result.length)
+    assertEquals("n1", result(0).getAs[String]("id"))
+    assertEquals(0.0, result(0).getAs[Double]("_distance"), 1e-5)
+
+    spark.catalog.dropTempView("null_corpus")
+  }
+
+  @Test
+  def testEmptyCorpus(): Unit = {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(3)")
+      .build()
+
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata)
+    ))
+
+    // Create an empty DataFrame and write it — we need an actual Hudi table,
+    // so write one row then filter it out in the view
+    val data = Seq(Row("temp", Seq(1.0f, 0.0f, 0.0f)))
+    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "id")
+      .option(TABLE_NAME.key, "empty_vec_search")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .mode(SaveMode.Overwrite)
+      .save(basePath + "/empty_search")
+
+    spark.read.format("hudi").load(basePath + "/empty_search")
+      .filter("id = 'nonexistent'")
+      .createOrReplaceTempView("empty_corpus")
+
+    val result = spark.sql(
+      """
+        |SELECT id, _distance
+        |FROM hudi_vector_search(
+        |  'empty_corpus',
+        |  'embedding',
+        |  ARRAY(1.0, 0.0, 0.0),
+        |  3
+        |)
+        |""".stripMargin
+    ).collect()
+
+    assertEquals(0, result.length)
+
+    spark.catalog.dropTempView("empty_corpus")
+  }
+
+  @Test
+  def testDimensionMismatch(): Unit = {
+    // Query vector has 5 dims but corpus has 3-dim embeddings with VECTOR(3) metadata
+    val ex = assertThrows(classOf[Exception], () => {
+      spark.sql(
+        s"""
+           |SELECT *
+           |FROM hudi_vector_search(
+           |  '$corpusViewName',
+           |  'embedding',
+           |  ARRAY(1.0, 0.0, 0.0, 0.0, 0.0),
+           |  3
+           |)
+           |""".stripMargin
+      ).collect()
+    })
+    assertTrue(ex.getMessage.contains("dimension") ||
+      (ex.getCause != null && ex.getCause.getMessage.contains("dimension")))
+  }
+
+  @Test
+  def testZeroK(): Unit = {
+    val ex = assertThrows(classOf[Exception], () => {
+      spark.sql(
+        s"""
+           |SELECT *
+           |FROM hudi_vector_search(
+           |  '$corpusViewName',
+           |  'embedding',
+           |  ARRAY(1.0, 0.0, 0.0),
+           |  0
+           |)
+           |""".stripMargin
+      ).collect()
+    })
+    assertTrue(ex.getMessage.contains("positive integer") ||
+      (ex.getCause != null && ex.getCause.getMessage.contains("positive integer")))
+  }
+
+  @Test
+  def testNegativeK(): Unit = {
+    val ex = assertThrows(classOf[Exception], () => {
+      spark.sql(
+        s"""
+           |SELECT *
+           |FROM hudi_vector_search(
+           |  '$corpusViewName',
+           |  'embedding',
+           |  ARRAY(1.0, 0.0, 0.0),
+           |  -5
+           |)
+           |""".stripMargin
+      ).collect()
+    })
+    assertTrue(ex.getMessage.contains("positive integer") ||
+      (ex.getCause != null && ex.getCause.getMessage.contains("positive integer")))
+  }
 
   @Test
   def testMorTableVectorSearch(): Unit = {

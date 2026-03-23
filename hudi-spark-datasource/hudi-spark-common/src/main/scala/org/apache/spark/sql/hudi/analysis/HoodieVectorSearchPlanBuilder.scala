@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.hudi.analysis
 
+import org.apache.hudi.common.schema.HoodieSchema
+
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.plans.logical.HoodieVectorSearchTableValuedFunction.DistanceMetric
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
@@ -33,10 +35,19 @@ import org.apache.spark.sql.types.{ArrayType, ByteType, DoubleType, FloatType}
  *
  * For batch-query mode, cross-joins the corpus with broadcast query vectors, computes
  * pairwise distances, and returns top-K per query using a window function.
+ *
+ * <b>Scalability note for batch mode:</b> The batch query performs a cross-join between
+ * the corpus and the (broadcast) query table, producing O(|corpus| * |queries|) intermediate
+ * rows. This is suitable for small-to-medium query sets (tens to low hundreds of queries)
+ * against moderate corpora.
  */
 object HoodieVectorSearchPlanBuilder {
 
   val DISTANCE_COL = "_distance"
+  private val QUERY_ID_COL = "_query_id"
+  private val QUERY_EMB_ALIAS = "_query_emb_internal"
+  private val RANK_COL = "_rank"
+  private val QUERY_COL_PREFIX = "_query_"
 
   /**
    * Builds the brute force KNN plan for single-query mode.
@@ -57,9 +68,11 @@ object HoodieVectorSearchPlanBuilder {
       k: Int,
       metric: DistanceMetric.Value): LogicalPlan = {
     validateEmbeddingColumn(corpusDf, embeddingCol)
+    validateQueryVectorDimension(corpusDf, embeddingCol, queryVector.length)
 
     val distanceUdf = createDistanceUdf(metric)
     val castedDf = castEmbeddingToDouble(corpusDf, embeddingCol)
+      .filter(col(embeddingCol).isNotNull)
 
     // Create a literal column from the query vector
     val queryLit = lit(queryVector)
@@ -97,20 +110,21 @@ object HoodieVectorSearchPlanBuilder {
 
     val distanceUdf = createDistanceUdf(metric)
     val castedCorpus = castEmbeddingToDouble(corpusDf, corpusEmbeddingCol)
+      .filter(col(corpusEmbeddingCol).isNotNull)
 
     // Prefix every query column with "_query_" to avoid cross-join column ambiguity:
     //   1. when corpusEmbeddingCol == queryEmbeddingCol (both named "embedding")
     //   2. when corpus and query share other non-embedding columns (e.g. both have "id")
     val corpusCols = castedCorpus.columns.toSet
-    val queryEmbAlias = "_query_emb_internal"
     val queryWithId = castEmbeddingToDouble(queryDf, queryEmbeddingCol)
-      .withColumnRenamed(queryEmbeddingCol, queryEmbAlias)
-      .withColumn("_query_id", monotonically_increasing_id())
+      .filter(col(queryEmbeddingCol).isNotNull)
+      .withColumnRenamed(queryEmbeddingCol, QUERY_EMB_ALIAS)
+      .withColumn(QUERY_ID_COL, monotonically_increasing_id())
 
-    // Rename any query column that clashes with a corpus column (except _query_id)
+    // Rename any query column that clashes with a corpus column (except internal columns)
     val renamedQuery = queryWithId.columns.foldLeft(queryWithId) { (df, qCol) =>
-      if (qCol != "_query_id" && qCol != queryEmbAlias && corpusCols.contains(qCol))
-        df.withColumnRenamed(qCol, s"_query_$qCol")
+      if (qCol != QUERY_ID_COL && qCol != QUERY_EMB_ALIAS && corpusCols.contains(qCol))
+        df.withColumnRenamed(qCol, s"$QUERY_COL_PREFIX$qCol")
       else
         df
     }
@@ -118,16 +132,16 @@ object HoodieVectorSearchPlanBuilder {
     // Cross join corpus with broadcast queries, compute distance, then rank
     val scored = castedCorpus.crossJoin(broadcast(renamedQuery))
       .withColumn(DISTANCE_COL,
-        distanceUdf(col(corpusEmbeddingCol), col(queryEmbAlias)))
+        distanceUdf(col(corpusEmbeddingCol), col(QUERY_EMB_ALIAS)))
       .drop(corpusEmbeddingCol)
-      .drop(queryEmbAlias)
+      .drop(QUERY_EMB_ALIAS)
 
-    val window = Window.partitionBy("_query_id").orderBy(col(DISTANCE_COL).asc)
+    val window = Window.partitionBy(QUERY_ID_COL).orderBy(col(DISTANCE_COL).asc)
     val result = scored
-      .withColumn("_rank", row_number().over(window))
-      .filter(col("_rank") <= k)
-      .drop("_rank")
-      .orderBy(col("_query_id"), col(DISTANCE_COL))
+      .withColumn(RANK_COL, row_number().over(window))
+      .filter(col(RANK_COL) <= k)
+      .drop(RANK_COL)
+      .orderBy(col(QUERY_ID_COL), col(DISTANCE_COL))
 
     result.queryExecution.analyzed
   }
@@ -187,13 +201,34 @@ object HoodieVectorSearchPlanBuilder {
     }
   }
 
+  /**
+   * Validates that the query vector dimension matches the corpus embedding dimension
+   * when the corpus column has VECTOR(dim) metadata. This provides a clear error at
+   * analysis time rather than a cryptic ArrayIndexOutOfBoundsException at runtime.
+   */
+  private def validateQueryVectorDimension(
+      df: DataFrame, embeddingCol: String, queryDim: Int): Unit = {
+    val field = df.schema.fields.find(_.name == embeddingCol).get
+    val typeMetadata = field.metadata
+    if (typeMetadata.contains(HoodieSchema.TYPE_METADATA_FIELD)) {
+      val typeDescriptor = typeMetadata.getString(HoodieSchema.TYPE_METADATA_FIELD)
+      val dimPattern = """VECTOR\((\d+)""".r
+      dimPattern.findFirstMatchIn(typeDescriptor).foreach { m =>
+        val corpusDim = m.group(1).toInt
+        if (corpusDim != queryDim) {
+          throw new HoodieAnalysisException(
+            s"Query vector dimension ($queryDim) does not match " +
+              s"corpus embedding dimension ($corpusDim) for column '$embeddingCol'")
+        }
+      }
+    }
+  }
+
   private def castEmbeddingToDouble(df: DataFrame, colName: String): DataFrame = {
     val field = df.schema(colName)
     field.dataType match {
       case ArrayType(DoubleType, _) => df
-      case ArrayType(FloatType, _) =>
-        df.withColumn(colName, col(colName).cast(ArrayType(DoubleType, containsNull = false)))
-      case ArrayType(ByteType, _) =>
+      case ArrayType(FloatType, _) | ArrayType(ByteType, _) =>
         df.withColumn(colName, col(colName).cast(ArrayType(DoubleType, containsNull = false)))
       case other =>
         throw new HoodieAnalysisException(

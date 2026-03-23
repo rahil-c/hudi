@@ -101,12 +101,13 @@ object HoodieVectorSearchTableValuedFunction {
   }
 
   private def parseK(expr: Expression): Int = {
+    val rawValue = expr.eval()
     val kValue = try {
-      expr.eval().toString.toInt
+      rawValue.toString.toInt
     } catch {
       case _: NumberFormatException =>
         throw new HoodieAnalysisException(
-          s"Function '$FUNC_NAME': k must be a positive integer, got '${expr.eval()}'")
+          s"Function '$FUNC_NAME': k must be a positive integer, got '$rawValue'")
     }
     if (kValue <= 0) {
       throw new HoodieAnalysisException(

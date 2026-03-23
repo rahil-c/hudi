@@ -25,7 +25,7 @@ import org.apache.spark.sql.BaseHoodieCatalystPlanUtils.MatchResolvedTable
 import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, NamedRelation, ResolvedFieldName, UnresolvedAttribute, UnresolvedFieldName, UnresolvedPartitionSpec, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.analysis.SimpleAnalyzer.resolveExpressionByPlanChildren
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogUtils}
-import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
+import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.Origin
@@ -39,6 +39,7 @@ import org.apache.spark.sql.hudi.analysis.HoodieSparkBaseAnalysis.{HoodieV1OrV2T
 import org.apache.spark.sql.hudi.catalog.HoodieInternalV2Table
 import org.apache.spark.sql.hudi.command.{AlterHoodieTableDropPartitionCommand, ShowHoodieTablePartitionsCommand, TruncateHoodieTableCommand}
 import org.apache.spark.sql.hudi.command.exception.HoodieAnalysisException
+import org.apache.spark.sql.types.{ArrayType, DecimalType, DoubleType, FloatType, IntegerType, LongType}
 
 /**
  * NOTE: PLEASE READ CAREFULLY
@@ -349,7 +350,6 @@ case class ResolveReferences(spark: SparkSession) extends Rule[LogicalPlan]
         s"Function '${HoodieVectorSearchTableValuedFunction.FUNC_NAME}': query vector cannot be null")
     }
 
-    import org.apache.spark.sql.types._
     val arrayData = value.asInstanceOf[ArrayData]
     val numElements = arrayData.numElements()
     val elementType = expr.dataType.asInstanceOf[ArrayType].elementType
