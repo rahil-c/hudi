@@ -18,13 +18,13 @@
 package org.apache.spark.sql.execution.datasources.parquet
 
 import org.apache.hudi.{HoodieFileIndex, HoodiePartitionCDCFileGroupMapping, HoodiePartitionFileSliceMapping, HoodieSchemaConversionUtils, HoodieSparkUtils, HoodieTableSchema, SparkAdapterSupport, SparkFileFormatInternalRowReaderContext}
-import org.apache.hudi.avro.AvroSchemaUtils
 import org.apache.hudi.cdc.{CDCFileGroupIterator, HoodieCDCFileGroupSplit, HoodieCDCFileIndex}
 import org.apache.hudi.client.common.HoodieSparkEngineContext
 import org.apache.hudi.client.utils.SparkInternalSchemaConverter
 import org.apache.hudi.common.config.{HoodieMemoryConfig, TypedProperties}
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.HoodieFileFormat
+import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.common.schema.HoodieSchemaUtils
 import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient, ParquetTableSchemaResolver}
 import org.apache.hudi.common.table.read.HoodieFileGroupReader
@@ -35,6 +35,7 @@ import org.apache.hudi.exception.HoodieNotSupportedException
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.IOUtils
 import org.apache.hudi.io.storage.HoodieSparkParquetReader.ENABLE_LOGICAL_TIMESTAMP_REPAIR
+import org.apache.hudi.io.storage.VectorConversionUtils
 import org.apache.hudi.storage.StorageConfiguration
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration
 
@@ -47,7 +48,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.HoodieCatalystExpressionUtils.generateUnsafeProjection
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.JoinedRow
+import org.apache.spark.sql.catalyst.expressions.{JoinedRow, UnsafeProjection}
 import org.apache.spark.sql.execution.datasources.{OutputWriterFactory, PartitionedFile, SparkColumnarFileReader}
 import org.apache.spark.sql.execution.datasources.orc.OrcUtils
 import org.apache.spark.sql.execution.vectorized.{OffHeapColumnVector, OnHeapColumnVector}
@@ -117,6 +118,22 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
   private var supportReturningBatch = false
 
   /**
+   * Cached result of vector column detection keyed by schema identity.
+   * Avoids re-parsing metadata on repeated supportBatch / readBaseFile calls with the same schema.
+   */
+  @transient private var cachedVectorDetection: (StructType, Map[Int, HoodieSchema.Vector]) = _
+
+  private def detectVectorColumnsCached(schema: StructType): Map[Int, HoodieSchema.Vector] = {
+    if (cachedVectorDetection != null && (cachedVectorDetection._1 eq schema)) {
+      cachedVectorDetection._2
+    } else {
+      val result = detectVectorColumns(schema)
+      cachedVectorDetection = (schema, result)
+      result
+    }
+  }
+
+  /**
    * Checks if the file format supports vectorized reading, please refer to SPARK-40918.
    *
    * NOTE: for mor read, even for file-slice with only base file, we can read parquet file with vectorized read,
@@ -128,30 +145,38 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
    *
    */
   override def supportBatch(sparkSession: SparkSession, schema: StructType): Boolean = {
-    val conf = sparkSession.sessionState.conf
-    val parquetBatchSupported = ParquetUtils.isBatchReadSupportedForSchema(conf, schema) && supportBatchWithTableSchema
-    val orcBatchSupported = conf.orcVectorizedReaderEnabled &&
-      schema.forall(s => OrcUtils.supportColumnarReads(
-        s.dataType, sparkSession.sessionState.conf.orcVectorizedReaderNestedColumnEnabled))
-    // TODO: Implement columnar batch reading https://github.com/apache/hudi/issues/17736
-    val lanceBatchSupported = false
-
-    val supportBatch = if (isMultipleBaseFileFormatsEnabled) {
-      parquetBatchSupported && orcBatchSupported
-    } else if (hoodieFileFormat == HoodieFileFormat.PARQUET) {
-      parquetBatchSupported
-    } else if (hoodieFileFormat == HoodieFileFormat.ORC) {
-      orcBatchSupported
-    } else if (hoodieFileFormat == HoodieFileFormat.LANCE) {
-      lanceBatchSupported
+    // Vector columns are stored as FIXED_LEN_BYTE_ARRAY in Parquet but read as ArrayType in Spark.
+    // The binary→array conversion requires row-level access, so disable vectorized batch reading.
+    if (detectVectorColumnsCached(schema).nonEmpty) {
+      supportVectorizedRead = false
+      supportReturningBatch = false
+      false
     } else {
-      throw new HoodieNotSupportedException("Unsupported file format: " + hoodieFileFormat)
+      val conf = sparkSession.sessionState.conf
+      val parquetBatchSupported = ParquetUtils.isBatchReadSupportedForSchema(conf, schema) && supportBatchWithTableSchema
+      val orcBatchSupported = conf.orcVectorizedReaderEnabled &&
+        schema.forall(s => OrcUtils.supportColumnarReads(
+          s.dataType, sparkSession.sessionState.conf.orcVectorizedReaderNestedColumnEnabled))
+      // TODO: Implement columnar batch reading https://github.com/apache/hudi/issues/17736
+      val lanceBatchSupported = false
+
+      val supportBatch = if (isMultipleBaseFileFormatsEnabled) {
+        parquetBatchSupported && orcBatchSupported
+      } else if (hoodieFileFormat == HoodieFileFormat.PARQUET) {
+        parquetBatchSupported
+      } else if (hoodieFileFormat == HoodieFileFormat.ORC) {
+        orcBatchSupported
+      } else if (hoodieFileFormat == HoodieFileFormat.LANCE) {
+        lanceBatchSupported
+      } else {
+        throw new HoodieNotSupportedException("Unsupported file format: " + hoodieFileFormat)
+      }
+      supportVectorizedRead = !isIncremental && !isBootstrap && supportBatch
+      supportReturningBatch = !isMOR && supportVectorizedRead
+      logInfo(s"supportReturningBatch: $supportReturningBatch, supportVectorizedRead: $supportVectorizedRead, isIncremental: $isIncremental, " +
+        s"isBootstrap: $isBootstrap, superSupportBatch: $supportBatch")
+      supportReturningBatch
     }
-    supportVectorizedRead = !isIncremental && !isBootstrap && supportBatch
-    supportReturningBatch = !isMOR && supportVectorizedRead
-    logInfo(s"supportReturningBatch: $supportReturningBatch, supportVectorizedRead: $supportVectorizedRead, isIncremental: $isIncremental, " +
-      s"isBootstrap: $isBootstrap, superSupportBatch: $supportBatch")
-    supportReturningBatch
   }
 
   //for partition columns that we read from the file, we don't want them to be constant column vectors so we
@@ -398,21 +423,57 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     }
   }
 
+  private def detectVectorColumns(schema: StructType): Map[Int, HoodieSchema.Vector] =
+    SparkFileFormatInternalRowReaderContext.detectVectorColumnsFromMetadata(schema)
+
+  private def replaceVectorFieldsWithBinary(schema: StructType, vectorCols: Map[Int, HoodieSchema.Vector]): StructType =
+    SparkFileFormatInternalRowReaderContext.replaceVectorColumnsWithBinary(schema, vectorCols)
+
+  /**
+   * Wraps an iterator to convert binary VECTOR columns back to typed arrays.
+   * The read schema has BinaryType for vector columns; the target schema has ArrayType.
+   */
+  private def wrapWithVectorConversion(iter: Iterator[InternalRow],
+                                        readSchema: StructType,
+                                        targetSchema: StructType,
+                                        vectorCols: Map[Int, HoodieSchema.Vector]): Iterator[InternalRow] = {
+    val vectorProjection = UnsafeProjection.create(targetSchema)
+    val javaVectorCols: java.util.Map[Integer, HoodieSchema.Vector] =
+      vectorCols.map { case (k, v) => (Integer.valueOf(k), v) }.asJava
+    val mapper = VectorConversionUtils.buildRowMapper(readSchema, javaVectorCols, vectorProjection.apply(_))
+    iter.map(mapper.apply(_))
+  }
+
   // executor
   private def readBaseFile(file: PartitionedFile, parquetFileReader: SparkColumnarFileReader, requestedSchema: StructType,
                            remainingPartitionSchema: StructType, fixedPartitionIndexes: Set[Int], requiredSchema: StructType,
                            partitionSchema: StructType, outputSchema: StructType, filters: Seq[Filter],
                            storageConf: StorageConfiguration[Configuration]): Iterator[InternalRow] = {
-    if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {
+    // Detect vector columns in requiredSchema and create modified schemas with BinaryType.
+    // Each schema is detected independently because ordinals are relative to the schema being
+    // modified — outputSchema and requestedSchema may have vector columns at different positions
+    // than requiredSchema (e.g. when partition columns are interleaved).
+    val vectorCols = detectVectorColumns(requiredSchema)
+    val hasVectors = vectorCols.nonEmpty
+
+    // Compute per-schema ordinal maps before building modified schemas.
+    val outputVectorCols = if (hasVectors) detectVectorColumns(outputSchema) else Map.empty[Int, HoodieSchema.Vector]
+    val requestedVectorCols = if (hasVectors) detectVectorColumns(requestedSchema) else Map.empty[Int, HoodieSchema.Vector]
+
+    val modifiedRequiredSchema = if (hasVectors) replaceVectorFieldsWithBinary(requiredSchema, vectorCols) else requiredSchema
+    val modifiedOutputSchema = if (hasVectors) replaceVectorFieldsWithBinary(outputSchema, outputVectorCols) else outputSchema
+    val modifiedRequestedSchema = if (hasVectors) replaceVectorFieldsWithBinary(requestedSchema, requestedVectorCols) else requestedSchema
+
+    val rawIter = if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {
       //none of partition fields are read from the file, so the reader will do the appending for us
-      parquetFileReader.read(file, requiredSchema, partitionSchema, internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
+      parquetFileReader.read(file, modifiedRequiredSchema, partitionSchema, internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
     } else if (remainingPartitionSchema.fields.length == 0) {
       //we read all of the partition fields from the file
       val pfileUtils = sparkAdapter.getSparkPartitionedFileUtils
       //we need to modify the partitioned file so that the partition values are empty
       val modifiedFile = pfileUtils.createPartitionedFile(InternalRow.empty, pfileUtils.getPathFromPartitionedFile(file), file.start, file.length)
       //and we pass an empty schema for the partition schema
-      parquetFileReader.read(modifiedFile, outputSchema, new StructType(), internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
+      parquetFileReader.read(modifiedFile, modifiedOutputSchema, new StructType(), internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
     } else {
       //need to do an additional projection here. The case in mind is that partition schema is "a,b,c" mandatoryFields is "a,c",
       //then we will read (dataSchema + a + c) and append b. So the final schema will be (data schema + a + c +b)
@@ -420,8 +481,20 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
       val pfileUtils = sparkAdapter.getSparkPartitionedFileUtils
       val partitionValues = getFixedPartitionValues(file.partitionValues, partitionSchema, fixedPartitionIndexes)
       val modifiedFile = pfileUtils.createPartitionedFile(partitionValues, pfileUtils.getPathFromPartitionedFile(file), file.start, file.length)
-      val iter = parquetFileReader.read(modifiedFile, requestedSchema, remainingPartitionSchema, internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
-      projectIter(iter, StructType(requestedSchema.fields ++ remainingPartitionSchema.fields), outputSchema)
+      val iter = parquetFileReader.read(modifiedFile, modifiedRequestedSchema, remainingPartitionSchema, internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
+      projectIter(iter, StructType(modifiedRequestedSchema.fields ++ remainingPartitionSchema.fields), modifiedOutputSchema)
+    }
+
+    if (hasVectors) {
+      // The raw iterator has BinaryType for vector columns; convert back to ArrayType
+      val readSchema = if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {
+        StructType(modifiedRequiredSchema.fields ++ partitionSchema.fields)
+      } else {
+        modifiedOutputSchema
+      }
+      wrapWithVectorConversion(rawIter, readSchema, outputSchema, outputVectorCols)
+    } else {
+      rawIter
     }
   }
 

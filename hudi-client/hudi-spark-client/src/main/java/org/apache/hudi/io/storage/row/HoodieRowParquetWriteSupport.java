@@ -69,6 +69,7 @@ import org.apache.spark.sql.types.YearMonthIntervalType;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.apache.spark.util.VersionUtils;
 
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -305,6 +306,40 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
         }
         recordConsumer.addBinary(Binary.fromReusedByteArray(fixedLengthBytes, 0, numBytes));
       };
+    } else if (dataType instanceof ArrayType
+            && resolvedSchema != null
+            && resolvedSchema.getType() == HoodieSchemaType.VECTOR) {
+      HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) resolvedSchema;
+      int dimension = vectorSchema.getDimension();
+      HoodieSchema.Vector.VectorElementType elemType = vectorSchema.getVectorElementType();
+      int bufferSize = Math.multiplyExact(dimension, elemType.getElementSize());
+      ByteBuffer buffer = ByteBuffer.allocate(bufferSize).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER);
+      return (row, ordinal) -> {
+        ArrayData array = row.getArray(ordinal);
+        ValidationUtils.checkArgument(array.numElements() == dimension,
+            () -> String.format("Vector dimension mismatch: schema expects %d elements but got %d", dimension, array.numElements()));
+        buffer.clear();
+        switch (elemType) {
+          case FLOAT:
+            for (int i = 0; i < dimension; i++) {
+              buffer.putFloat(array.getFloat(i));
+            }
+            break;
+          case DOUBLE:
+            for (int i = 0; i < dimension; i++) {
+              buffer.putDouble(array.getDouble(i));
+            }
+            break;
+          case INT8:
+            for (int i = 0; i < dimension; i++) {
+              buffer.put(array.getByte(i));
+            }
+            break;
+          default:
+            throw new UnsupportedOperationException("Unsupported vector element type: " + elemType);
+        }
+        recordConsumer.addBinary(Binary.fromReusedByteArray(buffer.array()));
+      };
     } else if (dataType instanceof ArrayType) {
       ValueWriter elementWriter = makeWriter(resolvedSchema == null ? null : resolvedSchema.getElementType(), ((ArrayType) dataType).elementType());
       if (!writeLegacyListFormat) {
@@ -518,6 +553,14 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
           .as(LogicalTypeAnnotation.decimalType(scale, precision))
           .length(Decimal.minBytesForPrecision()[precision])
           .named(structField.name());
+    } else if (dataType instanceof ArrayType
+            && resolvedSchema != null
+            && resolvedSchema.getType() == HoodieSchemaType.VECTOR) {
+      HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) resolvedSchema;
+      int fixedSize = vectorSchema.getDimension()
+              * vectorSchema.getVectorElementType().getElementSize();
+      return Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition)
+              .length(fixedSize).named(structField.name());
     } else if (dataType instanceof ArrayType) {
       ArrayType arrayType = (ArrayType) dataType;
       DataType elementType = arrayType.elementType();

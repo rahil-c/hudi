@@ -64,7 +64,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 import scala.Option$;
 
@@ -142,10 +144,20 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
   public ClosableIterator<UnsafeRow> getUnsafeRowIterator(HoodieSchema requestedSchema, List<Filter> readFilters) throws IOException {
     HoodieSchema nonNullSchema = requestedSchema.getNonNullType();
     StructType structSchema = HoodieInternalRowUtils.getCachedSchema(nonNullSchema);
+
+    // Detect vector columns: ordinal → Vector schema
+    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = VectorConversionUtils.detectVectorColumns(nonNullSchema);
+
+    // For vector columns, replace ArrayType(FloatType) with BinaryType in the read schema
+    // so SparkBasicSchemaEvolution sees matching types (file has FIXED_LEN_BYTE_ARRAY → BinaryType)
+    StructType readStructSchema = vectorColumnInfo.isEmpty()
+        ? structSchema
+        : VectorConversionUtils.replaceVectorColumnsWithBinary(structSchema, vectorColumnInfo);
+
     Option<MessageType> messageSchema = Option.of(getAvroSchemaConverter(storage.getConf().unwrapAs(Configuration.class)).convert(nonNullSchema));
     boolean enableTimestampFieldRepair = storage.getConf().getBoolean(ENABLE_LOGICAL_TIMESTAMP_REPAIR, true);
     StructType dataStructType = convertToStruct(enableTimestampFieldRepair ? SchemaRepair.repairLogicalTypes(getFileSchema(), messageSchema) : getFileSchema());
-    SparkBasicSchemaEvolution evolution = new SparkBasicSchemaEvolution(dataStructType, structSchema, SQLConf.get().sessionLocalTimeZone());
+    SparkBasicSchemaEvolution evolution = new SparkBasicSchemaEvolution(dataStructType, readStructSchema, SQLConf.get().sessionLocalTimeZone());
     String readSchemaJson = evolution.getRequestSchema().json();
     SQLConf sqlConf = SQLConf.get();
     storage.getConf().set(ParquetReadSupport.PARQUET_READ_SCHEMA, readSchemaJson);
@@ -184,6 +196,18 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
     UnsafeProjection projection = evolution.generateUnsafeProjection();
     ParquetReaderIterator<InternalRow> parquetReaderIterator = new ParquetReaderIterator<>(reader);
     CloseableMappingIterator<InternalRow, UnsafeRow> projectedIterator = new CloseableMappingIterator<>(parquetReaderIterator, projection::apply);
+
+    if (!vectorColumnInfo.isEmpty()) {
+      // Post-process: convert binary VECTOR columns back to typed arrays
+      UnsafeProjection vectorProjection = UnsafeProjection.create(structSchema);
+      Function<InternalRow, InternalRow> mapper =
+          VectorConversionUtils.buildRowMapper(readStructSchema, vectorColumnInfo, vectorProjection::apply);
+      CloseableMappingIterator<UnsafeRow, UnsafeRow> vectorIterator =
+          new CloseableMappingIterator<>(projectedIterator, row -> (UnsafeRow) mapper.apply(row));
+      readerIterators.add(vectorIterator);
+      return vectorIterator;
+    }
+
     readerIterators.add(projectedIterator);
     return projectedIterator;
   }

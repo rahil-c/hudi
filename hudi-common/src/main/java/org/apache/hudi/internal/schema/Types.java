@@ -18,6 +18,7 @@
 
 package org.apache.hudi.internal.schema;
 
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.internal.schema.Type.NestedType;
 import org.apache.hudi.internal.schema.Type.PrimitiveType;
 
@@ -295,6 +296,75 @@ public class Types {
     @Override
     public int hashCode() {
       return Objects.hash(FixedType.class, size);
+    }
+  }
+
+  /**
+   * Vector type that preserves dimension, element type, and storage backing
+   * through InternalSchema round-trips.
+   *
+   * <p>This class is part of the InternalSchema type system (separate from HoodieSchema)
+   * and follows the same pattern as {@link FixedType}, {@link DecimalTypeFixed}, etc.
+   * It cannot be replaced with {@code HoodieSchema.Vector} because they belong to
+   * different type hierarchies.
+   */
+  public static class VectorType extends PrimitiveType {
+    private final int dimension;
+    private final String elementType;
+    private final String storageBacking;
+
+    public static VectorType get(int dimension, String elementType, String storageBacking) {
+      return new VectorType(dimension, elementType, storageBacking);
+    }
+
+    private VectorType(int dimension, String elementType, String storageBacking) {
+      // Validate that the strings correspond to known enum values to fail fast on typos
+      HoodieSchema.Vector.VectorElementType.fromString(elementType);
+      HoodieSchema.Vector.StorageBacking.fromString(storageBacking);
+      this.dimension = dimension;
+      this.elementType = elementType;
+      this.storageBacking = storageBacking;
+    }
+
+    public int getDimension() {
+      return dimension;
+    }
+
+    public String getElementType() {
+      return elementType;
+    }
+
+    public String getStorageBacking() {
+      return storageBacking;
+    }
+
+    @Override
+    public TypeID typeId() {
+      return TypeID.VECTOR;
+    }
+
+    @Override
+    public String toString() {
+      return String.format("vector[%d, %s, %s]", dimension, elementType, storageBacking);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      } else if (!(o instanceof VectorType)) {
+        return false;
+      }
+
+      VectorType that = (VectorType) o;
+      return dimension == that.dimension
+          && Objects.equals(elementType, that.elementType)
+          && Objects.equals(storageBacking, that.storageBacking);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(VectorType.class, dimension, elementType, storageBacking);
     }
   }
 

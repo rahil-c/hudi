@@ -314,6 +314,12 @@ public class InternalSchemaConverter {
         return Types.StringType.get();
       case FIXED:
         return Types.FixedType.getFixed(schema.getFixedSize());
+      case VECTOR:
+        HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) schema;
+        return Types.VectorType.get(
+            vectorSchema.getDimension(),
+            vectorSchema.getVectorElementType().name(),
+            vectorSchema.getStorageBacking().name());
       case BYTES:
         return Types.BinaryType.get();
       case UUID:
@@ -536,6 +542,13 @@ public class InternalSchemaConverter {
         //       with the "fixed" name to stay compatible w/ [[SchemaConverters]]
         String name = recordName + FIELD_NAME_DELIMITER + "fixed";
         return HoodieSchema.createFixed(name, null, null, fixed.getFixedSize());
+      }
+
+      case VECTOR: {
+        Types.VectorType vector = (Types.VectorType) primitive;
+        return HoodieSchema.createVector(
+            vector.getDimension(),
+            HoodieSchema.Vector.VectorElementType.fromString(vector.getElementType()));
       }
 
       case DECIMAL:
