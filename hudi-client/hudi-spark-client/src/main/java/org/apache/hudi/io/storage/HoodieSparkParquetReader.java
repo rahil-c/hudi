@@ -47,7 +47,6 @@ import org.apache.parquet.schema.SchemaRepair;
 import org.apache.spark.sql.HoodieInternalRowUtils;
 import org.apache.spark.sql.avro.HoodieSparkSchemaConverters;
 import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.catalyst.util.RebaseDateTime;
@@ -67,6 +66,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 import scala.Option$;
 
@@ -200,15 +200,10 @@ public class HoodieSparkParquetReader implements HoodieSparkFileReader {
     if (!vectorColumnInfo.isEmpty()) {
       // Post-process: convert binary VECTOR columns back to typed arrays
       UnsafeProjection vectorProjection = UnsafeProjection.create(structSchema);
-      int numFields = readStructSchema.fields().length;
-      StructType finalReadSchema = readStructSchema;
-      // Reuse a single GenericInternalRow across iterations; UnsafeProjection.apply() copies the data
-      GenericInternalRow converted = new GenericInternalRow(numFields);
+      Function<InternalRow, InternalRow> mapper =
+          VectorConversionUtils.buildRowMapper(readStructSchema, vectorColumnInfo, vectorProjection::apply);
       CloseableMappingIterator<UnsafeRow, UnsafeRow> vectorIterator =
-          new CloseableMappingIterator<>(projectedIterator, row -> {
-            VectorConversionUtils.convertRowVectorColumns(row, converted, finalReadSchema, vectorColumnInfo);
-            return vectorProjection.apply(converted);
-          });
+          new CloseableMappingIterator<>(projectedIterator, row -> (UnsafeRow) mapper.apply(row));
       readerIterators.add(vectorIterator);
       return vectorIterator;
     }

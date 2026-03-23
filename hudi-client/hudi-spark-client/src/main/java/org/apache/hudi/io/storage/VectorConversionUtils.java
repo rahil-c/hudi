@@ -35,6 +35,7 @@ import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
 
@@ -175,6 +176,36 @@ public final class VectorConversionUtils {
         throw new UnsupportedOperationException(
             "Unsupported vector element type: " + elemType);
     }
+  }
+
+  /**
+   * Returns a {@link Function} that converts a single {@link InternalRow} by converting binary
+   * vector columns back to typed arrays and then applying the given projection callback.
+   *
+   * <p>Ordinals in {@code vectorColumns} must be relative to {@code readSchema} — the schema
+   * that has {@code BinaryType} for vector columns (as produced by
+   * {@link #replaceVectorColumnsWithBinary}).
+   *
+   * <p><b>Thread safety:</b> The returned function is NOT thread-safe; it reuses a single
+   * {@link GenericInternalRow} buffer across calls. Each call to this factory creates its own
+   * buffer, so separate functions returned by separate calls are independent.
+   *
+   * @param readSchema         the Spark schema of incoming rows (BinaryType for vector columns)
+   * @param vectorColumns      map of ordinal → Vector schema for vector columns, keyed by
+   *                           ordinals relative to {@code readSchema}
+   * @param projectionCallback called with the converted {@link GenericInternalRow}; must copy
+   *                           any data it needs to retain (e.g. {@code UnsafeProjection::apply})
+   * @return a function that converts one row and returns the projected result
+   */
+  public static Function<InternalRow, InternalRow> buildRowMapper(
+      StructType readSchema,
+      Map<Integer, HoodieSchema.Vector> vectorColumns,
+      Function<GenericInternalRow, InternalRow> projectionCallback) {
+    GenericInternalRow converted = new GenericInternalRow(readSchema.fields().length);
+    return row -> {
+      convertRowVectorColumns(row, converted, readSchema, vectorColumns);
+      return projectionCallback.apply(converted);
+    };
   }
 
   /**

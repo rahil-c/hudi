@@ -893,6 +893,261 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     })
   }
 
+  @Test
+  def testPartitionedTableWithVector(): Unit = {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
+      .build()
+
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata),
+      StructField("label", StringType, nullable = true),
+      StructField("category", StringType, nullable = false)
+    ))
+
+    // Two partitions: "catA" and "catB"
+    val data = (0 until 10).map { i =>
+      val category = if (i % 2 == 0) "catA" else "catB"
+      Row(s"key_$i", Array.fill(4)(i.toFloat).toSeq, s"label_$i", category)
+    }
+
+    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "id")
+      .option("hoodie.datasource.write.partitionpath.field", "category")
+      .option(TABLE_NAME.key, "partitioned_vector_test")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .mode(SaveMode.Overwrite)
+      .save(basePath + "/partitioned")
+
+    val readDf = spark.read.format("hudi").load(basePath + "/partitioned")
+    assertEquals(10, readDf.count())
+
+    // Collect all rows and verify each row's vector matches its key
+    val rowMap = readDf.select("id", "embedding", "category").collect()
+      .map(r => r.getString(0) -> (r.getSeq[Float](1), r.getString(2)))
+      .toMap
+
+    for (i <- 0 until 10) {
+      val (vec, cat) = rowMap(s"key_$i")
+      val expectedCat = if (i % 2 == 0) "catA" else "catB"
+      assertEquals(4, vec.size, s"key_$i dimension wrong")
+      assertTrue(vec.forall(_ == i.toFloat),
+        s"key_$i: expected ${i.toFloat} but got ${vec.head} (ordinal mismatch?)")
+      assertEquals(expectedCat, cat, s"key_$i partition value wrong")
+    }
+
+    // Also verify projection of vector-only across partitions
+    val vecOnly = readDf.select("id", "embedding").collect()
+      .map(r => r.getString(0) -> r.getSeq[Float](1)).toMap
+    for (i <- 0 until 10) {
+      assertTrue(vecOnly(s"key_$i").forall(_ == i.toFloat),
+        s"key_$i projected vector wrong")
+    }
+  }
+
+  @Test
+  def testVectorAsLastColumn(): Unit = {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
+      .build()
+
+    // Vector is at position 4 (last), after several non-vector columns
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("col_a", IntegerType, nullable = true),
+      StructField("col_b", StringType, nullable = true),
+      StructField("col_c", DoubleType, nullable = true),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata)
+    ))
+
+    val data = (0 until 10).map { i =>
+      Row(s"key_$i", i, s"str_$i", i.toDouble * 1.5, Array.fill(4)(i.toFloat).toSeq)
+    }
+
+    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "id")
+      .option(TABLE_NAME.key, "last_col_vector_test")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .mode(SaveMode.Overwrite)
+      .save(basePath + "/last_col")
+
+    val readDf = spark.read.format("hudi").load(basePath + "/last_col")
+    assertEquals(10, readDf.count())
+
+    // Read all columns: verify vector and non-vector columns correct
+    val allRows = readDf.select("id", "col_a", "col_b", "embedding").collect()
+      .map(r => r.getString(0) -> r).toMap
+
+    for (i <- 0 until 10) {
+      val row = allRows(s"key_$i")
+      assertEquals(i, row.getInt(1), s"col_a wrong for key_$i")
+      assertEquals(s"str_$i", row.getString(2), s"col_b wrong for key_$i")
+      val vec = row.getSeq[Float](3)
+      assertEquals(4, vec.size, s"key_$i dimension wrong")
+      assertTrue(vec.forall(_ == i.toFloat),
+        s"key_$i vector wrong (ordinal mismatch?): expected ${i.toFloat}, got ${vec.head}")
+    }
+
+    // Project only the vector column (ordinal shifts to 0 in projected schema)
+    val embOnly = readDf.select("id", "embedding").collect()
+      .map(r => r.getString(0) -> r.getSeq[Float](1)).toMap
+    for (i <- 0 until 10) {
+      assertTrue(embOnly(s"key_$i").forall(_ == i.toFloat),
+        s"key_$i projected-only vector wrong")
+    }
+  }
+
+  /**
+   * Schema evolution: adding a new non-vector column to a table that already has a vector column
+   * should succeed. Old rows get null for the new column; vector data must be intact in all rows.
+   */
+  @Test
+  def testSchemaEvolutionAddColumnToVectorTable(): Unit = {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
+      .build()
+
+    val schemaV1 = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata),
+      StructField("ts", LongType, nullable = false)
+    ))
+
+    val data1 = (0 until 5).map { i =>
+      Row(s"key_$i", Array.fill(4)(i.toFloat).toSeq, i.toLong)
+    }
+    spark.createDataFrame(spark.sparkContext.parallelize(data1), schemaV1)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "ts")
+      .option(TABLE_NAME.key, "schema_evolve_add_col_test")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .option("hoodie.schema.on.read.enable", "true")
+      .mode(SaveMode.Overwrite)
+      .save(basePath + "/schema_evolve_add")
+
+    // V2: add a new non-vector column
+    val schemaV2 = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata),
+      StructField("ts", LongType, nullable = false),
+      StructField("new_col", StringType, nullable = true)
+    ))
+
+    val data2 = (5 until 10).map { i =>
+      Row(s"key_$i", Array.fill(4)(i.toFloat).toSeq, i.toLong, s"v2_$i")
+    }
+    spark.createDataFrame(spark.sparkContext.parallelize(data2), schemaV2)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "ts")
+      .option(TABLE_NAME.key, "schema_evolve_add_col_test")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .option("hoodie.schema.on.read.enable", "true")
+      .mode(SaveMode.Append)
+      .save(basePath + "/schema_evolve_add")
+
+    val readDf = spark.read.format("hudi")
+      .option("hoodie.schema.on.read.enable", "true")
+      .load(basePath + "/schema_evolve_add")
+    assertEquals(10, readDf.count())
+
+    val rowMap = readDf.select("id", "embedding", "new_col").collect()
+      .map(r => r.getString(0) -> r).toMap
+
+    // Old rows (key_0..key_4): vector intact, new_col is null
+    for (i <- 0 until 5) {
+      val row = rowMap(s"key_$i")
+      val vec = row.getSeq[Float](1)
+      assertEquals(4, vec.size)
+      assertTrue(vec.forall(_ == i.toFloat), s"key_$i vector corrupted after schema evolution")
+      assertTrue(row.isNullAt(2), s"key_$i new_col should be null")
+    }
+    // New rows (key_5..key_9): vector intact, new_col has value
+    for (i <- 5 until 10) {
+      val row = rowMap(s"key_$i")
+      val vec = row.getSeq[Float](1)
+      assertEquals(4, vec.size)
+      assertTrue(vec.forall(_ == i.toFloat), s"key_$i vector corrupted after schema evolution")
+      assertEquals(s"v2_$i", row.getString(2), s"key_$i new_col wrong")
+    }
+  }
+
+  /**
+   * Deleting records from a table with a vector column should not affect remaining records.
+   */
+  @Test
+  def testDeleteFromVectorTable(): Unit = {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
+      .build()
+
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata),
+      StructField("ts", LongType, nullable = false)
+    ))
+
+    val data = (0 until 10).map { i =>
+      Row(s"key_$i", Array.fill(4)(i.toFloat).toSeq, i.toLong)
+    }
+    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "ts")
+      .option(TABLE_NAME.key, "delete_vector_test")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .mode(SaveMode.Overwrite)
+      .save(basePath + "/delete_vec")
+
+    // Delete key_2, key_5, key_8
+    val deletedKeys = Set("key_2", "key_5", "key_8")
+    val deleteSchema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("ts", LongType, nullable = false)
+    ))
+    val deleteData = deletedKeys.toSeq.map(k => Row(k, 999L))
+    spark.createDataFrame(spark.sparkContext.parallelize(deleteData), deleteSchema)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "ts")
+      .option(TABLE_NAME.key, "delete_vector_test")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .option(OPERATION.key, "delete")
+      .mode(SaveMode.Append)
+      .save(basePath + "/delete_vec")
+
+    val readDf = spark.read.format("hudi").load(basePath + "/delete_vec")
+    assertEquals(7, readDf.count(), "Deleted rows should be gone")
+
+    val rowMap = readDf.select("id", "embedding").collect()
+      .map(r => r.getString(0) -> r.getSeq[Float](1)).toMap
+
+    // Deleted keys must not appear
+    deletedKeys.foreach { k =>
+      assertFalse(rowMap.contains(k), s"$k should have been deleted")
+    }
+
+    // Remaining keys must have correct vectors
+    val remaining = (0 until 10).map(i => s"key_$i").filterNot(deletedKeys.contains)
+    remaining.foreach { k =>
+      val i = k.stripPrefix("key_").toInt
+      val vec = rowMap(k)
+      assertEquals(4, vec.size, s"$k dimension wrong")
+      assertTrue(vec.forall(_ == i.toFloat), s"$k vector wrong after delete")
+    }
+  }
+
   private def assertArrayEquals(expected: Array[Byte], actual: Array[Byte], message: String): Unit = {
     assertEquals(expected.length, actual.length, s"$message: length mismatch")
     expected.zip(actual).zipWithIndex.foreach { case ((e, a), idx) =>

@@ -41,7 +41,6 @@ import org.apache.spark.sql.execution.datasources.{PartitionedFile, SparkColumna
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.hudi.SparkAdapter
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
 import org.apache.spark.sql.types.{LongType, MetadataBuilder, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 
@@ -344,18 +343,12 @@ object SparkFileFormatInternalRowReaderContext {
       iterator: ClosableIterator[InternalRow],
       vectorColumns: Map[Int, HoodieSchema.Vector],
       readSchema: StructType): ClosableIterator[InternalRow] = {
-    val numFields = readSchema.fields.length
-    // Reuse a single GenericInternalRow across iterations to reduce GC pressure
-    val result = new GenericInternalRow(numFields)
-    val javaVectorColumns: java.util.Map[Integer, HoodieSchema.Vector] =
+    val javaVectorCols: java.util.Map[Integer, HoodieSchema.Vector] =
       vectorColumns.map { case (k, v) => (Integer.valueOf(k), v) }.asJava
+    val mapper = VectorConversionUtils.buildRowMapper(readSchema, javaVectorCols, row => row)
     new ClosableIterator[InternalRow] {
       override def hasNext: Boolean = iterator.hasNext
-      override def next(): InternalRow = {
-        val row = iterator.next()
-        VectorConversionUtils.convertRowVectorColumns(row, result, readSchema, javaVectorColumns)
-        result
-      }
+      override def next(): InternalRow = mapper.apply(iterator.next())
       override def close(): Unit = iterator.close()
     }
   }
