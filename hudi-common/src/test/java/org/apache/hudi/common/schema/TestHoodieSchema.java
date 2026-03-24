@@ -2272,6 +2272,18 @@ public class TestHoodieSchema {
     HoodieSchema.Vector vector = (HoodieSchema.Vector) parsed;
     assertEquals(512, vector.getDimension());
     assertEquals(HoodieSchema.Vector.VectorElementType.DOUBLE, vector.getVectorElementType());
+    assertEquals(HoodieSchema.Vector.StorageBacking.FIXED_BYTES, vector.getStorageBacking());
+  }
+
+  @Test
+  public void testParseTypeDescriptorVectorWithStorageBacking() {
+    // Explicit storageBacking as 3rd param
+    HoodieSchema parsed = HoodieSchema.parseTypeDescriptor("VECTOR(128, FLOAT, FIXED_BYTES)");
+    assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
+    HoodieSchema.Vector vector = (HoodieSchema.Vector) parsed;
+    assertEquals(128, vector.getDimension());
+    assertEquals(HoodieSchema.Vector.VectorElementType.FLOAT, vector.getVectorElementType());
+    assertEquals(HoodieSchema.Vector.StorageBacking.FIXED_BYTES, vector.getStorageBacking());
   }
 
   @Test
@@ -2289,6 +2301,10 @@ public class TestHoodieSchema {
     assertEquals(HoodieSchemaType.VECTOR, parsed.getType());
     assertEquals(256, parsedVector.getDimension());
     assertEquals(HoodieSchema.Vector.VectorElementType.FLOAT, parsedVector.getVectorElementType());
+    assertEquals(HoodieSchema.Vector.StorageBacking.FIXED_BYTES, parsedVector.getStorageBacking());
+
+    // Default backing should not appear in descriptor string
+    assertFalse(typeString.contains("FIXED_BYTES"), "Default storageBacking should be omitted from descriptor");
 
     // Non-default element type round-trip
     HoodieSchema.Vector vectorDouble = HoodieSchema.createVector(64, HoodieSchema.Vector.VectorElementType.DOUBLE);
@@ -2299,6 +2315,7 @@ public class TestHoodieSchema {
     assertEquals(HoodieSchemaType.VECTOR, parsedDouble.getType());
     assertEquals(64, parsedDoubleVector.getDimension());
     assertEquals(HoodieSchema.Vector.VectorElementType.DOUBLE, parsedDoubleVector.getVectorElementType());
+    assertEquals(HoodieSchema.Vector.StorageBacking.FIXED_BYTES, parsedDoubleVector.getStorageBacking());
   }
 
   @Test
@@ -2318,11 +2335,14 @@ public class TestHoodieSchema {
     assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR"));
     assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR()"));
 
-    // Too many parameters
-    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(128, FLOAT, extra)"));
+    // Too many parameters (4+)
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(128, FLOAT, FIXED_BYTES, extra)"));
 
     // Invalid element type
     assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(128, INVALID)"));
+
+    // Invalid storage backing
+    assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(128, FLOAT, UNKNOWN_BACKING)"));
 
     // Zero and negative dimensions
     assertThrows(IllegalArgumentException.class, () -> HoodieSchema.parseTypeDescriptor("VECTOR(0)"));

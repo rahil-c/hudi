@@ -548,7 +548,8 @@ public class InternalSchemaConverter {
         Types.VectorType vector = (Types.VectorType) primitive;
         return HoodieSchema.createVector(
             vector.getDimension(),
-            HoodieSchema.Vector.VectorElementType.fromString(vector.getElementType()));
+            HoodieSchema.Vector.VectorElementType.fromString(vector.getElementType()),
+            HoodieSchema.Vector.StorageBacking.fromString(vector.getStorageBacking()));
       }
 
       case DECIMAL:

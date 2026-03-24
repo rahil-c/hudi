@@ -430,6 +430,15 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     SparkFileFormatInternalRowReaderContext.replaceVectorColumnsWithBinary(schema, vectorCols)
 
   /**
+   * Detects vector columns and replaces them with BinaryType in one step.
+   * @return (modified schema with BinaryType for vectors, vector column ordinal map)
+   */
+  private def withVectorRewrite(schema: StructType): (StructType, Map[Int, HoodieSchema.Vector]) = {
+    val vecs = detectVectorColumns(schema)
+    if (vecs.nonEmpty) (replaceVectorFieldsWithBinary(schema, vecs), vecs) else (schema, vecs)
+  }
+
+  /**
    * Wraps an iterator to convert binary VECTOR columns back to typed arrays.
    * The read schema has BinaryType for vector columns; the target schema has ArrayType.
    */
@@ -449,20 +458,14 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
                            remainingPartitionSchema: StructType, fixedPartitionIndexes: Set[Int], requiredSchema: StructType,
                            partitionSchema: StructType, outputSchema: StructType, filters: Seq[Filter],
                            storageConf: StorageConfiguration[Configuration]): Iterator[InternalRow] = {
-    // Detect vector columns in requiredSchema and create modified schemas with BinaryType.
+    // Detect vector columns and create modified schemas with BinaryType.
     // Each schema is detected independently because ordinals are relative to the schema being
     // modified — outputSchema and requestedSchema may have vector columns at different positions
     // than requiredSchema (e.g. when partition columns are interleaved).
-    val vectorCols = detectVectorColumns(requiredSchema)
+    val (modifiedRequiredSchema, vectorCols) = withVectorRewrite(requiredSchema)
     val hasVectors = vectorCols.nonEmpty
-
-    // Compute per-schema ordinal maps before building modified schemas.
-    val outputVectorCols = if (hasVectors) detectVectorColumns(outputSchema) else Map.empty[Int, HoodieSchema.Vector]
-    val requestedVectorCols = if (hasVectors) detectVectorColumns(requestedSchema) else Map.empty[Int, HoodieSchema.Vector]
-
-    val modifiedRequiredSchema = if (hasVectors) replaceVectorFieldsWithBinary(requiredSchema, vectorCols) else requiredSchema
-    val modifiedOutputSchema = if (hasVectors) replaceVectorFieldsWithBinary(outputSchema, outputVectorCols) else outputSchema
-    val modifiedRequestedSchema = if (hasVectors) replaceVectorFieldsWithBinary(requestedSchema, requestedVectorCols) else requestedSchema
+    val (modifiedOutputSchema, outputVectorCols) = if (hasVectors) withVectorRewrite(outputSchema) else (outputSchema, Map.empty[Int, HoodieSchema.Vector])
+    val (modifiedRequestedSchema, _) = if (hasVectors) withVectorRewrite(requestedSchema) else (requestedSchema, Map.empty[Int, HoodieSchema.Vector])
 
     val rawIter = if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {
       //none of partition fields are read from the file, so the reader will do the appending for us

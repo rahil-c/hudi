@@ -562,8 +562,8 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
             && resolvedSchema != null
             && resolvedSchema.getType() == HoodieSchemaType.VECTOR) {
       HoodieSchema.Vector vectorSchema = (HoodieSchema.Vector) resolvedSchema;
-      int fixedSize = vectorSchema.getDimension()
-              * vectorSchema.getVectorElementType().getElementSize();
+      int fixedSize = Math.multiplyExact(vectorSchema.getDimension(),
+              vectorSchema.getVectorElementType().getElementSize());
       return Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition)
               .length(fixedSize).named(structField.name());
     } else if (dataType instanceof ArrayType) {

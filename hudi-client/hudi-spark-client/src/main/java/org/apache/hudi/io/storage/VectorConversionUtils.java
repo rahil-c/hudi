@@ -24,7 +24,6 @@ import org.apache.hudi.common.schema.HoodieSchemaType;
 
 import org.apache.spark.sql.catalyst.util.GenericArrayData;
 import org.apache.spark.sql.types.BinaryType$;
-import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -119,7 +118,9 @@ public final class VectorConversionUtils {
     StructField[] newFields = new StructField[fields.length];
     for (int i = 0; i < fields.length; i++) {
       if (vectorColumns.containsKey(i)) {
-        newFields[i] = new StructField(fields[i].name(), BinaryType$.MODULE$, fields[i].nullable(), Metadata.empty());
+        // Preserve the original field metadata (including hudi_type) so that downstream code
+        // calling detectVectorColumnsFromMetadata on the modified schema still finds vectors.
+        newFields[i] = new StructField(fields[i].name(), BinaryType$.MODULE$, fields[i].nullable(), fields[i].metadata());
       } else {
         newFields[i] = fields[i];
       }

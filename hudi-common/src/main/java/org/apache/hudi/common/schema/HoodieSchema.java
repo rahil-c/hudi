@@ -115,9 +115,9 @@ public class HoodieSchema implements Serializable {
         if (params.isEmpty()) {
           throw new IllegalArgumentException("VECTOR type descriptor must include a dimension parameter");
         }
-        if (params.size() > 2) {
+        if (params.size() > 3) {
           throw new IllegalArgumentException(
-              "VECTOR type descriptor supports at most 2 parameters: dimension and optional element type");
+              "VECTOR type descriptor supports at most 3 parameters: dimension, optional element type, and optional storage backing");
         }
         int dimension;
         try {
@@ -128,7 +128,10 @@ public class HoodieSchema implements Serializable {
         Vector.VectorElementType elementType = params.size() > 1
             ? Vector.VectorElementType.fromString(params.get(1))
             : Vector.VectorElementType.FLOAT;
-        return createVector(dimension, elementType);
+        Vector.StorageBacking backing = params.size() > 2
+            ? Vector.StorageBacking.fromString(params.get(2))
+            : Vector.StorageBacking.FIXED_BYTES;
+        return createVector(dimension, elementType, backing);
       case BLOB:
         if (!params.isEmpty()) {
           throw new IllegalArgumentException(
@@ -806,22 +809,50 @@ public class HoodieSchema implements Serializable {
    * @return new HoodieSchema.Vector
    */
   public static HoodieSchema.Vector createVector(int dimension, Vector.VectorElementType elementType) {
+    return createVector(dimension, elementType, Vector.StorageBacking.FIXED_BYTES);
+  }
+
+  /**
+   * Creates Vector schema with custom dimension, element type, and storage backing.
+   *
+   * @param dimension vector dimension (must be > 0)
+   * @param elementType element type
+   * @param storageBacking physical storage format
+   * @return new HoodieSchema.Vector
+   */
+  public static HoodieSchema.Vector createVector(int dimension, Vector.VectorElementType elementType,
+                                                  Vector.StorageBacking storageBacking) {
     String vectorName = Vector.DEFAULT_NAME + "_" + elementType.name().toLowerCase() + "_" + dimension;
-    return createVector(vectorName, dimension, elementType);
+    return createVector(vectorName, dimension, elementType, storageBacking);
   }
 
   /**
    * Creates Vector schema with custom name, dimension, and element type.
+   * Defaults to {@link Vector.StorageBacking#FIXED_BYTES}.
    *
    * @param name FIXED type name (must not be null or empty)
    * @param dimension vector dimension (must be > 0)
-   * @param elementType element type (use {@link Vector.VectorElementType#FLOAT} or {@link Vector.VectorElementType#DOUBLE})
+   * @param elementType element type
    * @return new HoodieSchema.Vector
    */
   public static HoodieSchema.Vector createVector(String name, int dimension, Vector.VectorElementType elementType) {
+    return createVector(name, dimension, elementType, Vector.StorageBacking.FIXED_BYTES);
+  }
+
+  /**
+   * Creates Vector schema with custom name, dimension, element type, and storage backing.
+   *
+   * @param name FIXED type name (must not be null or empty)
+   * @param dimension vector dimension (must be > 0)
+   * @param elementType element type
+   * @param storageBacking physical storage format
+   * @return new HoodieSchema.Vector
+   */
+  public static HoodieSchema.Vector createVector(String name, int dimension, Vector.VectorElementType elementType,
+                                                  Vector.StorageBacking storageBacking) {
     ValidationUtils.checkArgument(name != null && !name.isEmpty(),
         () -> "Vector name must not be null or empty");
-    Schema vectorSchema = Vector.createSchema(name, dimension, elementType);
+    Schema vectorSchema = Vector.createSchema(name, dimension, elementType, storageBacking);
     return new HoodieSchema.Vector(vectorSchema);
   }
 
@@ -1856,10 +1887,14 @@ public class HoodieSchema implements Serializable {
      * Default element type (FLOAT) is omitted.
      */
     public String toTypeDescriptor() {
-      if (getVectorElementType() == VectorElementType.FLOAT) {
+      boolean defaultElemType = getVectorElementType() == VectorElementType.FLOAT;
+      boolean defaultBacking = getStorageBacking() == StorageBacking.FIXED_BYTES;
+      if (defaultElemType && defaultBacking) {
         return "VECTOR(" + getDimension() + ")";
+      } else if (defaultBacking) {
+        return "VECTOR(" + getDimension() + ", " + getVectorElementType() + ")";
       }
-      return "VECTOR(" + getDimension() + ", " + getVectorElementType() + ")";
+      return "VECTOR(" + getDimension() + ", " + getVectorElementType() + ", " + getStorageBacking() + ")";
     }
 
     /**
@@ -1871,11 +1906,17 @@ public class HoodieSchema implements Serializable {
      * @return new Vector schema
      */
     private static Schema createSchema(String name, int dimension, VectorElementType elementType) {
+      return createSchema(name, dimension, elementType, StorageBacking.FIXED_BYTES);
+    }
+
+    private static Schema createSchema(String name, int dimension, VectorElementType elementType,
+                                        StorageBacking storageBacking) {
       ValidationUtils.checkArgument(dimension > 0,
           () -> "Vector dimension must be positive: " + dimension);
 
       // Validate elementType
       VectorElementType resolvedElementType = elementType != null ? elementType : VectorElementType.FLOAT;
+      StorageBacking resolvedBacking = storageBacking != null ? storageBacking : StorageBacking.FIXED_BYTES;
 
       // Calculate fixed size: dimension × element size in bytes
       int elementSize = resolvedElementType.getElementSize();
@@ -1885,7 +1926,7 @@ public class HoodieSchema implements Serializable {
       Schema vectorSchema = Schema.createFixed(name, null, null, fixedSize);
 
       // Apply logical type with properties directly to FIXED
-      VectorLogicalType vectorLogicalType = new VectorLogicalType(dimension, resolvedElementType.name(), StorageBacking.FIXED_BYTES.name());
+      VectorLogicalType vectorLogicalType = new VectorLogicalType(dimension, resolvedElementType.name(), resolvedBacking.name());
       vectorLogicalType.addToSchema(vectorSchema);
 
       return vectorSchema;

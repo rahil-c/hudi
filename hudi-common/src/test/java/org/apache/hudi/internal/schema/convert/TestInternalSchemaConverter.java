@@ -130,6 +130,7 @@ public class TestInternalSchemaConverter {
     Types.VectorType internalVectorType = (Types.VectorType) internalSchema.findType("embedding");
     assertEquals(128, internalVectorType.getDimension());
     assertEquals("FLOAT", internalVectorType.getElementType());
+    assertEquals("FIXED_BYTES", internalVectorType.getStorageBacking());
 
     // InternalSchema → HoodieSchema
     HoodieSchema roundTripped = InternalSchemaConverter.convert(internalSchema, "vectorRecord");
@@ -143,6 +144,7 @@ public class TestInternalSchemaConverter {
     HoodieSchema.Vector roundTrippedVector = (HoodieSchema.Vector) embeddingSchema;
     assertEquals(128, roundTrippedVector.getDimension());
     assertEquals(HoodieSchema.Vector.VectorElementType.FLOAT, roundTrippedVector.getVectorElementType());
+    assertEquals(HoodieSchema.Vector.StorageBacking.FIXED_BYTES, roundTrippedVector.getStorageBacking());
   }
 
   @Test
@@ -165,5 +167,6 @@ public class TestInternalSchemaConverter {
     HoodieSchema.Vector rtVec = (HoodieSchema.Vector) vecField.schema().getNonNullType();
     assertEquals(64, rtVec.getDimension());
     assertEquals(HoodieSchema.Vector.VectorElementType.DOUBLE, rtVec.getVectorElementType());
+    assertEquals(HoodieSchema.Vector.StorageBacking.FIXED_BYTES, rtVec.getStorageBacking());
   }
 }
