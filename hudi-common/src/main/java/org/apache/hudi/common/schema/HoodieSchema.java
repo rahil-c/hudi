@@ -199,6 +199,42 @@ public class HoodieSchema implements Serializable {
   public static final String PARQUET_ARRAY_SPARK = ".array";
   public static final String PARQUET_ARRAY_AVRO = "." + ARRAY_LIST_ELEMENT;
 
+  /**
+   * Parquet file-footer metadata key under which VECTOR column names and type descriptors
+   * are recorded. The value is a comma-separated list of {@code colName:VECTOR(dim[,elemType])}
+   * entries, e.g. {@code "embedding:VECTOR(128),tags:VECTOR(64,INT8)"}.
+   *
+   * <p>Stored as file-level key-value metadata (Parquet footer) so that any reader can
+   * identify vector columns without needing the Hudi schema store.
+   */
+  public static final String PARQUET_VECTOR_COLUMNS_METADATA_KEY = "hoodie.vector.columns";
+
+  /**
+   * Builds the value string for {@link #PARQUET_VECTOR_COLUMNS_METADATA_KEY}.
+   *
+   * @param schema a HoodieSchema of type RECORD (or null)
+   * @return comma-separated {@code colName:VECTOR(dim[,elemType])} entries, or empty string
+   *         if the schema is null or has no VECTOR columns
+   */
+  public static String buildVectorColumnsMetadataValue(HoodieSchema schema) {
+    if (schema == null || schema.isSchemaNull()) {
+      return "";
+    }
+    List<HoodieSchemaField> fields = schema.getFields();
+    StringBuilder sb = new StringBuilder();
+    for (HoodieSchemaField field : fields) {
+      HoodieSchema fieldSchema = field.schema().getNonNullType();
+      if (fieldSchema.getType() == HoodieSchemaType.VECTOR) {
+        Vector vectorSchema = (Vector) fieldSchema;
+        if (sb.length() > 0) {
+          sb.append(',');
+        }
+        sb.append(field.name()).append(':').append(vectorSchema.toTypeDescriptor());
+      }
+    }
+    return sb.toString();
+  }
+
   private Schema avroSchema;
   private HoodieSchemaType type;
   private transient List<HoodieSchemaField> fields;

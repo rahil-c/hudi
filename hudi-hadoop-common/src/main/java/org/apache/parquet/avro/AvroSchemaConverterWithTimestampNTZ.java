@@ -261,7 +261,7 @@ public class AvroSchemaConverterWithTimestampNTZ extends HoodieAvroParquetSchema
         builder = Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition).length(fixedSize);
         break;
       case UNION:
-        return convertUnion(fieldName, schema, repetition, schemaPath);
+    return convertUnion(fieldName, schema, repetition, schemaPath);
       default:
         throw new UnsupportedOperationException("Cannot convert Avro type " + type);
     }

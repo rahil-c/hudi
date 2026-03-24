@@ -21,10 +21,15 @@ import org.apache.hudi.DataSourceWriteOptions._
 import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType}
 import org.apache.hudi.testutils.HoodieSparkClientTestBase
 
+import org.apache.hadoop.fs.Path
+import org.apache.parquet.hadoop.ParquetFileReader
+import org.apache.parquet.hadoop.util.HadoopInputFile
 import org.apache.spark.sql.{Row, SaveMode, SparkSession}
 import org.apache.spark.sql.types._
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions._
+
+import scala.collection.JavaConverters._
 
 /**
  * End-to-end tests for vector column support in Hudi.
@@ -891,6 +896,55 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
         .mode(SaveMode.Append)
         .save(basePath + "/schema_evolve_dim")
     })
+  }
+
+  /**
+   * Verifies that vector column metadata is written to the Parquet file footer
+   * under the key hoodie.vector.columns.
+   */
+  @Test
+  def testParquetFooterContainsVectorMetadata(): Unit = {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(8)")
+      .build()
+
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false),
+        nullable = false, metadata)
+    ))
+
+    val data = Seq(Row("key_1", Array.fill(8)(1.0f).toSeq))
+    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+      .write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, "id")
+      .option(TABLE_NAME.key, "footer_meta_test")
+      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
+      .mode(SaveMode.Overwrite)
+      .save(basePath + "/footer_meta")
+
+    // Find a .parquet base file and read its footer metadata
+    val conf = spark.sessionState.newHadoopConf()
+    val fs = new Path(basePath + "/footer_meta").getFileSystem(conf)
+    val parquetFiles = fs.listStatus(new Path(basePath + "/footer_meta"))
+      .flatMap(d => Option(fs.listStatus(d.getPath)).getOrElse(Array.empty))
+      .filter(f => f.getPath.getName.endsWith(".parquet") && !f.getPath.getName.startsWith("."))
+
+    assertTrue(parquetFiles.nonEmpty, "Expected at least one parquet file")
+
+    val reader = ParquetFileReader.open(HadoopInputFile.fromPath(parquetFiles.head.getPath, conf))
+    try {
+      val footerMeta = reader.getFileMetaData.getKeyValueMetaData.asScala
+      assertTrue(footerMeta.contains(HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY),
+        s"Footer should contain ${HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY}, got keys: ${footerMeta.keys.mkString(", ")}")
+
+      val value = footerMeta(HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY)
+      assertTrue(value.contains("embedding"), s"Footer value should reference 'embedding' column, got: $value")
+      assertTrue(value.contains("VECTOR"), s"Footer value should contain 'VECTOR' descriptor, got: $value")
+    } finally {
+      reader.close()
+    }
   }
 
   @Test

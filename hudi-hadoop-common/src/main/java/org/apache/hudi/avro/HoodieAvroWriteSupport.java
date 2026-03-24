@@ -48,6 +48,10 @@ public class HoodieAvroWriteSupport<T> extends AvroWriteSupport<T> {
     super(schema, hoodieSchema.toAvroSchema(), ConvertingGenericData.INSTANCE);
     this.bloomFilterWriteSupportOpt = bloomFilterOpt.map(HoodieBloomFilterAvroWriteSupport::new);
     this.properties = properties;
+    String vectorMeta = HoodieSchema.buildVectorColumnsMetadataValue(hoodieSchema);
+    if (!vectorMeta.isEmpty()) {
+      footerMetadata.put(HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY, vectorMeta);
+    }
   }
 
   @Override

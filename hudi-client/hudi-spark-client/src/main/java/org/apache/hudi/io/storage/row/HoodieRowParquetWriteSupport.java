@@ -28,6 +28,7 @@ import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.schema.HoodieSchema.TimePrecision;
 import org.apache.hudi.common.schema.HoodieSchemaType;
 import org.apache.hudi.common.schema.HoodieSchemaUtils;
+import org.apache.hudi.io.storage.VectorConversionUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.ValidationUtils;
@@ -164,6 +165,10 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
     if (SparkAdapterSupport$.MODULE$.sparkAdapter().isLegacyBehaviorPolicy(datetimeRebaseMode)) {
       metadata.put("org.apache.spark.legacyDateTime", "");
       metadata.put("org.apache.spark.timeZone", SQLConf.get().sessionLocalTimeZone());
+    }
+    String vectorMeta = VectorConversionUtils.buildVectorColumnsMetadataValue(schema);
+    if (!vectorMeta.isEmpty()) {
+      metadata.put(HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY, vectorMeta);
     }
     Configuration configurationCopy = new Configuration(configuration);
     configurationCopy.set(AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE, Boolean.toString(writeLegacyListFormat));
