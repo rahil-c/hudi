@@ -22,6 +22,8 @@ import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.schema.HoodieSchemaField;
 import org.apache.hudi.common.schema.HoodieSchemaType;
 
+import org.apache.spark.sql.catalyst.expressions.UnsafeArrayData;
+import org.apache.spark.sql.catalyst.util.ArrayData;
 import org.apache.spark.sql.catalyst.util.GenericArrayData;
 import org.apache.spark.sql.types.BinaryType$;
 import org.apache.spark.sql.types.StructField;
@@ -134,10 +136,10 @@ public final class VectorConversionUtils {
    *
    * @param bytes        raw bytes read from Parquet
    * @param vectorSchema the vector schema describing dimension and element type
-   * @return a GenericArrayData containing the decoded float[], double[], or byte[] array
+   * @return an ArrayData containing the decoded float[], double[], or byte[] array
    * @throws IllegalArgumentException if byte array length doesn't match expected size
    */
-  public static GenericArrayData convertBinaryToVectorArray(byte[] bytes, HoodieSchema.Vector vectorSchema) {
+  public static ArrayData convertBinaryToVectorArray(byte[] bytes, HoodieSchema.Vector vectorSchema) {
     return convertBinaryToVectorArray(bytes, vectorSchema.getDimension(), vectorSchema.getVectorElementType());
   }
 
@@ -147,11 +149,11 @@ public final class VectorConversionUtils {
    * @param bytes    raw bytes read from Parquet
    * @param dim      vector dimension (number of elements)
    * @param elemType element type (FLOAT, DOUBLE, or INT8)
-   * @return a GenericArrayData containing the decoded float[], double[], or byte[] array
+   * @return an ArrayData containing the decoded float[], double[], or byte[] array
    * @throws IllegalArgumentException if byte array length doesn't match expected size
    */
-  public static GenericArrayData convertBinaryToVectorArray(byte[] bytes, int dim,
-                                                            HoodieSchema.Vector.VectorElementType elemType) {
+  public static ArrayData convertBinaryToVectorArray(byte[] bytes, int dim,
+                                                     HoodieSchema.Vector.VectorElementType elemType) {
     int expectedSize = dim * elemType.getElementSize();
     checkArgument(bytes.length == expectedSize,
         "Vector byte array length mismatch: expected " + expectedSize + " but got " + bytes.length);
@@ -172,7 +174,9 @@ public final class VectorConversionUtils {
       case INT8:
         byte[] int8s = new byte[dim];
         buffer.get(int8s);
-        return new GenericArrayData(int8s);
+        // Use UnsafeArrayData to avoid boxing each byte into a Byte object.
+        // GenericArrayData(byte[]) would box every element into Object[].
+        return UnsafeArrayData.fromPrimitiveArray(int8s);
       default:
         throw new UnsupportedOperationException(
             "Unsupported vector element type: " + elemType);
@@ -201,7 +205,7 @@ public final class VectorConversionUtils {
   public static Function<InternalRow, InternalRow> buildRowMapper(
       StructType readSchema,
       Map<Integer, HoodieSchema.Vector> vectorColumns,
-      Function<GenericInternalRow, InternalRow> projectionCallback) {
+      Function<InternalRow, InternalRow> projectionCallback) {
     GenericInternalRow converted = new GenericInternalRow(readSchema.fields().length);
     return row -> {
       convertRowVectorColumns(row, converted, readSchema, vectorColumns);

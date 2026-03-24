@@ -318,6 +318,9 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
       int dimension = vectorSchema.getDimension();
       HoodieSchema.Vector.VectorElementType elemType = vectorSchema.getVectorElementType();
       int bufferSize = Math.multiplyExact(dimension, elemType.getElementSize());
+      // Buffer is reused across rows without copying. Binary.fromReusedByteArray wraps the
+      // same backing array. This is safe because Parquet's ColumnWriteStoreV2 consumes the
+      // bytes before the next write call (same pattern as the decimal path with decimalBuffer).
       ByteBuffer buffer = ByteBuffer.allocate(bufferSize).order(HoodieSchema.VectorLogicalType.VECTOR_BYTE_ORDER);
       return (row, ordinal) -> {
         ArrayData array = row.getArray(ordinal);
