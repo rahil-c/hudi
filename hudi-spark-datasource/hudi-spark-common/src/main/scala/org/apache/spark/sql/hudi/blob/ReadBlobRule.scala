@@ -21,7 +21,7 @@ package org.apache.spark.sql.hudi.blob
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression, ExprId, NamedExpression}
-import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
+import org.apache.spark.sql.catalyst.plans.logical.{Filter, LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.rules.Rule
 
 import scala.collection.mutable
@@ -40,24 +40,42 @@ import scala.collection.mutable.ArrayBuffer
 case class ReadBlobRule(spark: SparkSession) extends Rule[LogicalPlan] {
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperatorsUp {
+    case Filter(condition, child)
+      if containsReadBlobInExpression(condition) =>
+
+      val blobColumns = extractBlobColumnsFromExpression(condition)
+      val (wrappedPlan, blobToDataAttr) = wrapWithBlobReads(blobColumns, child)
+      val newCondition = replaceReadBlobExpression(condition, blobToDataAttr)
+      Project(child.output, Filter(newCondition, wrappedPlan))
+
     case Project(projectList, child)
       if containsReadBlobExpression(projectList)
         && !child.isInstanceOf[BatchedBlobRead] =>
 
       val blobColumns = extractAllBlobColumns(projectList)
-      if (blobColumns.isEmpty) {
-        throw new IllegalStateException("read_blob() found but no valid blob column reference extracted.")
-      }
-
-      val (wrappedPlan, blobToDataAttr) = blobColumns.foldLeft(
-        (child: LogicalPlan, Map.empty[ExprId, Attribute])
-      ) { case ((currentPlan, mapping), blobAttr) =>
-        val blobRead = BatchedBlobRead(currentPlan, blobAttr)
-        (blobRead, mapping + (blobAttr.exprId -> blobRead.dataAttr))
-      }
-
+      val (wrappedPlan, blobToDataAttr) = wrapWithBlobReads(blobColumns, child)
       val newProjectList = transformNamedExpressions(projectList, blobToDataAttr)
       Project(newProjectList, wrappedPlan)
+  }
+
+  private def wrapWithBlobReads(
+      blobColumns: Seq[AttributeReference],
+      child: LogicalPlan): (LogicalPlan, Map[ExprId, Attribute]) = {
+    if (blobColumns.isEmpty) {
+      throw new IllegalStateException("read_blob() found but no valid blob column reference extracted.")
+    }
+    blobColumns.foldLeft((child: LogicalPlan, Map.empty[ExprId, Attribute])) {
+      case ((currentPlan, mapping), blobAttr) =>
+        val blobRead = BatchedBlobRead(currentPlan, blobAttr)
+        (blobRead, mapping + (blobAttr.exprId -> blobRead.dataAttr))
+    }
+  }
+
+  private def extractBlobColumnsFromExpression(expr: Expression): Seq[AttributeReference] = {
+    val seen = mutable.LinkedHashSet.empty[ExprId]
+    val result = ArrayBuffer.empty[AttributeReference]
+    collectBlobColumns(expr, seen, result)
+    result.toSeq
   }
 
   /**

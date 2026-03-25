@@ -322,6 +322,33 @@ class TestReadBlobSQL extends HoodieClientTestBase {
   }
 
   @Test
+  def testReadBlobInWhereClause(): Unit = {
+    val filePath = createTestFile(tempDir, "where.bin", 10000)
+    val df = sparkSession.createDataFrame(Seq(
+      (1, filePath, 0L, 50L),   // 50 bytes — filtered out
+      (2, filePath, 100L, 100L), // 100 bytes — passes filter
+      (3, filePath, 200L, 200L)  // 200 bytes — passes filter
+    )).toDF("id", "external_path", "offset", "length")
+      .withColumn("file_info", blobStructCol("file_info", col("external_path"), col("offset"), col("length")))
+      .select("id", "file_info")
+    df.createOrReplaceTempView("where_table")
+
+    val result = sparkSession.sql("""
+      SELECT id, read_blob(file_info) AS data
+      FROM where_table
+      WHERE length(read_blob(file_info)) > 50
+      ORDER BY id
+    """)
+
+    val rows = result.collect()
+    assertEquals(2, rows.length)
+
+    // validate that rows with IDs 2 and 3 are returned
+    assertEquals(2, rows(0).getInt(0))
+    assertEquals(3, rows(1).getInt(0))
+  }
+
+  @Test
   def testReadBlobWithCaseWhen(): Unit = {
     val filePath = createTestFile(tempDir, "case.bin", 10000)
 
