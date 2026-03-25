@@ -47,9 +47,6 @@ import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
  * to BinaryType. This class provides the canonical conversion between the binary
  * representation and Spark's typed ArrayData (float[], double[], byte[]).
  *
- * All byte buffers use little-endian order ({@link HoodieSchema.VectorLogicalType#VECTOR_BYTE_ORDER})
- * for compatibility with common vector search libraries (FAISS, ScaNN, etc.) and to match
- * native x86/ARM byte order for zero-copy reads.
  */
 public final class VectorConversionUtils {
 
