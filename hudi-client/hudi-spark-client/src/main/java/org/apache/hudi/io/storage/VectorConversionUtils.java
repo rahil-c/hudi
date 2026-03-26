@@ -211,13 +211,6 @@ public final class VectorConversionUtils {
   }
 
   /**
-   * Delegates to {@link HoodieSchema#buildVectorColumnsMetadataValue(HoodieSchema)}.
-   */
-  public static String buildVectorColumnsMetadataValue(HoodieSchema schema) {
-    return HoodieSchema.buildVectorColumnsMetadataValue(schema);
-  }
-
-  /**
    * Converts vector columns in a row from binary (BinaryType) back to typed arrays,
    * copying non-vector columns as-is. The caller must supply a pre-allocated
    * {@link GenericInternalRow} for reuse across iterations to reduce GC pressure.

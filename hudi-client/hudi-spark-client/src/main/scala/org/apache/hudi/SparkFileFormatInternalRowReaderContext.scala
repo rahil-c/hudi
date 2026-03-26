@@ -36,12 +36,12 @@ import org.apache.hudi.util.CloseableInternalRowIterator
 import org.apache.parquet.avro.HoodieAvroParquetSchemaConverter.getAvroSchemaConverter
 import org.apache.spark.sql.HoodieInternalRowUtils
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.JoinedRow
+import org.apache.spark.sql.catalyst.expressions.{JoinedRow, UnsafeProjection}
 import org.apache.spark.sql.execution.datasources.{PartitionedFile, SparkColumnarFileReader}
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.hudi.SparkAdapter
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{LongType, MetadataBuilder, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, ByteType, DoubleType, FloatType, LongType, MetadataBuilder, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 
 import scala.collection.JavaConverters._
@@ -338,6 +338,7 @@ object SparkFileFormatInternalRowReaderContext {
   /**
    * Wraps an iterator to convert binary VECTOR columns back to typed arrays.
    * Unpacks bytes from FIXED_LEN_BYTE_ARRAY into GenericArrayData using the canonical vector byte order.
+   * Uses UnsafeProjection to make a defensive copy of each row.
    */
   private[hudi] def wrapWithVectorConversion(
       iterator: ClosableIterator[InternalRow],
@@ -345,7 +346,22 @@ object SparkFileFormatInternalRowReaderContext {
       readSchema: StructType): ClosableIterator[InternalRow] = {
     val javaVectorCols: java.util.Map[Integer, HoodieSchema.Vector] =
       vectorColumns.map { case (k, v) => (Integer.valueOf(k), v) }.asJava
-    val mapper = VectorConversionUtils.buildRowMapper(readSchema, javaVectorCols, row => row)
+    // Build output schema: replace BinaryType with the correct ArrayType for vector columns
+    val outputFields = readSchema.fields.zipWithIndex.map { case (field, i) =>
+      vectorColumns.get(i) match {
+        case Some(vec) =>
+          val elemType = vec.getVectorElementType match {
+            case HoodieSchema.Vector.VectorElementType.FLOAT => FloatType
+            case HoodieSchema.Vector.VectorElementType.DOUBLE => DoubleType
+            case HoodieSchema.Vector.VectorElementType.INT8 => ByteType
+          }
+          field.copy(dataType = ArrayType(elemType, containsNull = false))
+        case None => field
+      }
+    }
+    val outputSchema = StructType(outputFields)
+    val projection = UnsafeProjection.create(outputSchema)
+    val mapper = VectorConversionUtils.buildRowMapper(readSchema, javaVectorCols, projection.apply(_))
     new ClosableIterator[InternalRow] {
       override def hasNext: Boolean = iterator.hasNext
       override def next(): InternalRow = mapper.apply(iterator.next())
