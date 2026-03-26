@@ -24,7 +24,7 @@ import org.apache.hudi.testutils.HoodieSparkClientTestBase
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.hadoop.util.HadoopInputFile
-import org.apache.spark.sql.{Row, SaveMode, SparkSession}
+import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.types._
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions._
@@ -53,12 +53,31 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     cleanupFileSystem()
   }
 
+  private def vectorMetadata(descriptor: String): Metadata =
+    new MetadataBuilder().putString(HoodieSchema.TYPE_METADATA_FIELD, descriptor).build()
+
+  private def createVectorDf(schema: StructType, data: Seq[Row]): DataFrame =
+    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+
+  private def writeHudiTable(df: DataFrame, tableName: String, path: String,
+      tableType: String = "COPY_ON_WRITE", precombineField: String = "id",
+      mode: SaveMode = SaveMode.Overwrite, extraOpts: Map[String, String] = Map.empty): Unit = {
+    var writer = df.write.format("hudi")
+      .option(RECORDKEY_FIELD.key, "id")
+      .option(PRECOMBINE_FIELD.key, precombineField)
+      .option(TABLE_NAME.key, tableName)
+      .option(TABLE_TYPE.key, tableType)
+    extraOpts.foreach { case (k, v) => writer = writer.option(k, v) }
+    writer.mode(mode).save(path)
+  }
+
+  private def readHudiTable(path: String): DataFrame =
+    spark.read.format("hudi").load(path)
+
   @Test
   def testVectorRoundTrip(): Unit = {
     // 1. Create schema with vector metadata
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(128)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(128)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -74,22 +93,13 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row(s"key_$i", embedding.toSeq, s"label_$i")
     }
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
     // 3. Write as COW Hudi table
-    df.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "vector_test_table")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath)
+    writeHudiTable(df, "vector_test_table", basePath)
 
     // 4. Read back
-    val readDf = spark.read.format("hudi").load(basePath)
+    val readDf = readHudiTable(basePath)
 
     // 5. Verify row count
     assertEquals(100, readDf.count())
@@ -135,9 +145,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
   @Test
   def testNullableVectorField(): Unit = {
     // Vector column itself nullable (entire array can be null)
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(32)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(32)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -151,20 +159,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row("key_3", Array.fill(32)(1.0f).toSeq)
     )
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
-    df.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "nullable_vector_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/nullable")
+    writeHudiTable(df, "nullable_vector_test", basePath + "/nullable")
 
-    val readDf = spark.read.format("hudi").load(basePath + "/nullable")
+    val readDf = readHudiTable(basePath + "/nullable")
     val readRows = readDf.select("id", "embedding").collect()
 
     // Verify null handling
@@ -187,9 +186,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testColumnProjectionWithVector(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(16)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(16)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -203,21 +200,12 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row(s"key_$i", Array.fill(16)(i.toFloat).toSeq, s"label_$i", i * 10)
     }
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
-    df.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "projection_vector_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/projection")
+    writeHudiTable(df, "projection_vector_test", basePath + "/projection")
 
     // Read only non-vector columns (vector column excluded)
-    val nonVectorDf = spark.read.format("hudi").load(basePath + "/projection")
+    val nonVectorDf = readHudiTable(basePath + "/projection")
       .select("id", "label", "score")
     assertEquals(10, nonVectorDf.count())
     val row0 = nonVectorDf.filter("id = 'key_0'").collect()(0)
@@ -225,7 +213,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     assertEquals(0, row0.getInt(2))
 
     // Read only the vector column with id
-    val vectorOnlyDf = spark.read.format("hudi").load(basePath + "/projection")
+    val vectorOnlyDf = readHudiTable(basePath + "/projection")
       .select("id", "embedding")
     assertEquals(10, vectorOnlyDf.count())
     val vecRow = vectorOnlyDf.filter("id = 'key_5'").collect()(0)
@@ -234,7 +222,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     assertTrue(embedding.forall(_ == 5.0f))
 
     // Read all columns including vector
-    val allDf = spark.read.format("hudi").load(basePath + "/projection")
+    val allDf = readHudiTable(basePath + "/projection")
       .select("id", "embedding", "label", "score")
     assertEquals(10, allDf.count())
     val allRow = allDf.filter("id = 'key_3'").collect()(0)
@@ -247,9 +235,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testDoubleVectorRoundTrip(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(64, DOUBLE)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(64, DOUBLE)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -264,20 +250,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row(s"key_$i", embedding.toSeq, s"label_$i")
     }
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
-    df.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "double_vector_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/double_vec")
+    writeHudiTable(df, "double_vector_test", basePath + "/double_vec")
 
-    val readDf = spark.read.format("hudi").load(basePath + "/double_vec")
+    val readDf = readHudiTable(basePath + "/double_vec")
     assertEquals(50, readDf.count())
 
     // Verify schema: ArrayType(DoubleType)
@@ -312,9 +289,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testInt8VectorRoundTrip(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(256, INT8)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(256, INT8)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -328,20 +303,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row(s"key_$i", embedding.toSeq)
     }
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
-    df.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "int8_vector_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/int8_vec")
+    writeHudiTable(df, "int8_vector_test", basePath + "/int8_vec")
 
-    val readDf = spark.read.format("hudi").load(basePath + "/int8_vec")
+    val readDf = readHudiTable(basePath + "/int8_vec")
     assertEquals(30, readDf.count())
 
     // Verify schema: ArrayType(ByteType)
@@ -373,12 +339,8 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testMultipleVectorColumns(): Unit = {
-    val floatMeta = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(8)")
-      .build()
-    val doubleMeta = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4, DOUBLE)")
-      .build()
+    val floatMeta = vectorMetadata("VECTOR(8)")
+    val doubleMeta = vectorMetadata("VECTOR(4, DOUBLE)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -398,20 +360,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       )
     }
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
-    df.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "multi_vector_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/multi_vec")
+    writeHudiTable(df, "multi_vector_test", basePath + "/multi_vec")
 
-    val readDf = spark.read.format("hudi").load(basePath + "/multi_vec")
+    val readDf = readHudiTable(basePath + "/multi_vec")
     assertEquals(20, readDf.count())
 
     // Verify both vector columns present with correct types
@@ -445,9 +398,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testMorTableWithVectors(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(16)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(16)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -461,39 +412,23 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row(s"key_$i", Array.fill(16)(1.0f).toSeq, i.toLong)
     }
 
-    val df1 = spark.createDataFrame(
-      spark.sparkContext.parallelize(data1),
-      schema
-    )
+    val df1 = createVectorDf(schema, data1)
 
-    df1.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "mor_vector_test")
-      .option(TABLE_TYPE.key, "MERGE_ON_READ")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/mor_vec")
+    writeHudiTable(df1, "mor_vector_test", basePath + "/mor_vec",
+      tableType = "MERGE_ON_READ", precombineField = "ts")
 
     // Upsert: update some vectors with new values
     val data2 = (0 until 10).map { i =>
       Row(s"key_$i", Array.fill(16)(2.0f).toSeq, 100L + i)
     }
 
-    val df2 = spark.createDataFrame(
-      spark.sparkContext.parallelize(data2),
-      schema
-    )
+    val df2 = createVectorDf(schema, data2)
 
-    df2.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "mor_vector_test")
-      .option(TABLE_TYPE.key, "MERGE_ON_READ")
-      .mode(SaveMode.Append)
-      .save(basePath + "/mor_vec")
+    writeHudiTable(df2, "mor_vector_test", basePath + "/mor_vec",
+      tableType = "MERGE_ON_READ", precombineField = "ts", mode = SaveMode.Append)
 
     // Read the merged view
-    val readDf = spark.read.format("hudi").load(basePath + "/mor_vec")
+    val readDf = readHudiTable(basePath + "/mor_vec")
     assertEquals(20, readDf.count())
 
     // Updated rows (key_0 through key_9) should have new vectors
@@ -513,9 +448,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testCowUpsertWithVectors(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(8)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(8)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -530,14 +463,8 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row(s"key_$i", Array.fill(8)(0.0f).toSeq, i.toLong, s"name_$i")
     }
 
-    spark.createDataFrame(spark.sparkContext.parallelize(data1), schema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "cow_upsert_vec_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/cow_upsert")
+    writeHudiTable(createVectorDf(schema, data1), "cow_upsert_vec_test",
+      basePath + "/cow_upsert", precombineField = "ts")
 
     // Upsert: update vectors for existing keys + add new keys
     val data2 = Seq(
@@ -546,16 +473,10 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row("key_10", Array.fill(8)(10.0f).toSeq, 100L, "new_10")
     )
 
-    spark.createDataFrame(spark.sparkContext.parallelize(data2), schema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "cow_upsert_vec_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Append)
-      .save(basePath + "/cow_upsert")
+    writeHudiTable(createVectorDf(schema, data2), "cow_upsert_vec_test",
+      basePath + "/cow_upsert", precombineField = "ts", mode = SaveMode.Append)
 
-    val readDf = spark.read.format("hudi").load(basePath + "/cow_upsert")
+    val readDf = readHudiTable(basePath + "/cow_upsert")
     assertEquals(11, readDf.count())
 
     // Verify updated key_0
@@ -579,9 +500,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testLargeDimensionVector(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(1536)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(1536)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -594,20 +513,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row(s"key_$i", Array.fill(1536)(random.nextFloat()).toSeq)
     }
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
-    df.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "large_dim_vec_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/large_dim")
+    writeHudiTable(df, "large_dim_vec_test", basePath + "/large_dim")
 
-    val readDf = spark.read.format("hudi").load(basePath + "/large_dim")
+    val readDf = readHudiTable(basePath + "/large_dim")
     assertEquals(5, readDf.count())
 
     // Verify dimension preserved
@@ -633,9 +543,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testSmallDimensionVector(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(2)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(2)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -649,20 +557,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row("c", Seq(0.0f, Float.MaxValue))
     )
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
-    df.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "small_dim_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/small_dim")
+    writeHudiTable(df, "small_dim_test", basePath + "/small_dim")
 
-    val readDf = spark.read.format("hudi").load(basePath + "/small_dim")
+    val readDf = readHudiTable(basePath + "/small_dim")
     assertEquals(3, readDf.count())
 
     val rowA = readDf.select("id", "coords").filter("id = 'a'").collect()(0)
@@ -678,9 +577,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testVectorWithNonVectorArrayColumn(): Unit = {
-    val vectorMeta = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
-      .build()
+    val vectorMeta = vectorMetadata("VECTOR(4)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -696,20 +593,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row("k3", Seq(0.1f, 0.2f, 0.3f, 0.4f), Seq("tag3"))
     )
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
-    df.write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "mixed_array_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/mixed_array")
+    writeHudiTable(df, "mixed_array_test", basePath + "/mixed_array")
 
-    val readDf = spark.read.format("hudi").load(basePath + "/mixed_array")
+    val readDf = readHudiTable(basePath + "/mixed_array")
     assertEquals(3, readDf.count())
 
     // Vector column should be ArrayType(FloatType) with vector metadata
@@ -738,9 +626,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testMorWithMultipleUpserts(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4, DOUBLE)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(4, DOUBLE)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -753,42 +639,26 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     val batch1 = (0 until 10).map { i =>
       Row(s"key_$i", Array.fill(4)(1.0).toSeq, 1L)
     }
-    spark.createDataFrame(spark.sparkContext.parallelize(batch1), schema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "mor_multi_upsert_test")
-      .option(TABLE_TYPE.key, "MERGE_ON_READ")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/mor_multi")
+    writeHudiTable(createVectorDf(schema, batch1), "mor_multi_upsert_test",
+      basePath + "/mor_multi", tableType = "MERGE_ON_READ", precombineField = "ts")
 
     // Upsert batch 2: update key_0..key_4
     val batch2 = (0 until 5).map { i =>
       Row(s"key_$i", Array.fill(4)(2.0).toSeq, 2L)
     }
-    spark.createDataFrame(spark.sparkContext.parallelize(batch2), schema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "mor_multi_upsert_test")
-      .option(TABLE_TYPE.key, "MERGE_ON_READ")
-      .mode(SaveMode.Append)
-      .save(basePath + "/mor_multi")
+    writeHudiTable(createVectorDf(schema, batch2), "mor_multi_upsert_test",
+      basePath + "/mor_multi", tableType = "MERGE_ON_READ", precombineField = "ts",
+      mode = SaveMode.Append)
 
     // Upsert batch 3: update key_0..key_2 again
     val batch3 = (0 until 3).map { i =>
       Row(s"key_$i", Array.fill(4)(3.0).toSeq, 3L)
     }
-    spark.createDataFrame(spark.sparkContext.parallelize(batch3), schema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "mor_multi_upsert_test")
-      .option(TABLE_TYPE.key, "MERGE_ON_READ")
-      .mode(SaveMode.Append)
-      .save(basePath + "/mor_multi")
+    writeHudiTable(createVectorDf(schema, batch3), "mor_multi_upsert_test",
+      basePath + "/mor_multi", tableType = "MERGE_ON_READ", precombineField = "ts",
+      mode = SaveMode.Append)
 
-    val readDf = spark.read.format("hudi").load(basePath + "/mor_multi")
+    val readDf = readHudiTable(basePath + "/mor_multi")
     assertEquals(10, readDf.count())
 
     // key_0: updated 3 times → should have value 3.0
@@ -807,9 +677,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
   @Test
   def testDimensionMismatchOnWrite(): Unit = {
     // Schema declares VECTOR(8) but data has arrays of length 4
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(8)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(8)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -821,19 +689,10 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row("key_1", Seq(1.0f, 2.0f, 3.0f, 4.0f)) // only 4 elements, schema says 8
     )
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data),
-      schema
-    )
+    val df = createVectorDf(schema, data)
 
     val ex = assertThrows(classOf[Exception], () => {
-      df.write.format("hudi")
-        .option(RECORDKEY_FIELD.key, "id")
-        .option(PRECOMBINE_FIELD.key, "id")
-        .option(TABLE_NAME.key, "dim_mismatch_test")
-        .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-        .mode(SaveMode.Overwrite)
-        .save(basePath + "/dim_mismatch")
+      writeHudiTable(df, "dim_mismatch_test", basePath + "/dim_mismatch")
     })
     // The root cause should mention dimension mismatch
     var cause: Throwable = ex
@@ -851,9 +710,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
   @Test
   def testSchemaEvolutionRejectsDimensionChange(): Unit = {
     // Write initial table with VECTOR(4)
-    val metadata4 = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
-      .build()
+    val metadata4 = vectorMetadata("VECTOR(4)")
 
     val schema4 = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -863,19 +720,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     ))
 
     val data1 = Seq(Row("key_1", Seq(1.0f, 2.0f, 3.0f, 4.0f), 1L))
-    spark.createDataFrame(spark.sparkContext.parallelize(data1), schema4)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "schema_evolve_dim_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/schema_evolve_dim")
+    writeHudiTable(createVectorDf(schema4, data1), "schema_evolve_dim_test",
+      basePath + "/schema_evolve_dim", precombineField = "ts")
 
     // Now try to write with VECTOR(8) — different dimension should be rejected
-    val metadata8 = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(8)")
-      .build()
+    val metadata8 = vectorMetadata("VECTOR(8)")
 
     val schema8 = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -887,14 +736,8 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     val data2 = Seq(Row("key_2", Seq(1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f), 2L))
 
     assertThrows(classOf[Exception], () => {
-      spark.createDataFrame(spark.sparkContext.parallelize(data2), schema8)
-        .write.format("hudi")
-        .option(RECORDKEY_FIELD.key, "id")
-        .option(PRECOMBINE_FIELD.key, "ts")
-        .option(TABLE_NAME.key, "schema_evolve_dim_test")
-        .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-        .mode(SaveMode.Append)
-        .save(basePath + "/schema_evolve_dim")
+      writeHudiTable(createVectorDf(schema8, data2), "schema_evolve_dim_test",
+        basePath + "/schema_evolve_dim", precombineField = "ts", mode = SaveMode.Append)
     })
   }
 
@@ -904,9 +747,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
    */
   @Test
   def testParquetFooterContainsVectorMetadata(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(8)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(8)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -915,14 +756,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     ))
 
     val data = Seq(Row("key_1", Array.fill(8)(1.0f).toSeq))
-    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "footer_meta_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/footer_meta")
+    writeHudiTable(createVectorDf(schema, data), "footer_meta_test", basePath + "/footer_meta")
 
     // Find a .parquet base file and read its footer metadata
     val conf = spark.sessionState.newHadoopConf()
@@ -949,9 +783,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testPartitionedTableWithVector(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(4)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -967,17 +799,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row(s"key_$i", Array.fill(4)(i.toFloat).toSeq, s"label_$i", category)
     }
 
-    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option("hoodie.datasource.write.partitionpath.field", "category")
-      .option(TABLE_NAME.key, "partitioned_vector_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/partitioned")
+    writeHudiTable(createVectorDf(schema, data), "partitioned_vector_test",
+      basePath + "/partitioned",
+      extraOpts = Map("hoodie.datasource.write.partitionpath.field" -> "category"))
 
-    val readDf = spark.read.format("hudi").load(basePath + "/partitioned")
+    val readDf = readHudiTable(basePath + "/partitioned")
     assertEquals(10, readDf.count())
 
     // Collect all rows and verify each row's vector matches its key
@@ -1005,9 +831,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
 
   @Test
   def testVectorAsLastColumn(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(4)")
 
     // Vector is at position 4 (last), after several non-vector columns
     val schema = StructType(Seq(
@@ -1023,16 +847,9 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       Row(s"key_$i", i, s"str_$i", i.toDouble * 1.5, Array.fill(4)(i.toFloat).toSeq)
     }
 
-    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "id")
-      .option(TABLE_NAME.key, "last_col_vector_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/last_col")
+    writeHudiTable(createVectorDf(schema, data), "last_col_vector_test", basePath + "/last_col")
 
-    val readDf = spark.read.format("hudi").load(basePath + "/last_col")
+    val readDf = readHudiTable(basePath + "/last_col")
     assertEquals(10, readDf.count())
 
     // Read all columns: verify vector and non-vector columns correct
@@ -1064,9 +881,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
    */
   @Test
   def testSchemaEvolutionAddColumnToVectorTable(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(4)")
 
     val schemaV1 = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -1078,15 +893,9 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     val data1 = (0 until 5).map { i =>
       Row(s"key_$i", Array.fill(4)(i.toFloat).toSeq, i.toLong)
     }
-    spark.createDataFrame(spark.sparkContext.parallelize(data1), schemaV1)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "schema_evolve_add_col_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .option("hoodie.schema.on.read.enable", "true")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/schema_evolve_add")
+    writeHudiTable(createVectorDf(schemaV1, data1), "schema_evolve_add_col_test",
+      basePath + "/schema_evolve_add", precombineField = "ts",
+      extraOpts = Map("hoodie.schema.on.read.enable" -> "true"))
 
     // V2: add a new non-vector column
     val schemaV2 = StructType(Seq(
@@ -1100,15 +909,9 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     val data2 = (5 until 10).map { i =>
       Row(s"key_$i", Array.fill(4)(i.toFloat).toSeq, i.toLong, s"v2_$i")
     }
-    spark.createDataFrame(spark.sparkContext.parallelize(data2), schemaV2)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "schema_evolve_add_col_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .option("hoodie.schema.on.read.enable", "true")
-      .mode(SaveMode.Append)
-      .save(basePath + "/schema_evolve_add")
+    writeHudiTable(createVectorDf(schemaV2, data2), "schema_evolve_add_col_test",
+      basePath + "/schema_evolve_add", precombineField = "ts", mode = SaveMode.Append,
+      extraOpts = Map("hoodie.schema.on.read.enable" -> "true"))
 
     val readDf = spark.read.format("hudi")
       .option("hoodie.schema.on.read.enable", "true")
@@ -1141,9 +944,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
    */
   @Test
   def testDeleteFromVectorTable(): Unit = {
-    val metadata = new MetadataBuilder()
-      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
-      .build()
+    val metadata = vectorMetadata("VECTOR(4)")
 
     val schema = StructType(Seq(
       StructField("id", StringType, nullable = false),
@@ -1155,14 +956,8 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     val data = (0 until 10).map { i =>
       Row(s"key_$i", Array.fill(4)(i.toFloat).toSeq, i.toLong)
     }
-    spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "delete_vector_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .mode(SaveMode.Overwrite)
-      .save(basePath + "/delete_vec")
+    writeHudiTable(createVectorDf(schema, data), "delete_vector_test",
+      basePath + "/delete_vec", precombineField = "ts")
 
     // Delete key_2, key_5, key_8
     val deletedKeys = Set("key_2", "key_5", "key_8")
@@ -1171,17 +966,11 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
       StructField("ts", LongType, nullable = false)
     ))
     val deleteData = deletedKeys.toSeq.map(k => Row(k, 999L))
-    spark.createDataFrame(spark.sparkContext.parallelize(deleteData), deleteSchema)
-      .write.format("hudi")
-      .option(RECORDKEY_FIELD.key, "id")
-      .option(PRECOMBINE_FIELD.key, "ts")
-      .option(TABLE_NAME.key, "delete_vector_test")
-      .option(TABLE_TYPE.key, "COPY_ON_WRITE")
-      .option(OPERATION.key, "delete")
-      .mode(SaveMode.Append)
-      .save(basePath + "/delete_vec")
+    writeHudiTable(createVectorDf(deleteSchema, deleteData), "delete_vector_test",
+      basePath + "/delete_vec", precombineField = "ts", mode = SaveMode.Append,
+      extraOpts = Map(OPERATION.key -> "delete"))
 
-    val readDf = spark.read.format("hudi").load(basePath + "/delete_vec")
+    val readDf = readHudiTable(basePath + "/delete_vec")
     assertEquals(7, readDf.count(), "Deleted rows should be gone")
 
     val rowMap = readDf.select("id", "embedding").collect()
