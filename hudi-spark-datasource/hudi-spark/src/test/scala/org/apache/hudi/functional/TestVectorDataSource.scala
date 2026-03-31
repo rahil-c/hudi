@@ -1019,9 +1019,6 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     }
   }
 
-  private def nestedVectorMessageInCauseChain(ex: Throwable): Boolean = {
-    if (ex == null) return false
-    if (Option(ex.getMessage).exists(_.contains("top-level field"))) return true
-    nestedVectorMessageInCauseChain(ex.getCause)
-  }
+  private def nestedVectorMessageInCauseChain(ex: Throwable): Boolean =
+    ex != null && (Option(ex.getMessage).exists(_.contains("top-level field")) || nestedVectorMessageInCauseChain(ex.getCause))
 }
