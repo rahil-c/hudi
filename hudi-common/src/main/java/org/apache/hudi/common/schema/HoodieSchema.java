@@ -24,6 +24,7 @@ import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieAvroSchemaException;
 import org.apache.hudi.exception.HoodieIOException;
+import org.apache.hudi.internal.schema.HoodieSchemaException;
 
 import lombok.Getter;
 import org.apache.avro.JsonProperties;
@@ -420,6 +421,11 @@ public class HoodieSchema implements Serializable {
   public static HoodieSchema createArray(HoodieSchema elementSchema) {
     ValidationUtils.checkArgument(elementSchema != null, "Element schema cannot be null");
 
+    if (elementSchema.getNonNullType().getType() == HoodieSchemaType.VECTOR) {
+      throw new HoodieSchemaException(
+          "VECTOR type is not supported as an array element. VECTOR columns must be top-level fields.");
+    }
+
     Schema elementAvroSchema = elementSchema.avroSchema;
     ValidationUtils.checkState(elementAvroSchema != null, "Element schema's Avro schema cannot be null");
 
@@ -435,6 +441,11 @@ public class HoodieSchema implements Serializable {
    */
   public static HoodieSchema createMap(HoodieSchema valueSchema) {
     ValidationUtils.checkArgument(valueSchema != null, "Value schema cannot be null");
+
+    if (valueSchema.getNonNullType().getType() == HoodieSchemaType.VECTOR) {
+      throw new HoodieSchemaException(
+          "VECTOR type is not supported as a map value. VECTOR columns must be top-level fields.");
+    }
 
     Schema valueAvroSchema = valueSchema.avroSchema;
     ValidationUtils.checkState(valueAvroSchema != null, "Value schema's Avro schema cannot be null");
