@@ -57,7 +57,7 @@ object HoodieParquetFileFormatHelper {
    * Recurses into GroupType (nested structs, lists, maps) to handle nested vectors.
    */
   private def rewriteFixedLenByteArrayToBinary(schema: MessageType): MessageType = {
-    new MessageType(schema.getName, rewriteFields(schema.getFields.asScala).asJava)
+    new MessageType(schema.getName, rewriteFields(schema.getFields.asScala.toSeq).asJava)
   }
 
   private def rewriteFields(fields: Seq[Type]): Seq[Type] = fields.map {
@@ -66,7 +66,7 @@ object HoodieParquetFileFormatHelper {
         && pt.getLogicalTypeAnnotation == null =>
       Types.primitive(PrimitiveTypeName.BINARY, pt.getRepetition).named(pt.getName)
     case gt: GroupType =>
-      gt.withNewFields(rewriteFields(gt.getFields.asScala).asJava)
+      gt.withNewFields(rewriteFields(gt.getFields.asScala.toSeq).asJava)
     case other => other
   }
 }
