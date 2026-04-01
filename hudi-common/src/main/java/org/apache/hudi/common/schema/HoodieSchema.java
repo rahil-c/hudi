@@ -481,6 +481,8 @@ public class HoodieSchema implements Serializable {
     ValidationUtils.checkArgument(name != null && !name.isEmpty(), "Record name cannot be null or empty");
     ValidationUtils.checkArgument(fields != null, "Fields cannot be null");
 
+    validateNoVectorInNestedRecord(fields, false);
+
     // Convert HoodieSchemaFields to Avro Fields
     List<Schema.Field> avroFields = fields.stream()
         .map(HoodieSchemaField::getAvroField)
@@ -489,6 +491,28 @@ public class HoodieSchema implements Serializable {
     Schema recordSchema = Schema.createRecord(name, doc, namespace, isError);
     recordSchema.setFields(avroFields);
     return new HoodieSchema(recordSchema, fields);
+  }
+
+  /**
+   * Verifies that no VECTOR fields appear inside nested RECORD types. Top-level VECTOR fields
+   * (direct fields of the record being created) are allowed; VECTOR inside a child struct is not.
+   *
+   * @param fields the fields to validate
+   * @param nested true when validating inside a child RECORD (VECTOR throws); false at the top level (VECTOR is allowed)
+   * @throws HoodieSchemaException if any field (at any depth) is a VECTOR type
+   */
+  private static void validateNoVectorInNestedRecord(List<HoodieSchemaField> fields, boolean nested) {
+    for (HoodieSchemaField field : fields) {
+      HoodieSchema nonNull = field.schema().getNonNullType();
+      if (nested && nonNull.getType() == HoodieSchemaType.VECTOR) {
+        throw new HoodieSchemaException(
+            "VECTOR column '" + field.name() + "' must be a top-level field. "
+                + "Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.");
+      }
+      if (nonNull.getType() == HoodieSchemaType.RECORD) {
+        validateNoVectorInNestedRecord(nonNull.getFields(), true);
+      }
+    }
   }
 
   /**
