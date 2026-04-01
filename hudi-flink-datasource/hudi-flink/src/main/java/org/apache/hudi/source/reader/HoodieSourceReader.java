@@ -19,10 +19,11 @@
 package org.apache.hudi.source.reader;
 
 import org.apache.flink.api.connector.source.SourceReaderContext;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.base.source.reader.RecordEmitter;
 import org.apache.flink.connector.base.source.reader.SingleThreadMultiplexSourceReaderBase;
 
+import org.apache.hudi.common.util.Option;
+import org.apache.hudi.source.HoodieScanContext;
 import org.apache.hudi.source.reader.function.SplitReaderFunction;
 import org.apache.hudi.source.split.HoodieSourceSplit;
 import org.apache.hudi.source.split.SerializableComparator;
@@ -42,11 +43,13 @@ public class HoodieSourceReader<T> extends
   public HoodieSourceReader(
           String tableName,
           RecordEmitter<HoodieRecordWithPosition<T>, T, HoodieSourceSplit> recordEmitter,
-          Configuration config,
+          HoodieScanContext scanContext,
           SourceReaderContext context,
           SplitReaderFunction<T> readerFunction,
           SerializableComparator<HoodieSourceSplit> splitComparator) {
-    super(() -> new HoodieSourceSplitReader<>(tableName, context, readerFunction, splitComparator), recordEmitter, config, context);
+    super(() -> new HoodieSourceSplitReader<>(tableName, context, readerFunction, splitComparator,
+            scanContext.getLimit() == RecordLimiter.NO_LIMIT ? Option.empty() : Option.of(new RecordLimiter(scanContext.getLimit()))),
+        recordEmitter, scanContext.getConf(), context);
   }
 
   @Override

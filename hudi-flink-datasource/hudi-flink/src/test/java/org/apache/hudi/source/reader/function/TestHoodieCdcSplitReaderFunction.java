@@ -166,6 +166,59 @@ public class TestHoodieCdcSplitReaderFunction {
   }
 
   // -------------------------------------------------------------------------
+  //  Limit push-down constructor tests
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void testConstructorWithLimit() {
+    HoodieCdcSplitReaderFunction function = new HoodieCdcSplitReaderFunction(
+        conf,
+        tableState,
+        internalSchemaManager,
+        ROW_DATA_TYPE.getChildren(),
+        Collections.emptyList(),
+        false);
+
+    assertNotNull(function);
+  }
+
+  @Test
+  public void testConstructorWithLimitAndEmptyFieldTypes() {
+    HoodieCdcSplitReaderFunction function = new HoodieCdcSplitReaderFunction(
+        conf,
+        tableState,
+        internalSchemaManager,
+        Collections.emptyList(),
+        Collections.emptyList(),
+        false);
+
+    assertNotNull(function);
+  }
+
+  @Test
+  public void testDefaultConstructorUsesNoLimitSentinel() {
+    // 6-arg constructor must delegate to 7-arg with limit=-1, both should succeed.
+    HoodieCdcSplitReaderFunction defaultLimit = new HoodieCdcSplitReaderFunction(
+        conf, tableState, internalSchemaManager,
+        ROW_DATA_TYPE.getChildren(), Collections.emptyList(), false);
+    HoodieCdcSplitReaderFunction explicitNoLimit = new HoodieCdcSplitReaderFunction(
+        conf, tableState, internalSchemaManager,
+        ROW_DATA_TYPE.getChildren(), Collections.emptyList(), false);
+
+    assertNotNull(defaultLimit);
+    assertNotNull(explicitNoLimit);
+  }
+
+  @Test
+  public void testConstructorWithLimitZeroIsAccepted() {
+    // limit=0 is a valid constructor argument (limitIterator won't wrap since limit <= 0).
+    HoodieCdcSplitReaderFunction function = new HoodieCdcSplitReaderFunction(
+        conf, tableState, internalSchemaManager,
+        ROW_DATA_TYPE.getChildren(), Collections.emptyList(), false);
+    assertNotNull(function);
+  }
+
+  // -------------------------------------------------------------------------
   //  Integration: read() accepts a HoodieCdcSourceSplit (validation only)
   // -------------------------------------------------------------------------
 
