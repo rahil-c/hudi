@@ -2769,14 +2769,6 @@ public class HoodieSchema implements Serializable {
       return REFERENCE_FIELD_COUNT;
     }
 
-    public static int getBlobReferenceFieldCount() {
-      return 4;
-    }
-
-    public static int getBlobFieldCount() {
-      return 3;
-    }
-
     /**
      * Creates a new HoodieSchema wrapping the given Avro schema.
      *
