@@ -1020,5 +1020,7 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
   }
 
   private def nestedVectorMessageInCauseChain(ex: Throwable): Boolean =
-    ex != null && (Option(ex.getMessage).exists(_.contains("top-level field")) || nestedVectorMessageInCauseChain(ex.getCause))
+    ex != null && (Option(ex.getMessage).exists(_.contains(
+      "VECTOR column 'embedding' must be a top-level field. Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported."))
+      || nestedVectorMessageInCauseChain(ex.getCause))
 }

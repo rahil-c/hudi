@@ -1077,7 +1077,7 @@ public class TestHoodieSchema {
     HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
     HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
         () -> HoodieSchema.createArray(vectorSchema));
-    assertTrue(ex.getMessage().contains("top-level fields"));
+    assertEquals("VECTOR type is not supported as an array element. VECTOR columns must be top-level fields.", ex.getMessage());
   }
 
   @Test
@@ -1085,7 +1085,23 @@ public class TestHoodieSchema {
     HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
     HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
         () -> HoodieSchema.createMap(vectorSchema));
-    assertTrue(ex.getMessage().contains("top-level fields"));
+    assertEquals("VECTOR type is not supported as a map value. VECTOR columns must be top-level fields.", ex.getMessage());
+  }
+
+  @Test
+  void testVectorInNestedRecordThrows() {
+    // createRecord("inner", ..., [vectorField]) alone is fine — the guard fires when that inner
+    // record is used as a field of an outer record.
+    HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchema innerRecord = HoodieSchema.createRecord("inner", null, null,
+        Arrays.asList(HoodieSchemaField.of("embedding", vectorSchema)));
+
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class, () ->
+        HoodieSchema.createRecord("outer", null, null, Arrays.asList(
+            HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT)),
+            HoodieSchemaField.of("data", innerRecord))));
+    assertEquals("VECTOR column 'embedding' must be a top-level field. "
+        + "Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.", ex.getMessage());
   }
 
   @Test
@@ -2844,7 +2860,7 @@ public class TestHoodieSchema {
     HoodieSchema vectorSchema = HoodieSchema.createNullable(HoodieSchema.createVector(128));
     HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
         () -> HoodieSchema.createArray(vectorSchema));
-    assertTrue(ex.getMessage().contains("top-level fields"));
+    assertEquals("VECTOR type is not supported as an array element. VECTOR columns must be top-level fields.", ex.getMessage());
   }
 
   @Test
@@ -2852,7 +2868,7 @@ public class TestHoodieSchema {
     HoodieSchema vectorSchema = HoodieSchema.createNullable(HoodieSchema.createVector(128));
     HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
         () -> HoodieSchema.createMap(vectorSchema));
-    assertTrue(ex.getMessage().contains("top-level fields"));
+    assertEquals("VECTOR type is not supported as a map value. VECTOR columns must be top-level fields.", ex.getMessage());
   }
 
 }

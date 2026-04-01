@@ -251,7 +251,6 @@ class TestSchemaConverters extends SparkAdapterSupport {
 
   @Test
   def testTopLevelVectorStillAllowed(): Unit = {
-    // Regression: top-level VECTOR fields must continue to work
     val vectorMetadata = new MetadataBuilder()
       .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
       .build()
@@ -279,8 +278,7 @@ class TestSchemaConverters extends SparkAdapterSupport {
     val exception = assertThrows(classOf[HoodieSchemaException], () => {
       HoodieSparkSchemaConverters.toHoodieType(outerStruct, recordName = "record")
     })
-    assertTrue(exception.getMessage.contains("top-level field"))
-    assertTrue(exception.getMessage.contains("embedding"))
+    assertEquals("VECTOR column 'embedding' must be a top-level field. Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.", exception.getMessage)
   }
 
   @Test
@@ -298,8 +296,7 @@ class TestSchemaConverters extends SparkAdapterSupport {
     val exception = assertThrows(classOf[HoodieSchemaException], () => {
       HoodieSparkSchemaConverters.toHoodieType(outerStruct, recordName = "record")
     })
-    assertTrue(exception.getMessage.contains("top-level field"))
-    assertTrue(exception.getMessage.contains("embedding"))
+    assertEquals("VECTOR column 'embedding' must be a top-level field. Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.", exception.getMessage)
   }
 
   /**
