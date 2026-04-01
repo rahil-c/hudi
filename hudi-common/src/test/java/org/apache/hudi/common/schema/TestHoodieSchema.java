@@ -1090,8 +1090,6 @@ public class TestHoodieSchema {
 
   @Test
   void testVectorInNestedRecordThrows() {
-    // createRecord("inner", ..., [vectorField]) alone is fine — the guard fires when that inner
-    // record is used as a field of an outer record.
     HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
     HoodieSchema innerRecord = HoodieSchema.createRecord("inner", null, null,
         Arrays.asList(HoodieSchemaField.of("embedding", vectorSchema)));
