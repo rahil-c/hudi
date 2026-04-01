@@ -24,6 +24,7 @@ import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieAvroSchemaException;
 import org.apache.hudi.exception.HoodieIOException;
+import org.apache.hudi.internal.schema.HoodieSchemaException;
 
 import lombok.Getter;
 import org.apache.avro.JsonProperties;
@@ -420,6 +421,11 @@ public class HoodieSchema implements Serializable {
   public static HoodieSchema createArray(HoodieSchema elementSchema) {
     ValidationUtils.checkArgument(elementSchema != null, "Element schema cannot be null");
 
+    if (elementSchema.getNonNullType().getType() == HoodieSchemaType.VECTOR) {
+      throw new HoodieSchemaException(
+          "VECTOR type is not supported as an array element. VECTOR columns must be top-level fields.");
+    }
+
     Schema elementAvroSchema = elementSchema.avroSchema;
     ValidationUtils.checkState(elementAvroSchema != null, "Element schema's Avro schema cannot be null");
 
@@ -435,6 +441,11 @@ public class HoodieSchema implements Serializable {
    */
   public static HoodieSchema createMap(HoodieSchema valueSchema) {
     ValidationUtils.checkArgument(valueSchema != null, "Value schema cannot be null");
+
+    if (valueSchema.getNonNullType().getType() == HoodieSchemaType.VECTOR) {
+      throw new HoodieSchemaException(
+          "VECTOR type is not supported as a map value. VECTOR columns must be top-level fields.");
+    }
 
     Schema valueAvroSchema = valueSchema.avroSchema;
     ValidationUtils.checkState(valueAvroSchema != null, "Value schema's Avro schema cannot be null");
@@ -470,6 +481,8 @@ public class HoodieSchema implements Serializable {
     ValidationUtils.checkArgument(name != null && !name.isEmpty(), "Record name cannot be null or empty");
     ValidationUtils.checkArgument(fields != null, "Fields cannot be null");
 
+    validateNoVectorInNestedRecord(fields, false);
+
     // Convert HoodieSchemaFields to Avro Fields
     List<Schema.Field> avroFields = fields.stream()
         .map(HoodieSchemaField::getAvroField)
@@ -478,6 +491,28 @@ public class HoodieSchema implements Serializable {
     Schema recordSchema = Schema.createRecord(name, doc, namespace, isError);
     recordSchema.setFields(avroFields);
     return new HoodieSchema(recordSchema, fields);
+  }
+
+  /**
+   * Verifies that no VECTOR fields appear inside nested RECORD types. Top-level VECTOR fields
+   * (direct fields of the record being created) are allowed; VECTOR inside a child struct is not.
+   *
+   * @param fields the fields to validate
+   * @param nested true when validating inside a child RECORD (VECTOR throws); false at the top level (VECTOR is allowed)
+   * @throws HoodieSchemaException if any field (at any depth) is a VECTOR type
+   */
+  private static void validateNoVectorInNestedRecord(List<HoodieSchemaField> fields, boolean nested) {
+    for (HoodieSchemaField field : fields) {
+      HoodieSchema nonNull = field.schema().getNonNullType();
+      if (nested && nonNull.getType() == HoodieSchemaType.VECTOR) {
+        throw new HoodieSchemaException(
+            "VECTOR column '" + field.name() + "' must be a top-level field. "
+                + "Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.");
+      }
+      if (nonNull.getType() == HoodieSchemaType.RECORD) {
+        validateNoVectorInNestedRecord(nonNull.getFields(), true);
+      }
+    }
   }
 
   /**

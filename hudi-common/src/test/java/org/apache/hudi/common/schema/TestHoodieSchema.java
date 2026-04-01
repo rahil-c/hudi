@@ -22,6 +22,7 @@ import org.apache.hudi.common.schema.HoodieSchema.VariantLogicalType;
 import org.apache.hudi.common.schema.HoodieSchema.VectorLogicalType;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.exception.HoodieAvroSchemaException;
+import org.apache.hudi.internal.schema.HoodieSchemaException;
 
 import org.apache.avro.JsonProperties;
 import org.apache.avro.LogicalType;
@@ -1045,11 +1046,9 @@ public class TestHoodieSchema {
   }
 
   @Test
-  void testVectorInNestedStructures() throws Exception {
-    // Create vector schema
+  void testVectorAsTopLevelRecordField() {
     HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
 
-    // Test vector in record - verify it can be used as a field
     List<HoodieSchemaField> fields = Arrays.asList(
         HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT)),
         HoodieSchemaField.of("embedding", vectorSchema)
@@ -1057,13 +1056,13 @@ public class TestHoodieSchema {
     HoodieSchema recordSchema = HoodieSchema.createRecord("TestRecord", null, null, fields);
     assertEquals(HoodieSchemaType.RECORD, recordSchema.getType());
 
-    // Verify vector field is preserved in the Avro schema
+    // Verify the vector field is preserved in the Avro schema
     Schema.Field embeddingField = recordSchema.getAvroSchema().getField("embedding");
     assertNotNull(embeddingField);
     HoodieSchema embeddingSchema = HoodieSchema.fromAvroSchema(embeddingField.schema());
     assertVector(embeddingSchema, 128, HoodieSchema.Vector.VectorElementType.FLOAT);
 
-    // Round-trip record with vector field through JSON
+    // Round-trip the record with the vector field through JSON
     String recordJson = recordSchema.toString();
     HoodieSchema parsedRecord = HoodieSchema.parse(recordJson);
     assertEquals(recordSchema, parsedRecord);
@@ -1071,28 +1070,36 @@ public class TestHoodieSchema {
     assertNotNull(parsedEmbeddingField);
     HoodieSchema parsedEmbedding = HoodieSchema.fromAvroSchema(parsedEmbeddingField.schema());
     assertVector(parsedEmbedding, 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+  }
 
-    // Test vector in array
-    HoodieSchema arraySchema = HoodieSchema.createArray(vectorSchema);
-    assertEquals(HoodieSchemaType.ARRAY, arraySchema.getType());
-    assertVector(arraySchema.getElementType(), 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+  @Test
+  void testVectorAsArrayElementThrows() {
+    HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
+        () -> HoodieSchema.createArray(vectorSchema));
+    assertEquals("VECTOR type is not supported as an array element. VECTOR columns must be top-level fields.", ex.getMessage());
+  }
 
-    // Round-trip array of vectors through JSON
-    String arrayJson = arraySchema.toString();
-    HoodieSchema parsedArray = HoodieSchema.parse(arrayJson);
-    assertEquals(arraySchema, parsedArray);
-    assertVector(parsedArray.getElementType(), 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+  @Test
+  void testVectorAsMapValueThrows() {
+    HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
+        () -> HoodieSchema.createMap(vectorSchema));
+    assertEquals("VECTOR type is not supported as a map value. VECTOR columns must be top-level fields.", ex.getMessage());
+  }
 
-    // Test vector in map
-    HoodieSchema mapSchema = HoodieSchema.createMap(vectorSchema);
-    assertEquals(HoodieSchemaType.MAP, mapSchema.getType());
-    assertVector(mapSchema.getValueType(), 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+  @Test
+  void testVectorInNestedRecordThrows() {
+    HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchema innerRecord = HoodieSchema.createRecord("inner", null, null,
+        Arrays.asList(HoodieSchemaField.of("embedding", vectorSchema)));
 
-    // Round-trip map with vector values through JSON
-    String mapJson = mapSchema.toString();
-    HoodieSchema parsedMap = HoodieSchema.parse(mapJson);
-    assertEquals(mapSchema, parsedMap);
-    assertVector(parsedMap.getValueType(), 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class, () ->
+        HoodieSchema.createRecord("outer", null, null, Arrays.asList(
+            HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT)),
+            HoodieSchemaField.of("data", innerRecord))));
+    assertEquals("VECTOR column 'embedding' must be a top-level field. "
+        + "Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.", ex.getMessage());
   }
 
   @Test
@@ -2845,4 +2852,21 @@ public class TestHoodieSchema {
     assertEquals(HoodieSchemaType.BLOB, parsed.getType());
     assertInstanceOf(HoodieSchema.Blob.class, parsed);
   }
+
+  @Test
+  public void testCreateArrayWithNullableVectorThrows() {
+    HoodieSchema vectorSchema = HoodieSchema.createNullable(HoodieSchema.createVector(128));
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
+        () -> HoodieSchema.createArray(vectorSchema));
+    assertEquals("VECTOR type is not supported as an array element. VECTOR columns must be top-level fields.", ex.getMessage());
+  }
+
+  @Test
+  public void testCreateMapWithNullableVectorThrows() {
+    HoodieSchema vectorSchema = HoodieSchema.createNullable(HoodieSchema.createVector(128));
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
+        () -> HoodieSchema.createMap(vectorSchema));
+    assertEquals("VECTOR type is not supported as a map value. VECTOR columns must be top-level fields.", ex.getMessage());
+  }
+
 }
