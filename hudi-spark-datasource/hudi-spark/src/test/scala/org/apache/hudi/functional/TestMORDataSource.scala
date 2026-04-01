@@ -2259,6 +2259,94 @@ class TestMORDataSource extends HoodieSparkClientTestBase with SparkDatasetMixin
       .mode(SaveMode.Append)
       .save(basePath)
   }
+
+  /**
+   * Test that incremental reads work on MOR tables when the data schema contains fields
+   * with the same name as Hudi meta fields (e.g., _hoodie_partition_path). This tests
+   * the fix that filters out duplicate fields when merging skeleton schema with data
+   * schema in IncrementalRelation.
+   *
+   * This simulates the scenario when creating derived datasets using HUDIIncrSource
+   * where the source table's data already contains _hoodie_partition_path as a regular
+   * data column (from a previous Hudi read), but the downstream table uses a different
+   * partition field.
+   *
+   * Without the fix, this would fail with:
+   * org.apache.spark.sql.AnalysisException: Found duplicate column(s) in the data schema
+   */
+  @Test
+  def testIncrementalReadWithDuplicateMetaFieldInDataSchema(): Unit = {
+    val _spark = spark
+    import _spark.implicits._
+
+    // Create a DataFrame with _hoodie_partition_path as a regular data column
+    // while using a separate "partition" column as the actual partition field.
+    val df = Seq(
+      ("row1", "src_partition1", "partition1", 1000L, "value1"),
+      ("row2", "src_partition1", "partition1", 1001L, "value2"),
+      ("row3", "src_partition2", "partition2", 1002L, "value3")
+    ).toDF("_row_key", "_hoodie_partition_path", "partition", "timestamp", "data")
+
+    val writeOpts = Map(
+      "hoodie.insert.shuffle.parallelism" -> "4",
+      "hoodie.upsert.shuffle.parallelism" -> "4",
+      DataSourceWriteOptions.TABLE_TYPE.key -> DataSourceWriteOptions.MOR_TABLE_TYPE_OPT_VAL,
+      DataSourceWriteOptions.RECORDKEY_FIELD.key -> "_row_key",
+      DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "partition",
+      HoodieTableConfig.ORDERING_FIELDS.key -> "timestamp",
+      HoodieWriteConfig.TBL_NAME.key -> "hoodie_test_mor_dup_meta_field"
+    )
+
+    // Write initial data
+    df.write.format("hudi")
+      .options(writeOpts)
+      .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
+      .mode(SaveMode.Overwrite)
+      .save(basePath)
+
+    // Add an upsert to create log files in the MOR table
+    val dfUpdate = Seq(
+      ("row1", "src_partition1", "partition1", 2000L, "value1_updated"),
+      ("row4", "src_partition2", "partition2", 2001L, "value4")
+    ).toDF("_row_key", "_hoodie_partition_path", "partition", "timestamp", "data")
+
+    dfUpdate.write.format("hudi")
+      .options(writeOpts)
+      .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL)
+      .mode(SaveMode.Append)
+      .save(basePath)
+
+    // Initialize metaClient
+    metaClient = createMetaClient(spark, basePath)
+
+    // Perform incremental read - this should not fail with duplicate field error
+    val incrementalDf = spark.read.format("hudi")
+      .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL)
+      .option(DataSourceReadOptions.START_COMMIT.key, "000")
+      .load(basePath)
+
+    // Verify the data was read correctly (3 original + 1 new = 4 rows)
+    assertEquals(4, incrementalDf.count())
+
+    // Verify that the data columns are present and correct
+    val results = incrementalDf.select("_row_key", "data")
+      .orderBy("_row_key")
+      .collect()
+
+    // row1 was updated with new value
+    assertEquals("row1", results(0).getAs[String]("_row_key"))
+    assertEquals("value1_updated", results(0).getAs[String]("data"))
+
+    assertEquals("row2", results(1).getAs[String]("_row_key"))
+    assertEquals("value2", results(1).getAs[String]("data"))
+
+    assertEquals("row3", results(2).getAs[String]("_row_key"))
+    assertEquals("value3", results(2).getAs[String]("data"))
+
+    // row4 is new from the upsert
+    assertEquals("row4", results(3).getAs[String]("_row_key"))
+    assertEquals("value4", results(3).getAs[String]("data"))
+  }
 }
 
 object TestMORDataSource {
