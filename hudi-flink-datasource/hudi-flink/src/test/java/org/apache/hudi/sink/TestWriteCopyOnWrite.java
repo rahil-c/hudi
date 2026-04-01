@@ -961,7 +961,7 @@ public class TestWriteCopyOnWrite extends TestWriteBase {
     if (mdtCompactionEnabled) {
       if (isLogCompaction) {
         conf.setString(HoodieMetadataConfig.ENABLE_LOG_COMPACTION_ON_METADATA_TABLE.key(), "true");
-        conf.setString(HoodieMetadataConfig.LOG_COMPACT_BLOCKS_THRESHOLD.key(), "2");
+        conf.setString(HoodieMetadataConfig.LOG_COMPACT_BLOCKS_THRESHOLD.key(), "1");
       } else {
         conf.set(FlinkOptions.METADATA_COMPACTION_DELTA_COMMITS, 1);
       }
