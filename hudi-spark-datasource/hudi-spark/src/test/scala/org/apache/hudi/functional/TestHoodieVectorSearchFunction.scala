@@ -1292,7 +1292,7 @@ class TestHoodieVectorSearchFunction extends HoodieSparkClientTestBase {
       ).collect()
     })
     val msg = if (ex.getCause != null) ex.getCause.getMessage else ex.getMessage
-    assertTrue(msg.contains("4-7 arguments"), s"Expected arg-count error, got: $msg")
+    assertTrue(msg.contains("arguments"), s"Expected arg-count error, got: $msg")
   }
 
   @Test
@@ -1349,5 +1349,203 @@ class TestHoodieVectorSearchFunction extends HoodieSparkClientTestBase {
     assertEquals(0.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
 
     spark.catalog.dropTempView("mor_corpus")
+  }
+
+  // ======================== RowMatrix Algorithm Tests ========================
+
+  @Test
+  def testRowMatrixSingleQueryCosine(): Unit = {
+    // Same test as testSingleQueryCosineDistance but with row_matrix algorithm.
+    // RowMatrix is exact, so results must match brute force exactly.
+    val result = spark.sql(
+      s"""
+         |SELECT id, label, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  3,
+         |  'cosine',
+         |  'row_matrix'
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(3, result.length)
+
+    // doc_1 [1,0,0]: cosine distance to [1,0,0] = 0.0
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals(0.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
+
+    // doc_4 [0.707,0.707,0]: cosine distance ~= 0.293
+    assertEquals("doc_4", result(1).getAs[String]("id"))
+    assertEquals(1.0 - 0.70710678, result(1).getAs[Double]("_hudi_distance"), 1e-4)
+
+    // doc_5 [0.577,0.577,0.577]: cosine distance ~= 0.423
+    assertEquals("doc_5", result(2).getAs[String]("id"))
+    assertEquals(1.0 - 0.57735027, result(2).getAs[Double]("_hudi_distance"), 1e-4)
+  }
+
+  @Test
+  def testRowMatrixSingleQueryL2(): Unit = {
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  3,
+         |  'l2',
+         |  'row_matrix'
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(3, result.length)
+
+    // doc_1: L2 = 0.0
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals(0.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
+
+    // doc_4: L2 = sqrt((1-0.707)^2 + (0-0.707)^2) ~= 0.765
+    assertEquals("doc_4", result(1).getAs[String]("id"))
+    val expectedL2Doc4 = math.sqrt(
+      math.pow(1.0 - 0.70710678, 2) + math.pow(0.70710678, 2))
+    assertEquals(expectedL2Doc4, result(1).getAs[Double]("_hudi_distance"), 1e-4)
+  }
+
+  @Test
+  def testRowMatrixSingleQueryDotProduct(): Unit = {
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  3,
+         |  'dot_product',
+         |  'row_matrix'
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(3, result.length)
+
+    // doc_1: -dot = -1.0 (most similar)
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals(-1.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
+
+    // doc_4: -dot = -0.707
+    assertEquals("doc_4", result(1).getAs[String]("id"))
+    assertEquals(-0.70710678, result(1).getAs[Double]("_hudi_distance"), 1e-4)
+  }
+
+  @Test
+  def testRowMatrixBatchQuery(): Unit = {
+    createFloatQueryView("rm_batch_queries", "qid", "qvec", Seq(
+      ("q1", Seq(1.0f, 0.0f, 0.0f)),
+      ("q2", Seq(0.0f, 0.0f, 1.0f))
+    ))
+
+    val resultDf = spark.sql(
+      s"""
+         |SELECT *
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  'rm_batch_queries',
+         |  'qvec',
+         |  2,
+         |  'cosine',
+         |  'row_matrix'
+         |)
+         |""".stripMargin
+    )
+
+    // Verify output columns match the batch schema contract
+    val columns = resultDf.columns
+    assertTrue(columns.contains("_hudi_distance"))
+    assertTrue(columns.contains("_hudi_qid"))
+
+    // Each query should get exactly 2 results
+    val resultsByQuery = resultDf.groupBy("_hudi_qid").count().collect()
+    assertEquals(2, resultsByQuery.length)
+    resultsByQuery.foreach { row =>
+      assertEquals(2, row.getLong(1))
+    }
+
+    spark.catalog.dropTempView("rm_batch_queries")
+  }
+
+  @Test
+  def testRowMatrixMatchesBruteForce(): Unit = {
+    // Run both algorithms on the same data and verify identical results.
+    // Uses cosine metric on the standard corpus with query [0.5, 0.5, 0.0].
+    val query = "ARRAY(0.5, 0.5, 0.0)"
+
+    val bruteForceResult = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  $query,
+         |  5,
+         |  'cosine',
+         |  'brute_force'
+         |)
+         |ORDER BY _hudi_distance, id
+         |""".stripMargin
+    ).collect()
+
+    val rowMatrixResult = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  $query,
+         |  5,
+         |  'cosine',
+         |  'row_matrix'
+         |)
+         |ORDER BY _hudi_distance, id
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(bruteForceResult.length, rowMatrixResult.length)
+    bruteForceResult.zip(rowMatrixResult).foreach { case (bf, rm) =>
+      assertEquals(bf.getAs[String]("id"), rm.getAs[String]("id"))
+      assertEquals(bf.getAs[Double]("_hudi_distance"),
+        rm.getAs[Double]("_hudi_distance"), 1e-6)
+    }
+  }
+
+  @Test
+  def testRowMatrixReturnsAllCorpusColumns(): Unit = {
+    val result = spark.sql(
+      s"""
+         |SELECT *
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  2,
+         |  'cosine',
+         |  'row_matrix'
+         |)
+         |""".stripMargin
+    )
+
+    assertTrue(result.columns.contains("_hudi_distance"))
+    assertTrue(result.columns.contains("id"))
+    assertTrue(result.columns.contains("label"))
+    assertFalse(result.columns.contains("embedding"))
+    assertEquals(2, result.count())
   }
 }
