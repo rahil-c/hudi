@@ -112,6 +112,7 @@ object HoodieVectorSearchPlanBuilder {
   /** Resolve a [[SearchAlgorithm]] enum value to its implementation. */
   def resolveAlgorithm(algorithm: SearchAlgorithm.Value): VectorSearchAlgorithm = algorithm match {
     case SearchAlgorithm.BRUTE_FORCE => BruteForceSearchAlgorithm
+    case SearchAlgorithm.ROW_MATRIX => RowMatrixSearchAlgorithm
     case other => throw new HoodieAnalysisException(
       s"Unsupported search algorithm: $other")
   }

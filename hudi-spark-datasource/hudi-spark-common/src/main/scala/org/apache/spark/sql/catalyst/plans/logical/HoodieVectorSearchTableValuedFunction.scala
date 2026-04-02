@@ -38,12 +38,13 @@ object HoodieVectorSearchTableValuedFunction {
   }
 
   object SearchAlgorithm extends Enumeration {
-    val BRUTE_FORCE = Value
+    val BRUTE_FORCE, ROW_MATRIX = Value
 
     def fromString(s: String): Value = Option(s).map(_.toLowerCase).getOrElse("") match {
       case "brute_force" => BRUTE_FORCE
+      case "row_matrix" => ROW_MATRIX
       case other => throw new HoodieAnalysisException(
-        s"Unsupported search algorithm: '$other'. Supported: brute_force")
+        s"Unsupported search algorithm: '$other'. Supported: brute_force, row_matrix")
     }
   }
 
@@ -123,6 +124,11 @@ object HoodieVectorSearchTableValuedFunction {
       BatchQueryArgs(tableName, embeddingCol, queryTable, queryCol, k, metric, algorithm)
     } else {
       // Single query mode: (table, embedding_col, ARRAY(...), k [, metric] [, algorithm])
+      if (exprs.size > 6) {
+        throw new HoodieAnalysisException(
+          s"Function '$FUNC_NAME' expects 4-6 arguments in single-query mode. " +
+            "Single query: (table, embedding_col, query_vector, k [, metric] [, algorithm]).")
+      }
       val queryVectorExpr = exprs(2)
       val k = parseK(exprs(3))
       val metric = if (exprs.size >= 5) DistanceMetric.fromString(exprs(4).eval().toString)
