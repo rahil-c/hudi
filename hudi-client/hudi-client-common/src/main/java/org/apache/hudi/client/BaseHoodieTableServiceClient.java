@@ -29,6 +29,7 @@ import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.avro.model.HoodieRollbackPlan;
 import org.apache.hudi.client.embedded.EmbeddedTimelineService;
 import org.apache.hudi.client.heartbeat.HeartbeatUtils;
+import org.apache.hudi.client.heartbeat.HoodieHeartbeatClient;
 import org.apache.hudi.client.timeline.HoodieTimelineArchiver;
 import org.apache.hudi.client.timeline.TimelineArchivers;
 import org.apache.hudi.common.HoodiePendingRollbackInfo;
@@ -43,6 +44,7 @@ import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.InstantGenerator;
 import org.apache.hudi.common.table.timeline.TimelineUtils;
@@ -81,12 +83,17 @@ import lombok.extern.slf4j.Slf4j;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.text.ParseException;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.Collections;
+
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -625,6 +632,9 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
           metrics.updateCommitMetrics(parsedInstant.getTime(), durationInMs, replaceCommitMetadata, HoodieActiveTimeline.CLUSTERING_ACTION)
       );
     }
+    if (config.isExpirationOfClusteringEnabled()) {
+      heartbeatClient.stop(clusteringCommitTime);
+    }
     log.info("Clustering successfully on commit {} for table {}", clusteringCommitTime, table.getConfig().getBasePath());
   }
 
@@ -726,6 +736,10 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
           Option<HoodieClusteringPlan> clusteringPlan = table
               .scheduleClustering(context, instantTime, extraMetadata);
           option = clusteringPlan.map(plan -> instantTime);
+          if (option.isPresent() && config.isExpirationOfClusteringEnabled()) {
+            heartbeatClient.start(instantTime);
+            log.info("Started heartbeat for clustering instant {}", instantTime);
+          }
           break;
         case COMPACT:
           log.info("Scheduling compaction at instant time: {} for table {}", instantTime, config.getBasePath());
@@ -1007,15 +1021,18 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
         String instantToRollback = rollbackPlan.getInstantToRollback().getCommitTime();
         if (ignoreCompactionAndClusteringInstants) {
           if (!HoodieTimeline.COMPACTION_ACTION.equals(action)) {
-            InstantGenerator instantGenerator = metaClient.getInstantGenerator();
-            boolean isClustering = ClusteringUtils.isClusteringInstant(metaClient.getActiveTimeline(),
-                instantGenerator.createNewInstant(HoodieInstant.State.INFLIGHT, action, instantToRollback), instantGenerator);
-            if (!isClustering) {
-              infoMap.putIfAbsent(instantToRollback, Option.of(new HoodiePendingRollbackInfo(rollbackInstant, rollbackPlan)));
+            HoodieInstant instant = metaClient.getInstantGenerator()
+                .createNewInstant(HoodieInstant.State.INFLIGHT, action, instantToRollback);
+            boolean isClustering = ClusteringUtils.isClusteringInstant(
+                metaClient.getActiveTimeline(), instant, metaClient.getInstantGenerator());
+            if (!isClustering || isClusteringInstantEligibleForRollback(metaClient, instant, config, heartbeatClient)) {
+              infoMap.putIfAbsent(instantToRollback,
+                  Option.of(new HoodiePendingRollbackInfo(rollbackInstant, rollbackPlan)));
             }
           }
         } else {
-          infoMap.putIfAbsent(instantToRollback, Option.of(new HoodiePendingRollbackInfo(rollbackInstant, rollbackPlan)));
+          infoMap.putIfAbsent(instantToRollback,
+              Option.of(new HoodiePendingRollbackInfo(rollbackInstant, rollbackPlan)));
         }
       } catch (Exception e) {
         log.warn("Processing rollback plan failed for {}, skip the plan", rollbackInstant, e);
@@ -1132,6 +1149,20 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
         }
       }).collect(Collectors.toList());
     } else if (cleaningPolicy.isLazy()) {
+      if (config.isExpirationOfClusteringEnabled()) {
+        Stream<HoodieInstant> eligibleClusteringInstants =
+            metaClient.getActiveTimeline().filterPendingClusteringTimeline()
+                .getInstantsAsStream()
+                .filter(instant -> {
+                  try {
+                    return isClusteringInstantEligibleForRollback(metaClient, instant, config, heartbeatClient);
+                  } catch (Exception e) {
+                    log.warn("Failed to check clustering eligibility for instant {}, skipping", instant.requestedTime(), e);
+                    return false;
+                  }
+                });
+        inflightInstantsStream = Stream.concat(inflightInstantsStream, eligibleClusteringInstants);
+      }
       return getInstantsToRollbackForLazyCleanPolicy(metaClient, inflightInstantsStream);
     } else if (cleaningPolicy.isNever()) {
       return Collections.emptyList();
@@ -1155,11 +1186,33 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
     if (!expiredInstants.isEmpty()) {
       // Only return instants that haven't been completed by other writers
       metaClient.reloadActiveTimeline();
-      HoodieTimeline refreshedInflightTimeline = getInflightTimelineExcludeCompactionAndClustering(metaClient);
-      return expiredInstants.stream().filter(refreshedInflightTimeline::containsInstant).collect(Collectors.toList());
+      HoodieTimeline refreshedIncompleteTimeline = metaClient.getActiveTimeline().filterInflightsAndRequested();
+      return expiredInstants.stream().filter(instantTime ->
+          refreshedIncompleteTimeline.containsInstant(instantTime)
+      ).collect(Collectors.toList());
     } else {
       return Collections.emptyList();
     }
+  }
+
+  public static boolean isClusteringInstantEligibleForRollback(
+      HoodieTableMetaClient metaClient, HoodieInstant instant,
+      HoodieWriteConfig config, HoodieHeartbeatClient heartbeatClient) {
+    try {
+      return config.isExpirationOfClusteringEnabled()
+          && hasInstantExpired(metaClient, instant.requestedTime(), config.getClusteringExpirationThresholdMins())
+          && heartbeatClient.isHeartbeatExpired(instant.requestedTime());
+    } catch (Exception e) {
+      throw new HoodieException("Failed to check heartbeat for clustering instant " + instant.requestedTime(), e);
+    }
+  }
+
+  private static boolean hasInstantExpired(HoodieTableMetaClient metaClient, String instantTime, long expirationMins) throws ParseException {
+    ZoneId zoneId = metaClient.getTableConfig().getTimelineTimezone().getZoneId();
+    long currentTimeMs = ZonedDateTime.ofInstant(java.time.Instant.now(), zoneId).toInstant().toEpochMilli();
+    long instantTimeMs = HoodieInstantTimeGenerator.parseDateFromInstantTime(instantTime).toInstant().toEpochMilli();
+    long ageMs = currentTimeMs - instantTimeMs;
+    return ageMs >= TimeUnit.MINUTES.toMillis(expirationMins);
   }
 
   /**
