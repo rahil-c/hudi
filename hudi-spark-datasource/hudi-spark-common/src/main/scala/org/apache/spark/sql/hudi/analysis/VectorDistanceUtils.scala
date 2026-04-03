@@ -112,8 +112,10 @@ object VectorDistanceUtils {
    * Returns a distance function that takes (corpusDenseVector, queryDenseVector, queryNorm)
    * and returns a Double distance. The queryNorm parameter avoids recomputing
    * the query vector's norm on every row for cosine distance.
+   *
+   * Visible to [[BruteForceSearchAlgorithm]] for mapPartitions-based single-query path.
    */
-  private def resolveDistanceFn(
+  private[analysis] def resolveDistanceFn(
       metric: DistanceMetric.Value): (DenseVector, DenseVector, Double) => Double =
     metric match {
       case DistanceMetric.COSINE => (a, b, bNorm) =>
@@ -151,7 +153,7 @@ object VectorDistanceUtils {
       computeRawDistance(metric, a.iterator.map(_.toDouble).toArray, b.iterator.map(_.toDouble).toArray)
     })
 
-  private def requireSameLength(aLen: Int, bLen: Int): Unit = {
+  private[analysis] def requireSameLength(aLen: Int, bLen: Int): Unit = {
     if (aLen != bLen) {
       throw new IllegalArgumentException(
         s"Hudi vector search: vector dimension mismatch ($aLen vs $bLen). " +
