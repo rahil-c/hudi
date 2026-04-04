@@ -25,11 +25,13 @@ import org.apache.hudi.io.SeekableDataInputStream
 import org.apache.hudi.storage.{HoodieStorage, HoodieStorageUtils, StorageConfiguration, StoragePath}
 
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{Dataset, Encoders, Row}
+import org.apache.spark.sql.{Dataset, Row}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{GenericRowWithSchema, SpecificInternalRow}
-import org.apache.spark.sql.types.{BinaryType, StructField, StructType}
+import org.apache.spark.sql.types.{BinaryType, BlobType, DataType, StructField, StructType}
 import org.slf4j.LoggerFactory
+
+import java.io.InputStream
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -183,56 +185,65 @@ class BatchedBlobReader(
 
         while (bufferedRows.hasNext && collected < lookaheadSize) {
           val row = bufferedRows.next()
-          val blobStruct = accessor.getStruct(row, structColIdx, HoodieSchema.Blob.getFieldCount)
-
-          // Dispatch based on storage_type (field 0)
-          val storageType = accessor.getString(blobStruct, 0)
-
-          if (storageType == HoodieSchema.Blob.INLINE) {
-            // Case 1: Inline — bytes are in field 1
-            val bytes = accessor.getBytes(blobStruct, 1)
+          // Handle null struct column (null blob)
+          if (accessor.isNullAt(row, structColIdx)) {
             batch += RowInfo[R](
               originalRow = row,
               filePath = "",
               offset = -1,
               length = -1,
               index = rowIndex,
-              inlineBytes = Some(bytes)
+              inlineBytes = Some(null)
             )
+            rowIndex += 1
+            collected += 1
           } else {
-            // Case 2 or 3: Out-of-line — get reference struct (field 2)
-            val referenceStruct = accessor.getStruct(blobStruct, 2, HoodieSchema.Blob.getReferenceFieldCount)
-            val filePath = accessor.getString(referenceStruct, 0)
-            val offsetIsNull = accessor.isNullAt(referenceStruct, 1)
-            val lengthIsNull = accessor.isNullAt(referenceStruct, 2)
-
-            if (offsetIsNull || lengthIsNull) {
-              // Case 2: Whole-file read — no offset/length specified; sentinel length = -1
+            val blobStruct = accessor.getStruct(row, structColIdx, HoodieSchema.Blob.getFieldCount)
+            // Dispatch based on storage_type (field 0)
+            val storageType = accessor.getString(blobStruct, 0)
+            if (storageType == HoodieSchema.Blob.INLINE) {
+              // Case 1: Inline — bytes are in field 1
+              val bytes = accessor.getBytes(blobStruct, 1)
               batch += RowInfo[R](
                 originalRow = row,
-                filePath = filePath,
-                offset = 0,
+                filePath = "",
+                offset = -1,
                 length = -1,
-                index = rowIndex
+                index = rowIndex,
+                inlineBytes = Some(bytes)
               )
             } else {
-              // Case 3: Regular range read
-              val offset = accessor.getLong(referenceStruct, 1)
-              val length = accessor.getLong(referenceStruct, 2)
-              batch += RowInfo[R](
-                originalRow = row,
-                filePath = filePath,
-                offset = offset,
-                length = length,
-                index = rowIndex
-              )
+              // Case 2 or 3: Out-of-line — get reference struct (field 2)
+              val referenceStruct = accessor.getStruct(blobStruct, 2, HoodieSchema.Blob.getReferenceFieldCount)
+              val filePath = accessor.getString(referenceStruct, 0)
+              val offsetIsNull = accessor.isNullAt(referenceStruct, 1)
+              val lengthIsNull = accessor.isNullAt(referenceStruct, 2)
+              if (offsetIsNull || lengthIsNull) {
+                // Case 2: Whole-file read — no offset/length specified; sentinel length = -1
+                batch += RowInfo[R](
+                  originalRow = row,
+                  filePath = filePath,
+                  offset = 0,
+                  length = -1,
+                  index = rowIndex
+                )
+              } else {
+                // Case 3: Regular range read
+                val offset = accessor.getLong(referenceStruct, 1)
+                val length = accessor.getLong(referenceStruct, 2)
+                batch += RowInfo[R](
+                  originalRow = row,
+                  filePath = filePath,
+                  offset = offset,
+                  length = length,
+                  index = rowIndex
+                )
+              }
             }
+            rowIndex += 1
+            collected += 1
           }
-
-          rowIndex += 1
-          collected += 1
         }
-
         batch.toSeq
       }
     }
@@ -331,15 +342,13 @@ class BatchedBlobReader(
       outputSchema: StructType)
       (implicit builder: RowBuilder[R]): RowResult[R] = {
 
-    var inputStream: SeekableDataInputStream = null
+    var inputStream: InputStream = null
     try {
       val path = new StoragePath(rowInfo.filePath)
-      val fileLength = storage.getPathInfo(path).getLength.toInt
-      inputStream = storage.openSeekable(path, false)
-      val buffer = new Array[Byte](fileLength)
-      inputStream.readFully(buffer, 0, fileLength)
+      inputStream = storage.open(path)
+      val buffer = inputStream.readAllBytes()
 
-      logger.debug(s"Read entire file ${rowInfo.filePath} ($fileLength bytes)")
+      logger.debug(s"Read entire file ${rowInfo.filePath} (${buffer.length} bytes)")
 
       RowResult(builder.buildRow(rowInfo.originalRow, buffer, outputSchema), rowInfo.index)
     } finally {
@@ -627,6 +636,10 @@ object BatchedBlobReader {
         getBlobColumn(df.schema)
     }
 
+    val structField = df.schema(structColIdx)
+    require(isCompatibleBlobType(structField.dataType),
+      s"Blob column '$structColName' must be compatible with BlobType (type, data, reference struct), found: ${structField.dataType}")
+
     // Create output schema (input + data column)
     val outputSchema = df.schema.add(StructField(DATA_COL, BinaryType, nullable = false))
 
@@ -729,4 +742,10 @@ object BatchedBlobReader {
       )
     }
   }
+
+  // Validate that the struct column is compatible with BlobType
+    private def isCompatibleBlobType(dt: DataType): Boolean = dt match {
+      case struct: StructType => DataType.equalsIgnoreCaseAndNullability(struct, BlobType.dataType)
+      case _ => false
+    }
 }

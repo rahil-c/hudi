@@ -20,11 +20,16 @@
 package org.apache.hudi.blob
 
 import org.apache.hudi.blob.BlobTestHelpers._
+import org.apache.hudi.exception.HoodieIOException
 import org.apache.hudi.testutils.HoodieClientTestBase
 
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
+
+import java.util.Collections
 
 /**
  * Tests for the read_blob() SQL function.
@@ -43,38 +48,52 @@ class TestReadBlobSQL extends HoodieClientTestBase {
   def testBasicReadBlobSQL(): Unit = {
     val filePath = createTestFile(tempDir, "basic.bin", 10000)
 
-    // Create table with blob column
+    // Main DataFrame with blobStructCol
     val df = sparkSession.createDataFrame(Seq(
       (1, "record1", filePath, 0L, 100L),
-      (2, "record2", filePath, 100L, 100L),
-      (3, "record3", filePath, 200L, 100L)
+      (3, "record3", filePath, 100L, 100L),
+      (4, "record4", filePath, 200L, 100L)
     )).toDF("id", "name", "external_path", "offset", "length")
-      .withColumn("file_info",
-        blobStructCol("file_info", col("external_path"), col("offset"), col("length")))
+      .withColumn("file_info", blobStructCol("file_info", col("external_path"), col("offset"), col("length")))
       .select("id", "name", "file_info")
 
-    df.createOrReplaceTempView("test_table")
+    // Ensure file_info is nullable in the schema
+    val schema = StructType(df.schema.map {
+      case StructField("file_info", dt, _, md) => StructField("file_info", dt, nullable = true, md)
+      case other => other
+    })
+    val dfWithNullable = sparkSession.createDataFrame(df.rdd, schema)
+
+    // DataFrame with a null blob value
+    val nullRow = Row(2, "record2", null)
+    val nullDf = sparkSession.createDataFrame(Collections.singletonList(nullRow), schema)
+
+    // Union the null row
+    val fullDf = dfWithNullable.unionByName(nullDf)
+    fullDf.createOrReplaceTempView("test_table")
 
     // Use SQL with read_blob
     val result = sparkSession.sql("""
       SELECT id, name, read_blob(file_info) as data
       FROM test_table
-      WHERE id <= 2
+      WHERE id <= 3
+      ORDER BY id
     """)
 
     val rows = result.collect()
-    assertEquals(2, rows.length)
+    assertEquals(3, rows.length)
 
-    // Verify data is binary
+    // Verify data is binary for non-null rows
     val data1 = rows(0).getAs[Array[Byte]]("data")
     assertEquals(100, data1.length)
-
-    // Verify content matches expected pattern
     assertBytesContent(data1)
 
-    val data2 = rows(1).getAs[Array[Byte]]("data")
-    assertEquals(100, data2.length)
-    assertBytesContent(data2, expectedOffset = 100)
+    // The null_blob row should have null data
+    assertTrue(rows(1).isNullAt(2))
+
+    val data3 = rows(2).getAs[Array[Byte]]("data")
+    assertEquals(100, data3.length)
+    assertBytesContent(data3, expectedOffset = 100)
   }
 
   @Test
@@ -116,39 +135,6 @@ class TestReadBlobSQL extends HoodieClientTestBase {
     assertEquals(100, rows(1).getAs[Array[Byte]]("data").length)
 
     // Verify data content
-    val data1 = rows(0).getAs[Array[Byte]]("data")
-    assertBytesContent(data1)
-  }
-
-  @Test
-  def testReadBlobWithOrderBy(): Unit = {
-    val filePath = createTestFile(tempDir, "order.bin", 10000)
-
-    val df = sparkSession.createDataFrame(Seq(
-      (3, filePath, 200L, 50L),
-      (1, filePath, 0L, 50L),
-      (2, filePath, 100L, 50L)
-    )).toDF("id", "external_path", "offset", "length")
-      .withColumn("file_info",
-        blobStructCol("file_info", col("external_path"), col("offset"), col("length")))
-      .select("id", "file_info")
-
-    df.createOrReplaceTempView("order_table")
-
-    // SQL with ORDER BY
-    val result = sparkSession.sql("""
-      SELECT id, read_blob(file_info) as data
-      FROM order_table
-      ORDER BY id
-    """)
-
-    val rows = result.collect()
-    assertEquals(3, rows.length)
-    assertEquals(1, rows(0).getAs[Int]("id"))
-    assertEquals(2, rows(1).getAs[Int]("id"))
-    assertEquals(3, rows(2).getAs[Int]("id"))
-
-    // Verify data content for ordered results
     val data1 = rows(0).getAs[Array[Byte]]("data")
     assertBytesContent(data1)
   }
@@ -390,5 +376,33 @@ class TestReadBlobSQL extends HoodieClientTestBase {
     // Row 3 should have data
     assertTrue(rows(2).getAs[Boolean]("should_resolve"))
     assertNotNull(rows(2).get(2))
+  }
+
+  @Test
+  def testReadBlobWithMissingFile(): Unit = {
+    val missingPath = tempDir.resolve("does_not_exist.bin").toString
+    val df = sparkSession.createDataFrame(Seq(
+      (1, missingPath, 0L, 10L)
+    )).toDF("id", "external_path", "offset", "length")
+      .withColumn("file_info", blobStructCol("file_info", col("external_path"), col("offset"), col("length")))
+      .select("id", "file_info")
+    df.createOrReplaceTempView("missing_file_table")
+    val thrown = assertThrows(classOf[Exception], () => {
+      sparkSession.sql("SELECT id, read_blob(file_info) as data FROM missing_file_table").collect()
+    })
+    assertTrue(thrown.getCause.isInstanceOf[HoodieIOException])
+  }
+
+  @Test
+  def testReadBlobOnNonBlobColumn(): Unit = {
+    val df = sparkSession.createDataFrame(Seq(
+      (1, "not_a_blob")
+    )).toDF("id", "not_blob")
+    df.createOrReplaceTempView("non_blob_table")
+    val thrown = assertThrows(classOf[Exception], () => {
+      sparkSession.sql("SELECT id, read_blob(not_blob) as data FROM non_blob_table").collect()
+    })
+    assertTrue(thrown.isInstanceOf[IllegalArgumentException])
+    assertTrue(thrown.getMessage.contains("must be compatible with BlobType"))
   }
 }

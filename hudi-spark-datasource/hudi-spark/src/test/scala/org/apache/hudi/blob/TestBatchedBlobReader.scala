@@ -30,6 +30,8 @@ import org.apache.spark.sql.types._
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
 
+import java.util.Collections
+
 /**
  * Tests for BatchedByteRangeReader.
  *
@@ -416,5 +418,19 @@ class TestBatchedBlobReader extends HoodieClientTestBase {
     val range2 = results.find(_.getAs[String]("record_id") == "range_row_2").get
     assertEquals(100, range2.getAs[Array[Byte]]("data").length)
     assertBytesContent(range2.getAs[Array[Byte]]("data"), expectedOffset = 100)
+  }
+
+  @Test
+  def testNullBlobStructColumnReturnsNull(): Unit = {
+    // Create a DataFrame with a null struct column
+    val structType = blobStructCol("data", lit("/tmp/fake"), lit(0L), lit(1L)).expr.dataType
+    val schema = StructType(Seq(StructField("data", structType, nullable = true, metadata = blobMetadata)))
+    val rows = Collections.singletonList(Row(null))
+    val inputDF = sparkSession.createDataFrame(rows, schema)
+
+    val resultDF = BatchedBlobReader.readBatched(inputDF, storageConf)
+    val results = resultDF.collect()
+    assertEquals(1, results.length)
+    assertTrue(results(0).isNullAt(0))
   }
 }

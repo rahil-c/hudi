@@ -23,6 +23,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression, ExprId, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.rules.Rule
+import org.apache.spark.sql.types.{DataType, StructType}
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -41,7 +42,8 @@ case class ReadBlobRule(spark: SparkSession) extends Rule[LogicalPlan] {
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperatorsUp {
     case Filter(condition, child)
-      if containsReadBlobInExpression(condition) =>
+      if containsReadBlobInExpression(condition)
+        && !child.isInstanceOf[BatchedBlobRead] =>
 
       val blobColumns = extractBlobColumnsFromExpression(condition)
       val (wrappedPlan, blobToDataAttr) = wrapWithBlobReads(blobColumns, child)
@@ -66,6 +68,14 @@ case class ReadBlobRule(spark: SparkSession) extends Rule[LogicalPlan] {
     }
     blobColumns.foldLeft((child: LogicalPlan, Map.empty[ExprId, Attribute])) {
       case ((currentPlan, mapping), blobAttr) =>
+        // Type compatibility check (early fail for non-struct columns)
+        blobAttr.dataType match {
+          case struct: StructType if DataType.equalsIgnoreCaseAndNullability(struct, org.apache.spark.sql.types.BlobType.dataType) =>
+            // Valid blob column
+          case _ =>
+            throw new IllegalArgumentException(
+              s"Blob column '${blobAttr.name}' must be compatible with BlobType (type, data, reference struct), found: ${blobAttr.dataType}")
+        }
         val blobRead = BatchedBlobRead(currentPlan, blobAttr)
         (blobRead, mapping + (blobAttr.exprId -> blobRead.dataAttr))
     }
