@@ -40,7 +40,7 @@ object BlobTestHelpers {
     struct(
       lit(HoodieSchema.Blob.INLINE).as(HoodieSchema.Blob.TYPE),
       bytesCol.cast("binary").as(HoodieSchema.Blob.INLINE_DATA_FIELD),
-      lit(null).cast("struct<externalPath:string,offset:bigint,length:bigint,managed:boolean>")
+      lit(null).cast("struct<external_path:string,offset:bigint,length:bigint,managed:boolean>")
         .as(HoodieSchema.Blob.EXTERNAL_REFERENCE)
     ).as(name, blobMetadata)
   }
