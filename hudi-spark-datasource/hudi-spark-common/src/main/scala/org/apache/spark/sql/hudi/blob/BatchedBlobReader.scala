@@ -641,7 +641,7 @@ object BatchedBlobReader {
       s"Blob column '$structColName' must be compatible with BlobType (type, data, reference struct), found: ${structField.dataType}")
 
     // Create output schema (input + data column)
-    val outputSchema = df.schema.add(StructField(DATA_COL, BinaryType, nullable = false))
+    val outputSchema = df.schema.add(StructField(DATA_COL, BinaryType, nullable = true))
 
     // Broadcast storage configuration
     val broadcastConf = spark.sparkContext.broadcast(storageConf)
@@ -699,7 +699,7 @@ object BatchedBlobReader {
     val structColIdx = schema.fieldIndex(columnName)
 
     // Create output schema (input + __temp__data column)
-    val outputSchema = schema.add(StructField(DATA_COL, BinaryType, nullable = false))
+    val outputSchema = schema.add(StructField(DATA_COL, BinaryType, nullable = true))
 
     // Broadcast configuration
     val broadcastConf = rdd.sparkContext.broadcast(storageConf)
