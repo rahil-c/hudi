@@ -1309,18 +1309,20 @@ class TestHoodieVectorSearchFunction extends HoodieSparkClientTestBase {
 
   @Test
   def testTooManyArguments(): Unit = {
+    // Passing 9 arguments (max is 8) should trigger an argument-count error
     val ex = assertThrows(classOf[Exception], () => {
       spark.sql(
         s"""
            |SELECT *
            |FROM hudi_vector_search(
-           |  '$corpusViewName', 'embedding', ARRAY(1.0, 0.0, 0.0), 3, 'cosine', 'brute_force', 'extra_arg'
+           |  '$corpusViewName', 'embedding', ARRAY(1.0, 0.0, 0.0), 3,
+           |  'cosine', 'brute_force', NULL, 0.5, 'extra_arg'
            |)
            |""".stripMargin
       ).collect()
     })
     val msg = if (ex.getCause != null) ex.getCause.getMessage else ex.getMessage
-    assertTrue(msg.contains("4-6 arguments"), s"Expected arg-count error, got: $msg")
+    assertTrue(msg.contains("4-8 arguments"), s"Expected arg-count error, got: $msg")
   }
 
   @Test
@@ -1540,5 +1542,396 @@ class TestHoodieVectorSearchFunction extends HoodieSparkClientTestBase {
       s"Expected integrality error, got: $msg")
 
     spark.catalog.dropTempView("byte_frac_corpus")
+  }
+
+  // ─── Pre-filter tests ───
+
+  @Test
+  def testSingleQueryWithPreFilter(): Unit = {
+    // The corpus has labels: x-axis, y-axis, z-axis, xy-diagonal, xyz-diagonal.
+    // Pre-filter to only "x-axis" or "xy-diagonal" labels, then search for [1,0,0].
+    // Without filter: top 3 = doc_1, doc_4, doc_5
+    // With filter (label IN ('x-axis','xy-diagonal')): only doc_1 and doc_4 are candidates
+    val result = spark.sql(
+      s"""
+         |SELECT id, label, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  5,
+         |  'cosine',
+         |  'brute_force',
+         |  'label IN ("x-axis", "xy-diagonal")'
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    // Only 2 rows should be returned (filter removed doc_2, doc_3, doc_5)
+    assertEquals(2, result.length)
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals(0.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
+    assertEquals("doc_4", result(1).getAs[String]("id"))
+    assertEquals(1.0 - 0.70710678, result(1).getAs[Double]("_hudi_distance"), 1e-4)
+  }
+
+  @Test
+  def testSingleQueryWithPreFilterNarrowResult(): Unit = {
+    // Filter to only z-axis, then search for [1,0,0] (orthogonal).
+    // Should return exactly 1 result with cosine distance = 1.0.
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  5,
+         |  'cosine',
+         |  'brute_force',
+         |  'label = "z-axis"'
+         |)
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(1, result.length)
+    assertEquals("doc_3", result(0).getAs[String]("id"))
+    assertEquals(1.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
+  }
+
+  @Test
+  def testSingleQueryWithNullFilter(): Unit = {
+    // NULL filter should behave the same as no filter (all rows considered)
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  3,
+         |  'cosine',
+         |  'brute_force',
+         |  NULL
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(3, result.length)
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals("doc_4", result(1).getAs[String]("id"))
+    assertEquals("doc_5", result(2).getAs[String]("id"))
+  }
+
+  // ─── Max distance tests ───
+
+  @Test
+  def testSingleQueryWithMaxDistance(): Unit = {
+    // Search for [1,0,0] with cosine metric and max_distance = 0.3.
+    // doc_1: distance 0.0 (included)
+    // doc_4: distance ~0.293 (included, barely under 0.3)
+    // doc_5: distance ~0.423 (excluded)
+    // doc_2: distance 1.0 (excluded)
+    // doc_3: distance 1.0 (excluded)
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  5,
+         |  'cosine',
+         |  'brute_force',
+         |  NULL,
+         |  0.3
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(2, result.length)
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals(0.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
+    assertEquals("doc_4", result(1).getAs[String]("id"))
+    assertEquals(1.0 - 0.70710678, result(1).getAs[Double]("_hudi_distance"), 1e-4)
+  }
+
+  @Test
+  def testSingleQueryMaxDistanceExcludesAll(): Unit = {
+    // max_distance = 0 should exclude everything except exact matches.
+    // Only doc_1 has distance 0.0 to [1,0,0].
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  5,
+         |  'cosine',
+         |  'brute_force',
+         |  NULL,
+         |  0.0
+         |)
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(1, result.length)
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals(0.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
+  }
+
+  @Test
+  def testSingleQueryMaxDistanceWithNullThreshold(): Unit = {
+    // NULL max_distance should behave like no threshold (all results returned up to k)
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  3,
+         |  'cosine',
+         |  'brute_force',
+         |  NULL,
+         |  NULL
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(3, result.length)
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+  }
+
+  // ─── Combined filter + max distance tests ───
+
+  @Test
+  def testSingleQueryFilterAndMaxDistanceCombined(): Unit = {
+    // Filter to exclude z-axis, max_distance = 0.5 with cosine and query [1,0,0].
+    // After filter: doc_1 (0.0), doc_2 (1.0), doc_4 (~0.293), doc_5 (~0.423)
+    // After max_distance 0.5: doc_1 (0.0), doc_4 (~0.293), doc_5 (~0.423)
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  5,
+         |  'cosine',
+         |  'brute_force',
+         |  'label != "z-axis"',
+         |  0.5
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    assertEquals(3, result.length)
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals("doc_4", result(1).getAs[String]("id"))
+    assertEquals("doc_5", result(2).getAs[String]("id"))
+    // Verify doc_2 (distance 1.0) is excluded by max_distance
+    assertFalse(result.map(_.getAs[String]("id")).contains("doc_2"))
+    // Verify doc_3 (z-axis) is excluded by filter
+    assertFalse(result.map(_.getAs[String]("id")).contains("doc_3"))
+  }
+
+  @Test
+  def testSingleQueryFilterWithL2AndMaxDistance(): Unit = {
+    // L2 distance with filter and max_distance. Query [1,0,0].
+    // doc_1: L2 = 0.0
+    // doc_4: L2 = sqrt((1-0.707)^2 + 0.707^2) ~= 0.765
+    // doc_5: L2 = sqrt((1-0.577)^2 + 0.577^2 + 0.577^2) ~= 0.816
+    // Only include label containing 'axis', max_distance = 1.0 (L2)
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  ARRAY(1.0, 0.0, 0.0),
+         |  5,
+         |  'l2',
+         |  'brute_force',
+         |  'label LIKE "%axis%"',
+         |  1.0
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    // label LIKE '%axis%' matches doc_1 (x-axis), doc_2 (y-axis), doc_3 (z-axis)
+    // L2 distances: doc_1=0.0, doc_2=sqrt(2)~=1.414, doc_3=sqrt(2)~=1.414
+    // max_distance = 1.0 excludes doc_2 and doc_3
+    assertEquals(1, result.length)
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals(0.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
+  }
+
+  // ─── Batch mode filter + max distance tests ───
+
+  @Test
+  def testBatchQueryWithPreFilter(): Unit = {
+    // Batch search with filter — only search within "x-axis" and "y-axis" labels
+    createFloatQueryView("batch_filter_queries", "qid", "qvec", Seq(
+      ("q_x", Seq(1.0f, 0.0f, 0.0f)),
+      ("q_y", Seq(0.0f, 1.0f, 0.0f))
+    ))
+
+    val result = spark.sql(
+      s"""
+         |SELECT *
+         |FROM hudi_vector_search_batch(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  'batch_filter_queries',
+         |  'qvec',
+         |  5,
+         |  'cosine',
+         |  'brute_force',
+         |  'label IN ("x-axis", "y-axis")'
+         |)
+         |""".stripMargin
+    )
+
+    val rows = result.collect()
+    // Filter narrows corpus to 2 docs (doc_1, doc_2), 2 queries, k=5 but only 2 corpus rows
+    // So each query gets at most 2 results = 4 total rows
+    assertEquals(4, rows.length)
+
+    // Verify only doc_1 and doc_2 appear
+    val ids = rows.map(_.getAs[String]("id")).toSet
+    assertEquals(Set("doc_1", "doc_2"), ids)
+
+    spark.catalog.dropTempView("batch_filter_queries")
+  }
+
+  @Test
+  def testBatchQueryWithMaxDistance(): Unit = {
+    // Batch search with max_distance threshold
+    createFloatQueryView("batch_maxd_queries", "qid", "qvec", Seq(
+      ("q_x", Seq(1.0f, 0.0f, 0.0f)),
+      ("q_z", Seq(0.0f, 0.0f, 1.0f))
+    ))
+
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance, _hudi_qid
+         |FROM hudi_vector_search_batch(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  'batch_maxd_queries',
+         |  'qvec',
+         |  5,
+         |  'cosine',
+         |  'brute_force',
+         |  NULL,
+         |  0.5
+         |)
+         |ORDER BY _hudi_qid, _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    // For q_x [1,0,0] with max_distance 0.5:
+    //   doc_1: 0.0, doc_4: ~0.293, doc_5: ~0.423 → 3 results
+    // For q_z [0,0,1] with max_distance 0.5:
+    //   doc_3: 0.0, doc_5: ~0.423 → 2 results
+    // Total: 5 results
+    assertEquals(5, result.length)
+
+    // Verify no result exceeds the threshold
+    result.foreach { row =>
+      assertTrue(row.getAs[Double]("_hudi_distance") <= 0.5 + 1e-5,
+        s"Distance ${row.getAs[Double]("_hudi_distance")} exceeds max_distance 0.5")
+    }
+
+    spark.catalog.dropTempView("batch_maxd_queries")
+  }
+
+  @Test
+  def testBatchQueryFilterAndMaxDistanceCombined(): Unit = {
+    // Combine filter and max_distance in batch mode
+    createFloatQueryView("batch_combo_queries", "qid", "qvec", Seq(
+      ("q_x", Seq(1.0f, 0.0f, 0.0f))
+    ))
+
+    val result = spark.sql(
+      s"""
+         |SELECT id, _hudi_distance
+         |FROM hudi_vector_search_batch(
+         |  '$corpusViewName',
+         |  'embedding',
+         |  'batch_combo_queries',
+         |  'qvec',
+         |  5,
+         |  'cosine',
+         |  'brute_force',
+         |  'label != "z-axis"',
+         |  0.3
+         |)
+         |ORDER BY _hudi_distance
+         |""".stripMargin
+    ).collect()
+
+    // Corpus after filter (no z-axis): doc_1, doc_2, doc_4, doc_5
+    // Distances to [1,0,0]: doc_1=0.0, doc_4=~0.293, doc_5=~0.423, doc_2=1.0
+    // After max_distance 0.3: doc_1=0.0, doc_4=~0.293
+    assertEquals(2, result.length)
+    assertEquals("doc_1", result(0).getAs[String]("id"))
+    assertEquals("doc_4", result(1).getAs[String]("id"))
+
+    spark.catalog.dropTempView("batch_combo_queries")
+  }
+
+  // ─── Pre-filter on in-memory views (non-Hudi tables) ───
+
+  @Test
+  def testSingleQueryPreFilterOnInMemoryView(): Unit = {
+    // Create a view with a category column to filter on
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false), nullable = false),
+      StructField("category", StringType, nullable = true)
+    ))
+    val rows = Seq(
+      Row("a", Seq(1.0f, 0.0f, 0.0f), "science"),
+      Row("b", Seq(0.0f, 1.0f, 0.0f), "art"),
+      Row("c", Seq(0.0f, 0.0f, 1.0f), "science"),
+      Row("d", Seq(0.5f, 0.5f, 0.0f), "art")
+    )
+    spark.createDataFrame(spark.sparkContext.parallelize(rows), schema)
+      .createOrReplaceTempView("filter_test_view")
+
+    val result = spark.sql(
+      """
+        |SELECT id, _hudi_distance
+        |FROM hudi_vector_search(
+        |  'filter_test_view',
+        |  'embedding',
+        |  ARRAY(1.0, 0.0, 0.0),
+        |  5,
+        |  'l2',
+        |  'brute_force',
+        |  'category = "science"'
+        |)
+        |ORDER BY _hudi_distance
+        |""".stripMargin
+    ).collect()
+
+    // Only "science" rows: a=[1,0,0] and c=[0,0,1]
+    assertEquals(2, result.length)
+    assertEquals("a", result(0).getAs[String]("id"))
+    assertEquals(0.0, result(0).getAs[Double]("_hudi_distance"), 1e-5)
+    assertEquals("c", result(1).getAs[String]("id"))
+    // L2 of [1,0,0] to [0,0,1] = sqrt(2)
+    assertEquals(math.sqrt(2.0), result(1).getAs[Double]("_hudi_distance"), 1e-4)
+
+    spark.catalog.dropTempView("filter_test_view")
   }
 }

@@ -19,13 +19,14 @@ package org.apache.spark.sql.hudi.analysis
 
 import org.apache.hudi.common.schema.HoodieSchema
 
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.plans.logical.HoodieVectorSearchTableValuedFunction.{DistanceMetric, SearchAlgorithm}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions.{broadcast, col, monotonically_increasing_id, row_number}
 import org.apache.spark.sql.hudi.command.exception.HoodieAnalysisException
-import org.apache.spark.sql.types.{ArrayType, ByteType, DataType, DoubleType, FloatType}
+import org.apache.spark.sql.types.{ArrayType, ByteType, DataType, DoubleType, FloatType, StructField, StructType}
 
 import scala.util.{Failure, Success, Try}
 
@@ -64,6 +65,13 @@ trait VectorSearchAlgorithm {
    * @param queryVector    the query vector, normalized to Array[Double]
    * @param k              number of nearest neighbors to return
    * @param metric         distance metric (COSINE, L2, DOT_PRODUCT)
+   * @param filter         optional SQL predicate applied to the corpus before distance computation,
+   *                       enabling partition pruning and data skipping.
+   *                       String literals inside the predicate must use double quotes
+   *                       (e.g. {@code label = "z-axis"}) because the filter is passed as a
+   *                       single-quoted TVF argument and Spark's lexer does not support
+   *                       {@code ''} as an escape sequence inside string literals.
+   * @param maxDistance     optional distance threshold; results beyond this value are excluded
    * @return an analyzed LogicalPlan whose output matches the single-query schema contract
    */
   def buildSingleQueryPlan(
@@ -72,7 +80,9 @@ trait VectorSearchAlgorithm {
       embeddingCol: String,
       queryVector: Array[Double],
       k: Int,
-      metric: DistanceMetric.Value): LogicalPlan
+      metric: DistanceMetric.Value,
+      filter: Option[String] = None,
+      maxDistance: Option[Double] = None): LogicalPlan
 
   /**
    * Build a plan that finds the k nearest corpus rows for each row in the query table.
@@ -84,6 +94,9 @@ trait VectorSearchAlgorithm {
    * @param queryEmbeddingCol  name of the embedding column in queryDf
    * @param k                  number of nearest neighbors per query
    * @param metric             distance metric (COSINE, L2, DOT_PRODUCT)
+   * @param filter             optional SQL predicate applied to the corpus before distance computation,
+   *                           enabling partition pruning and data skipping
+   * @param maxDistance         optional distance threshold; results beyond this value are excluded
    * @return an analyzed LogicalPlan whose output matches the batch-query schema contract
    * @note Batch mode broadcasts the query table to all executors via a cross-join.
    *       This is designed for small-to-medium query sets (tens to low hundreds of rows).
@@ -96,7 +109,9 @@ trait VectorSearchAlgorithm {
       queryDf: DataFrame,
       queryEmbeddingCol: String,
       k: Int,
-      metric: DistanceMetric.Value): LogicalPlan
+      metric: DistanceMetric.Value,
+      filter: Option[String] = None,
+      maxDistance: Option[Double] = None): LogicalPlan
 }
 
 /**
@@ -220,14 +235,22 @@ object HoodieVectorSearchPlanBuilder {
  *
  * <p>Complexity: O(|corpus| * |queries| * dimensions) — linear scan with no index.
  *
- * <p><b>Single-query mode:</b> applies a distance UDF per corpus row, then
- * {@code orderBy + limit(k)} (Spark optimizes this to a partial sort via TakeOrderedAndProject).
+ * <p><b>Single-query mode:</b> uses {@code mapPartitions} with buffer reuse to compute
+ * distances at the partition level, eliminating per-row UDF overhead and GC pressure.
+ * A reusable {@code DenseVector} wrapping a mutable {@code Array[Double]} is allocated
+ * once per partition. Results use {@code orderBy + limit(k)} (Spark optimizes this to
+ * a partial sort via TakeOrderedAndProject).
  *
  * <p><b>Batch-query mode:</b> broadcast cross-joins the (small) query table with
- * the corpus, computes pairwise distances, then uses a window function to rank
+ * the corpus, computes pairwise distances via UDF, then uses a window function to rank
  * and select top-K per query. The cross-join produces O(|corpus| * |queries|)
  * intermediate rows, so this is suitable for small-to-medium query sets
  * (tens to low hundreds of queries) against moderate corpora.
+ *
+ * <p>Both modes support an optional {@code filter} predicate (applied to the corpus before
+ * distance computation, enabling Hudi partition pruning and data skipping) and an optional
+ * {@code maxDistance} threshold (results beyond this distance are excluded before top-K
+ * selection, reducing shuffle and sort volume).
  */
 object BruteForceSearchAlgorithm extends VectorSearchAlgorithm {
 
@@ -235,20 +258,42 @@ object BruteForceSearchAlgorithm extends VectorSearchAlgorithm {
 
   override val name: String = "brute_force"
 
+  /**
+   * Parses and resolves a SQL filter predicate against the DataFrame's schema using the
+   * session-aware parser, then applies it. This avoids the pitfall of
+   * {@code DataFrame.filter(String)} which internally uses {@code SparkSession.active}
+   * (potentially a different session inside Catalyst analyzer rules).
+   */
+  private def applyFilter(spark: SparkSession, df: DataFrame, filterExpr: String): DataFrame = {
+    try {
+      df.filter(filterExpr)
+    } catch {
+      case e: Exception =>
+        throw new HoodieAnalysisException(
+          s"Invalid pre-filter expression '$filterExpr': ${e.getMessage}")
+    }
+  }
+
   override def buildSingleQueryPlan(
       spark: SparkSession,
       corpusDf: DataFrame,
       embeddingCol: String,
       queryVector: Array[Double],
       k: Int,
-      metric: DistanceMetric.Value): LogicalPlan = {
+      metric: DistanceMetric.Value,
+      filter: Option[String] = None,
+      maxDistance: Option[Double] = None): LogicalPlan = {
     validateEmbeddingColumn(corpusDf, embeddingCol)
     validateQueryVectorDimension(corpusDf, embeddingCol, queryVector.length)
 
     val elemType = getElementType(corpusDf, embeddingCol)
-    val filteredDf = corpusDf.filter(col(embeddingCol).isNotNull)
 
-    // Validate byte corpus query vector values before creating the UDF.
+    // Apply pre-filter before distance computation to enable Hudi partition pruning
+    // and data skipping, reducing the number of rows that need distance computation.
+    var baseDf = corpusDf.filter(col(embeddingCol).isNotNull)
+    filter.foreach(f => baseDf = applyFilter(spark, baseDf, f))
+
+    // Validate byte corpus query vector values before computing distances.
     if (elemType == ByteType) {
       queryVector.foreach { v =>
         if (v < Byte.MinValue || v > Byte.MaxValue)
@@ -261,15 +306,52 @@ object BruteForceSearchAlgorithm extends VectorSearchAlgorithm {
       }
     }
 
-    // The single-query UDF closes over the pre-computed query DenseVector,
-    // so only the corpus column is passed per row.
-    val distanceUdf = VectorDistanceUtils.createSingleQueryDistanceUdf(metric, elemType, queryVector)
+    val inputSchema = baseDf.schema
+    val embeddingIdx = inputSchema.fieldIndex(embeddingCol)
+    val keepIndices = inputSchema.fields.indices.filter(_ != embeddingIdx).toArray
+    val outputSchema = StructType(
+      keepIndices.map(inputSchema.fields(_)) :+ StructField(DISTANCE_COL, DoubleType, nullable = false))
 
-    val result = filteredDf
-      .withColumn(DISTANCE_COL, distanceUdf(col(embeddingCol)))
-      .drop(embeddingCol)
-      .orderBy(col(DISTANCE_COL).asc)
-      .limit(k)
+    // Capture serializable values for the closure — these are sent to executors.
+    val queryArr = queryVector.clone()
+    val dims = queryArr.length
+    val metricValue = metric
+    val corpusElemType = elemType
+
+    val distanceRdd = baseDf.rdd.mapPartitions { iter =>
+      // Allocate buffer once per partition; DenseVector wraps it without copying.
+      val buffer = new Array[Double](dims)
+      val corpusDv = new DenseVector(buffer)
+      val queryDv = new DenseVector(queryArr)
+      val queryNorm = Vectors.norm(queryDv, 2.0)
+      val distFn = VectorDistanceUtils.resolveDistanceFn(metricValue)
+
+      // Specialize the fill function once per partition based on element type.
+      val fillBuffer: (Row, Int) => Unit = corpusElemType match {
+        case FloatType => (row, idx) =>
+          val seq = row.getSeq[Float](idx)
+          VectorDistanceUtils.requireSameLength(seq.length, dims)
+          var i = 0; while (i < dims) { buffer(i) = seq(i).toDouble; i += 1 }
+        case DoubleType => (row, idx) =>
+          val seq = row.getSeq[Double](idx)
+          VectorDistanceUtils.requireSameLength(seq.length, dims)
+          var i = 0; while (i < dims) { buffer(i) = seq(i); i += 1 }
+        case ByteType => (row, idx) =>
+          val seq = row.getSeq[Byte](idx)
+          VectorDistanceUtils.requireSameLength(seq.length, dims)
+          var i = 0; while (i < dims) { buffer(i) = seq(i).toDouble; i += 1 }
+      }
+
+      iter.map { row =>
+        fillBuffer(row, embeddingIdx)
+        val dist = distFn(corpusDv, queryDv, queryNorm)
+        Row.fromSeq(keepIndices.map(row.get) :+ dist)
+      }
+    }
+
+    var resultDf = spark.createDataFrame(distanceRdd, outputSchema)
+    maxDistance.foreach(d => resultDf = resultDf.filter(col(DISTANCE_COL) <= d))
+    val result = resultDf.orderBy(col(DISTANCE_COL).asc).limit(k)
 
     result.queryExecution.analyzed
   }
@@ -281,7 +363,9 @@ object BruteForceSearchAlgorithm extends VectorSearchAlgorithm {
       queryDf: DataFrame,
       queryEmbeddingCol: String,
       k: Int,
-      metric: DistanceMetric.Value): LogicalPlan = {
+      metric: DistanceMetric.Value,
+      filter: Option[String] = None,
+      maxDistance: Option[Double] = None): LogicalPlan = {
     validateEmbeddingColumn(corpusDf, corpusEmbeddingCol)
     validateEmbeddingColumn(queryDf, queryEmbeddingCol)
     validateElementTypeCompatibility(corpusDf, corpusEmbeddingCol, queryDf, queryEmbeddingCol)
@@ -289,7 +373,11 @@ object BruteForceSearchAlgorithm extends VectorSearchAlgorithm {
 
     val corpusElemType = getElementType(corpusDf, corpusEmbeddingCol)
     val distanceUdf = VectorDistanceUtils.createDistanceUdf(metric, corpusElemType)
-    val filteredCorpus = corpusDf.filter(col(corpusEmbeddingCol).isNotNull)
+
+    // Apply pre-filter before cross-join to enable Hudi partition pruning
+    // and data skipping, reducing the cross-join cardinality.
+    var filteredCorpus = corpusDf.filter(col(corpusEmbeddingCol).isNotNull)
+    filter.foreach(f => filteredCorpus = applyFilter(spark, filteredCorpus, f))
 
     // Prefix clashing query columns with "_hudi_query_" to avoid cross-join ambiguity when
     // corpus and query share column names (e.g. both have "id" or "embedding").
@@ -306,11 +394,14 @@ object BruteForceSearchAlgorithm extends VectorSearchAlgorithm {
     }: _*)
 
     // Cross join corpus with broadcast queries, compute distance, then rank
-    val scored = filteredCorpus.crossJoin(broadcast(renamedQuery))
+    var scored = filteredCorpus.crossJoin(broadcast(renamedQuery))
       .withColumn(DISTANCE_COL,
         distanceUdf(col(corpusEmbeddingCol), col(QUERY_EMB_ALIAS)))
       .drop(corpusEmbeddingCol)
       .drop(QUERY_EMB_ALIAS)
+
+    // Apply max distance threshold before windowing to reduce shuffle volume.
+    maxDistance.foreach(d => scored = scored.filter(col(DISTANCE_COL) <= d))
 
     val window = Window.partitionBy(QUERY_ID_COL).orderBy(col(DISTANCE_COL).asc)
     val result = scored
