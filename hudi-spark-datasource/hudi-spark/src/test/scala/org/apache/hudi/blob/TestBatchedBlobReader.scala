@@ -423,8 +423,7 @@ class TestBatchedBlobReader extends HoodieClientTestBase {
   @Test
   def testNullBlobStructColumnReturnsNull(): Unit = {
     // Create a DataFrame with a null struct column
-    val structType = blobStructCol("data", lit("/tmp/fake"), lit(0L), lit(1L)).expr.dataType
-    val schema = StructType(Seq(StructField("data", structType, nullable = true, metadata = blobMetadata)))
+    val schema = StructType(Seq(StructField("data", BlobType.dataType, nullable = true, metadata = blobMetadata)))
     val rows = Collections.singletonList(Row(null))
     val inputDF = sparkSession.createDataFrame(rows, schema)
 
