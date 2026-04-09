@@ -122,7 +122,7 @@ class Spark3_5Adapter extends BaseSpark3Adapter {
     ScalarFunctions.funcs.foreach(extensions.injectFunction)
   }
 
-  override def injectPlannerStrategy(extensions: SparkSessionExtensions): Unit = {
+  override def injectPlannerStrategies(extensions: SparkSessionExtensions): Unit = {
     extensions.injectPlannerStrategy { session =>
       BatchedBlobReaderStrategy(session)
     }

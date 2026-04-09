@@ -85,7 +85,7 @@ trait SparkAdapter extends Serializable {
   /**
    * Inject planner strategies to SparkSessionExtensions for converting custom logical plans into physical plans.
    */
-  def injectPlannerStrategy(extensions: SparkSessionExtensions): Unit
+  def injectPlannerStrategies(extensions: SparkSessionExtensions): Unit
 
   /**
    * Returns an instance of [[HoodieCatalystExpressionUtils]] providing for common utils operating

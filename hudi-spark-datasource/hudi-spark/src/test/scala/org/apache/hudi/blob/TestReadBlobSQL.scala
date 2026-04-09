@@ -405,4 +405,35 @@ class TestReadBlobSQL extends HoodieClientTestBase {
     assertTrue(thrown.isInstanceOf[IllegalArgumentException])
     assertTrue(thrown.getMessage.contains("must be compatible with BlobType"))
   }
+
+  @Test
+  def testReadBlobInProjectAndFilter(): Unit = {
+    val filePath = createTestFile(tempDir, "project_and_filter.bin", 10000)
+
+    // DataFrame with blobStructCol
+    val df = sparkSession.createDataFrame(Seq(
+      (1, "record1", filePath, 0L, 100L),
+      (2, "record2", filePath, 100L, 100L),
+      (3, "record3", filePath, 200L, 100L)
+    )).toDF("id", "name", "external_path", "offset", "length")
+      .withColumn("file_info", blobStructCol("file_info", col("external_path"), col("offset"), col("length")))
+      .select("id", "name", "file_info")
+
+    df.createOrReplaceTempView("project_and_filter_table")
+
+    // Query with read_blob in both SELECT and WHERE
+    val result = sparkSession.sql("""
+      SELECT id, name, read_blob(file_info) as data
+      FROM project_and_filter_table
+      WHERE length(read_blob(file_info)) = 100
+      ORDER BY id
+    """)
+
+    val rows = result.collect()
+    assertEquals(3, rows.length)
+    rows.zipWithIndex.foreach { case (row, idx) =>
+      assertEquals(100, row.getAs[Array[Byte]]("data").length)
+      assertBytesContent(row.getAs[Array[Byte]]("data"), expectedOffset = idx * 100)
+    }
+  }
 }

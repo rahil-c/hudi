@@ -51,7 +51,7 @@ class TestBatchedBlobReader extends HoodieClientTestBase {
       (filePath, 200L, 100L)
     )).toDF("external_path", "offset", "length")
       .withColumn("data", blobStructCol("data", col("external_path"), col("offset"), col("length")))
-      .select("data")
+      .select("offset", "data")
 
     // Read with batching
     val resultDF = BatchedBlobReader.readBatched(inputDF, storageConf)
@@ -61,7 +61,7 @@ class TestBatchedBlobReader extends HoodieClientTestBase {
     assertEquals(1, resultDF.columns.length) // data
 
     // Verify results
-    val results = resultDF.collect()
+    val results = resultDF.orderBy("offset").collect()
     assertEquals(3, results.length)
 
     // Check data content

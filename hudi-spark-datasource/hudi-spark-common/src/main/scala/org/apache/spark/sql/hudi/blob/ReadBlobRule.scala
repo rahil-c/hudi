@@ -41,6 +41,22 @@ import scala.collection.mutable.ArrayBuffer
 case class ReadBlobRule(spark: SparkSession) extends Rule[LogicalPlan] {
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperatorsUp {
+    case Project(projectList, Filter(condition, child))
+      if containsReadBlobExpression(projectList)
+        && containsReadBlobInExpression(condition)
+        && !child.isInstanceOf[BatchedBlobRead] =>
+      val projectBlobCols = extractAllBlobColumns(projectList)
+      val filterBlobCols = extractBlobColumnsFromExpression(condition)
+      val blobColumns = (projectBlobCols ++ filterBlobCols)
+        .foldLeft((mutable.LinkedHashSet.empty[ExprId], ArrayBuffer.empty[AttributeReference])) {
+          case ((seen, acc), a) if seen.add(a.exprId) => (seen, acc += a)
+          case ((seen, acc), _) => (seen, acc)
+        }._2.toSeq
+      val (wrappedPlan, blobToDataAttr) = wrapWithBlobReads(blobColumns, child)
+      val newCondition = replaceReadBlobExpression(condition, blobToDataAttr)
+      val newProjectList = transformNamedExpressions(projectList, blobToDataAttr)
+      Project(newProjectList, Filter(newCondition, wrappedPlan))
+
     case Filter(condition, child)
       if containsReadBlobInExpression(condition)
         && !child.isInstanceOf[BatchedBlobRead] =>

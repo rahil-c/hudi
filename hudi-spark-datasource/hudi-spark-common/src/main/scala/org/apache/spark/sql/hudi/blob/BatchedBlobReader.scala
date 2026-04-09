@@ -391,6 +391,7 @@ class BatchedBlobReader(
 
       // Read the entire merged range
       val totalLength = (range.endOffset - range.startOffset).toInt
+      require(totalLength >= 0, s"Range too large: ${range.endOffset - range.startOffset} bytes exceeds Int.MaxValue")
       val buffer = new Array[Byte](totalLength)
       inputStream.readFully(buffer, 0, totalLength)
 

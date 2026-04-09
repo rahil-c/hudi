@@ -63,8 +63,8 @@ object ScalarFunctions {
         """
           |Usage: read_blob(blob_column) - Reads blob data from storage
           |
-          |Reads byte ranges from files referenced in a blob column. The column must have
-          |metadata hudi_blob=true.
+          |Reads byte ranges from files referenced in a blob-compatible column.
+          |The column must be structurally compatible with HoodieSchema.Blob.
           |
           |This function uses batched I/O operations for optimal performance.
           |For best results, ensure data is sorted by (reference.file, reference.position).

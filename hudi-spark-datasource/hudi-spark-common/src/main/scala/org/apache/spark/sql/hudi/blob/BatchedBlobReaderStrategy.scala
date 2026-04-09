@@ -23,7 +23,6 @@ import org.apache.hudi.HoodieSparkConfUtils
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.analysis.SimpleAnalyzer.conf
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
 
