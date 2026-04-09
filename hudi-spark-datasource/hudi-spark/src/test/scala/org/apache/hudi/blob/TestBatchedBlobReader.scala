@@ -22,7 +22,7 @@ package org.apache.hudi.blob
 import org.apache.hudi.blob.BlobTestHelpers._
 import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.testutils.HoodieClientTestBase
-
+import org.apache.spark.SparkException
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.hudi.blob.BatchedBlobReader
@@ -58,7 +58,7 @@ class TestBatchedBlobReader extends HoodieClientTestBase {
 
     // Verify schema
     assertTrue(resultDF.columns.contains("data"))
-    assertEquals(1, resultDF.columns.length) // data
+    assertEquals(2, resultDF.columns.length) // offset, data
 
     // Verify results
     val results = resultDF.orderBy("offset").collect()
@@ -431,5 +431,26 @@ class TestBatchedBlobReader extends HoodieClientTestBase {
     val results = resultDF.collect()
     assertEquals(1, results.length)
     assertTrue(results(0).isNullAt(0))
+  }
+
+  @Test
+  def testOverlappingRangesThrowsException(): Unit = {
+    val filePath = createTestFile(tempDir, "overlap.bin", 1000)
+    // Overlapping: [0, 100) and [50, 100)
+    val inputDF = sparkSession.createDataFrame(Seq(
+      (filePath, 0L, 100L),
+      (filePath, 50L, 100L)
+    )).toDF("external_path", "offset", "length")
+      .withColumn("data", blobStructCol("data", col("external_path"), col("offset"), col("length")))
+      .select("offset", "data")
+      .coalesce(1)
+
+    val thrown = assertThrows(classOf[SparkException], () => {
+      val rows = BatchedBlobReader.readBatched(inputDF, storageConf).collect()
+      // Force access to the data column to trigger the batch read logic
+      rows.foreach(row => row.getAs[Array[Byte]]("data"))
+    })
+    assertTrue(thrown.getCause.isInstanceOf[IllegalArgumentException])
+    assertTrue(thrown.getCause.getMessage.contains("Overlapping blob ranges detected"))
   }
 }

@@ -301,7 +301,12 @@ class BatchedBlobReader(
         )
       } else {
         val gap = row.offset - current.endOffset
-
+        // Check for overlap
+        if (row.offset < current.endOffset) {
+          throw new IllegalArgumentException(
+            s"Overlapping blob ranges detected: previous range [${current.startOffset}, ${current.endOffset}) and current row [${row.offset}, ${row.offset + row.length}) in file ${row.filePath}"
+          )
+        }
         if (gap >= 0 && gap <= maxGap) {
           // Merge into current range
           current = current.merge(row)
