@@ -22,6 +22,7 @@ package org.apache.hudi.blob
 import org.apache.hudi.blob.BlobTestHelpers._
 import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.testutils.HoodieClientTestBase
+
 import org.apache.spark.SparkException
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.functions._
