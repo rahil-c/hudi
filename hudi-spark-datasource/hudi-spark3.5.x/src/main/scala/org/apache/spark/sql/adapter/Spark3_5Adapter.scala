@@ -123,7 +123,7 @@ class Spark3_5Adapter extends BaseSpark3Adapter {
   }
 
   override def injectPlannerStrategies(extensions: SparkSessionExtensions): Unit = {
-    extensions.injectPlannerStrategies { session =>
+    extensions.injectPlannerStrategy { session =>
       BatchedBlobReaderStrategy(session)
     }
   }
