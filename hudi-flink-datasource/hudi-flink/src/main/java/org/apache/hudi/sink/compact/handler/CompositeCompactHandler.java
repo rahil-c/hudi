@@ -21,32 +21,35 @@ package org.apache.hudi.sink.compact.handler;
 import org.apache.hudi.sink.compact.CompactionCommitEvent;
 import org.apache.hudi.sink.compact.CompactionPlanEvent;
 import org.apache.hudi.sink.utils.NonThrownExecutor;
-
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.util.Collector;
 
 import javax.annotation.Nullable;
 
-import java.io.Closeable;
-
 /**
- * Abstraction for compaction execution in the Flink compaction pipeline.
- *
- * <p>The interface lets the operator execute compaction work without knowing whether the work is
- * handled by a single table-specific implementation or delegated through a composite handler that
- * routes between data-table and metadata-table compaction.
- *
- * <p>Implementations are responsible for executing compaction operations and emitting the
- * corresponding {@link CompactionCommitEvent}s.
+ * Composite handler for compaction execution services of the data table and metadata table.
  */
-public interface CompactHandler extends Closeable {
-  void registerMetrics(MetricGroup metricGroup);
+public class CompositeCompactHandler extends CompositeTableServiceHandler<CompactHandler> implements CompactHandler {
 
-  void compact(@Nullable NonThrownExecutor executor,
-               CompactionPlanEvent event,
-               Collector<CompactionCommitEvent> collector,
-               boolean needReloadMetaClient) throws Exception;
+  CompositeCompactHandler(CompactHandler dataTableHandler, CompactHandler metadataTableHandler) {
+    super(dataTableHandler, metadataTableHandler);
+  }
 
   @Override
-  void close();
+  public void registerMetrics(MetricGroup metricGroup) {
+    forEachHandler(compactHandler -> compactHandler.registerMetrics(metricGroup));
+  }
+
+  @Override
+  public void compact(@Nullable NonThrownExecutor executor,
+                      CompactionPlanEvent event,
+                      Collector<CompactionCommitEvent> collector,
+                      boolean needReloadMetaClient) throws Exception {
+    getHandler(event.isMetadataTable()).compact(executor, event, collector, needReloadMetaClient);
+  }
+
+  @Override
+  public void close() {
+    forEachHandler(CompactHandler::close);
+  }
 }

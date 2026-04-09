@@ -18,31 +18,26 @@
 
 package org.apache.hudi.sink.compact.handler;
 
-import org.apache.hudi.sink.compact.CompactionPlanEvent;
+import org.apache.hudi.sink.compact.CompactionCommitEvent;
 
 import org.apache.flink.metrics.MetricGroup;
-import org.apache.flink.streaming.api.operators.Output;
-import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import java.io.Closeable;
 
 /**
- * Abstraction for compaction plan scheduling in the Flink compaction pipeline.
+ * Abstraction for compaction commit handling in the Flink compaction pipeline.
  *
- * <p>The interface hides whether the caller is interacting with a single table-specific handler
- * or a composite handler that coordinates both data-table and metadata-table scheduling.
+ * <p>The interface hides whether commit coordination is performed by a single table-specific
+ * implementation or by a composite handler that routes commit events for the data table and the
+ * metadata table.
  *
- * <p>Implementations are responsible for collecting pending compaction operations, emitting
- * {@link CompactionPlanEvent}s, and rolling back inflight compaction instants during recovery.
+ * <p>Implementations are responsible for buffering commit events, checking commit readiness, and
+ * completing or rolling back compaction instants when necessary.
  */
-public interface CompactionPlanHandler extends Closeable {
+public interface CompactionCommitHandler extends Closeable {
   void registerMetrics(MetricGroup metricGroup);
 
-  void rollbackCompaction();
-
-  void collectCompactionOperations(
-      long checkpointId,
-      Output<StreamRecord<CompactionPlanEvent>> output);
+  void commitIfNecessary(CompactionCommitEvent event);
 
   @Override
   void close();

@@ -19,31 +19,38 @@
 package org.apache.hudi.sink.compact.handler;
 
 import org.apache.hudi.sink.compact.CompactionPlanEvent;
-
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
-import java.io.Closeable;
-
 /**
- * Abstraction for compaction plan scheduling in the Flink compaction pipeline.
- *
- * <p>The interface hides whether the caller is interacting with a single table-specific handler
- * or a composite handler that coordinates both data-table and metadata-table scheduling.
- *
- * <p>Implementations are responsible for collecting pending compaction operations, emitting
- * {@link CompactionPlanEvent}s, and rolling back inflight compaction instants during recovery.
+ * Composite handler for compaction plan services of the data table and metadata table.
  */
-public interface CompactionPlanHandler extends Closeable {
-  void registerMetrics(MetricGroup metricGroup);
+public class CompositeCompactionPlanHandler extends CompositeTableServiceHandler<CompactionPlanHandler>
+    implements CompactionPlanHandler {
 
-  void rollbackCompaction();
-
-  void collectCompactionOperations(
-      long checkpointId,
-      Output<StreamRecord<CompactionPlanEvent>> output);
+  CompositeCompactionPlanHandler(CompactionPlanHandler dataTableHandler, CompactionPlanHandler metadataTableHandler) {
+    super(dataTableHandler, metadataTableHandler);
+  }
 
   @Override
-  void close();
+  public void rollbackCompaction() {
+    forEachHandler(CompactionPlanHandler::rollbackCompaction);
+  }
+
+  @Override
+  public void registerMetrics(MetricGroup metricGroup) {
+    forEachHandler(compactionPlanHandler -> compactionPlanHandler.registerMetrics(metricGroup));
+  }
+
+  @Override
+  public void collectCompactionOperations(long checkpointId,
+                                          Output<StreamRecord<CompactionPlanEvent>> output) {
+    forEachHandler(compactionPlanHandler -> compactionPlanHandler.collectCompactionOperations(checkpointId, output));
+  }
+
+  @Override
+  public void close() {
+    forEachHandler(CompactionPlanHandler::close);
+  }
 }

@@ -18,25 +18,32 @@
 
 package org.apache.hudi.sink.compact.handler;
 
-import java.io.Closeable;
-
 /**
- * Abstraction for async clean handling in the Flink sink pipeline.
- *
- * <p>The interface lets callers trigger clean lifecycle actions without knowing whether cleaning is
- * performed by a single handler instance or by a composite handler that forwards the same lifecycle
- * calls to both data-table and metadata-table cleaners.
- *
- * <p>Implementations are responsible for starting async cleaning, waiting for in-flight cleaning
- * to finish, and performing final cleanup during close.
+ * Composite handler for async clean services of the data table and metadata table.
  */
-public interface CleanHandler extends Closeable {
-  void clean();
+public class CompositeCleanHandler extends CompositeTableServiceHandler<CleanHandler> implements CleanHandler {
 
-  void waitForCleaningFinish();
-
-  void startAsyncCleaning();
+  CompositeCleanHandler(CleanHandler dataTableHandler, CleanHandler metadataTableHandler) {
+    super(dataTableHandler, metadataTableHandler);
+  }
 
   @Override
-  void close();
+  public void clean() {
+    forEachHandler(CleanHandler::clean);
+  }
+
+  @Override
+  public void waitForCleaningFinish() {
+    forEachHandler(CleanHandler::waitForCleaningFinish);
+  }
+
+  @Override
+  public void startAsyncCleaning() {
+    forEachHandler(CleanHandler::startAsyncCleaning);
+  }
+
+  @Override
+  public void close() {
+    forEachHandler(CleanHandler::close);
+  }
 }

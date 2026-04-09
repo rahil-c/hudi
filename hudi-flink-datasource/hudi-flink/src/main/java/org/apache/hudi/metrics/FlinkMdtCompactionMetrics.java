@@ -16,27 +16,22 @@
  * limitations under the License.
  */
 
-package org.apache.hudi.sink.compact.handler;
+package org.apache.hudi.metrics;
 
-import java.io.Closeable;
+import org.apache.flink.metrics.MetricGroup;
 
 /**
- * Abstraction for async clean handling in the Flink sink pipeline.
- *
- * <p>The interface lets callers trigger clean lifecycle actions without knowing whether cleaning is
- * performed by a single handler instance or by a composite handler that forwards the same lifecycle
- * calls to both data-table and metadata-table cleaners.
- *
- * <p>Implementations are responsible for starting async cleaning, waiting for in-flight cleaning
- * to finish, and performing final cleanup during close.
+ * Compaction metrics for metadata table services.
  */
-public interface CleanHandler extends Closeable {
-  void clean();
+public class FlinkMdtCompactionMetrics extends FlinkCompactionMetrics {
+  private static final String MDT_PREFIX = "mdt.";
 
-  void waitForCleaningFinish();
-
-  void startAsyncCleaning();
+  public FlinkMdtCompactionMetrics(MetricGroup metricGroup) {
+    super(metricGroup);
+  }
 
   @Override
-  void close();
+  protected String getMetricsName(String action, String metric) {
+    return MDT_PREFIX + super.getMetricsName(action, metric);
+  }
 }
