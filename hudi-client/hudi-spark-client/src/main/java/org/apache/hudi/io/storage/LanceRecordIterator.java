@@ -31,7 +31,7 @@ import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
-import org.apache.spark.sql.vectorized.LanceArrowColumnVector;
+import org.lance.spark.vectorized.LanceArrowColumnVector;
 import org.lance.file.LanceFileReader;
 
 import java.io.IOException;
