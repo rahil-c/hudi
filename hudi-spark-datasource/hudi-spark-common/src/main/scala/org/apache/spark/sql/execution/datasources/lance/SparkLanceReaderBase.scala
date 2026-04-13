@@ -35,9 +35,9 @@ import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjectio
 import org.apache.spark.sql.execution.datasources.{PartitionedFile, SparkColumnarFileReader, SparkSchemaTransformUtils}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructField, StructType}
 import org.apache.spark.sql.util.LanceArrowUtils
-import org.lance.file.LanceFileReader
+import org.lance.file.{BlobReadMode, FileReadOptions, LanceFileReader}
 
 import java.io.IOException
 
@@ -98,8 +98,14 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         val (implicitTypeChangeInfo, sparkRequestSchema) =
           SparkSchemaTransformUtils.buildImplicitSchemaChangeInfo(fileSchema, requiredSchema)
 
-        // Filter schema to only fields that exist in file (Lance can only read columns present in file)
-        val requestSchema = SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema)
+        // Filter schema to only fields that exist in file (Lance can only read columns present in file).
+        // Widen nullability on every nested field: Lance can return non-null parent structs whose leaf
+        // children are null (e.g. a BLOB's `reference` struct is non-null with all-null members for
+        // INLINE blobs). Without widening, codegen elides the null check on non-nullable leaves and
+        // NPEs in UnsafeWriter.write. The downstream cast projection re-applies the requiredSchema's
+        // nullability before rows are returned to Spark.
+        val requestSchema = forceAllFieldsNullable(
+          SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema))
 
         val columnNames = if (requestSchema.nonEmpty) {
           requestSchema.fieldNames.toList.asJava
@@ -108,8 +114,12 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           null
         }
 
-        // Read data with column projection (filters not supported yet)
-        val arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE)
+        // Read data with column projection (filters not supported yet).
+        // Materialize blob bytes (BlobReadMode.CONTENT) rather than returning
+        // Lance's default position+size descriptor, so BLOB columns round-trip
+        // through Spark as LargeBinary payloads.
+        val readOpts = FileReadOptions.builder().blobReadMode(BlobReadMode.CONTENT).build()
+        val arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts)
 
         // Create iterator using shared LanceRecordIterator
         lanceIterator = new LanceRecordIterator(
@@ -171,5 +181,26 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           throw new IOException(s"Failed to read Lance file: $filePath", e)
       }
     }
+  }
+
+  /**
+   * Recursively widens nullability to true on every field of a Spark schema,
+   * including children of nested structs, arrays, and maps.
+   */
+  private def forceAllFieldsNullable(schema: StructType): StructType = {
+    StructType(schema.fields.map(forceFieldNullable))
+  }
+
+  private def forceFieldNullable(field: StructField): StructField =
+    field.copy(nullable = true, dataType = forceTypeNullable(field.dataType))
+
+  private def forceTypeNullable(dt: DataType): DataType = dt match {
+    case s: StructType => StructType(s.fields.map(forceFieldNullable))
+    case a: ArrayType => a.copy(elementType = forceTypeNullable(a.elementType), containsNull = true)
+    case m: MapType => m.copy(
+      keyType = forceTypeNullable(m.keyType),
+      valueType = forceTypeNullable(m.valueType),
+      valueContainsNull = true)
+    case other => other
   }
 }
