@@ -102,7 +102,7 @@
 
     <!-- Lance Spark for Arrow conversion -->
     <dependency>
-      <groupId>com.lancedb</groupId>
+      <groupId>org.lance</groupId>
       <artifactId>${lance.spark.artifact}</artifactId>
     </dependency>
 
