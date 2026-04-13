@@ -55,6 +55,14 @@ public class InternalSchemaConverter {
   static final int VARIANT_VALUE_FIELD_ID = -1;
   static final int VARIANT_METADATA_FIELD_ID = -2;
 
+  // Sentinel field IDs used to mark Blob sub-fields in the internal schema representation.
+  // The BLOB logical type is itself a fixed-shape RECORD; we round-trip it through InternalSchema by
+  // tagging its three child fields with negative IDs that the reverse path detects to reconstruct
+  // a HoodieSchema.Blob (preserving the `blob` logical type rather than degrading to a plain record).
+  static final int BLOB_TYPE_FIELD_ID = -10;
+  static final int BLOB_DATA_FIELD_ID = -11;
+  static final int BLOB_REFERENCE_FIELD_ID = -12;
+
   /**
    * Convert internalSchema to HoodieSchema.
    *
@@ -366,6 +374,28 @@ public class InternalSchemaConverter {
         variantFields.add(Types.Field.get(VARIANT_VALUE_FIELD_ID, false,
             HoodieSchema.Variant.VARIANT_VALUE_FIELD, Types.BinaryType.get(), "Variant value component"));
         return Types.RecordType.get(variantFields);
+      case BLOB:
+        // Blob (fixed-shape RECORD with type/data/reference children) is represented as a
+        // RecordType with sentinel negative field IDs so the reverse path can detect and rebuild
+        // a HoodieSchema.Blob, preserving the `blob` logical-type annotation that downstream
+        // writers (e.g. Lance, Parquet) rely on.
+        List<Types.Field> referenceFields = new ArrayList<>(4);
+        referenceFields.add(Types.Field.get(0, false,
+            HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH, Types.StringType.get()));
+        referenceFields.add(Types.Field.get(1, true,
+            HoodieSchema.Blob.EXTERNAL_REFERENCE_OFFSET, Types.LongType.get()));
+        referenceFields.add(Types.Field.get(2, true,
+            HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH, Types.LongType.get()));
+        referenceFields.add(Types.Field.get(3, false,
+            HoodieSchema.Blob.EXTERNAL_REFERENCE_IS_MANAGED, Types.BooleanType.get()));
+        List<Types.Field> blobFields = new ArrayList<>(3);
+        blobFields.add(Types.Field.get(BLOB_TYPE_FIELD_ID, false,
+            HoodieSchema.Blob.TYPE, Types.StringType.get(), "Blob storage type (INLINE | OUT_OF_LINE)"));
+        blobFields.add(Types.Field.get(BLOB_DATA_FIELD_ID, true,
+            HoodieSchema.Blob.INLINE_DATA_FIELD, Types.BinaryType.get(), "Inline blob bytes"));
+        blobFields.add(Types.Field.get(BLOB_REFERENCE_FIELD_ID, true,
+            HoodieSchema.Blob.EXTERNAL_REFERENCE, Types.RecordType.get(referenceFields), "Out-of-line blob reference"));
+        return Types.RecordType.get(blobFields);
       default:
         throw new UnsupportedOperationException("Unsupported primitive type: " + schema.getType());
     }
@@ -475,6 +505,23 @@ public class InternalSchemaConverter {
       if (hasNegativeIds && hasVariantFields) {
         // TODO: Flesh out schema evolution for Variant types #18285
         return HoodieSchema.createVariant();
+      }
+    }
+
+    // Detect Blob round-trip: 3 sentinel-tagged children (type / data / reference)
+    if (fields.size() == 3) {
+      Types.Field f0 = fields.get(0);
+      Types.Field f1 = fields.get(1);
+      Types.Field f2 = fields.get(2);
+      boolean hasBlobIds = f0.fieldId() == BLOB_TYPE_FIELD_ID
+          && f1.fieldId() == BLOB_DATA_FIELD_ID
+          && f2.fieldId() == BLOB_REFERENCE_FIELD_ID;
+      boolean hasBlobNames = f0.name().equals(HoodieSchema.Blob.TYPE)
+          && f1.name().equals(HoodieSchema.Blob.INLINE_DATA_FIELD)
+          && f2.name().equals(HoodieSchema.Blob.EXTERNAL_REFERENCE);
+      if (hasBlobIds && hasBlobNames) {
+        // TODO: Schema evolution for Blob types follows the same path as Variant — fixed shape.
+        return HoodieSchema.createBlob();
       }
     }
 

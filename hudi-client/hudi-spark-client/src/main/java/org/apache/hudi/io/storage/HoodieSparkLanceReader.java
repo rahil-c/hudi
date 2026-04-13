@@ -43,6 +43,8 @@ import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
+import org.lance.file.BlobReadMode;
+import org.lance.file.FileReadOptions;
 import org.lance.file.LanceFileReader;
 
 import java.io.IOException;
@@ -189,8 +191,11 @@ public class HoodieSparkLanceReader implements HoodieSparkFileReader {
         columnNames.add(field.name());
       }
 
-      // Read only the requested columns from Lance file for efficiency
-      ArrowReader arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE);
+      // Read only the requested columns from Lance file for efficiency.
+      // Materialize blob bytes (BlobReadMode.CONTENT) so BLOB columns round-trip
+      // as LargeBinary rather than Lance's default position+size descriptor.
+      FileReadOptions readOpts = FileReadOptions.builder().blobReadMode(BlobReadMode.CONTENT).build();
+      ArrowReader arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts);
 
       return new LanceRecordIterator(allocator, lanceReader, arrowReader, requestedSparkSchema, path.toString());
     } catch (Exception e) {
