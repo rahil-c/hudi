@@ -824,10 +824,9 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
     // Verify Lance files actually tag the nested `data` field with blob encoding.
     assertLanceBlobEncoding(tablePath)
 
-    // Read back the full BLOB column. With Lance 4.0's BlobReadMode.CONTENT
-    // (wired in SparkLanceReaderBase / HoodieSparkLanceReader), the nested
-    // `data` child comes back as raw bytes rather than a position+size
-    // descriptor, so we can assert byte-level equality against the input.
+    // Read back the BLOB column. Lance returns blob descriptors (position+size)
+    // which Hudi maps into OUT_OF_LINE reference structs. The actual bytes are
+    // NOT materialized here; they are deferred to read_blob() / BatchedBlobReader.
     val readRows = spark.read.format("hudi").load(tablePath)
       .select($"id", $"payload")
       .orderBy($"id")
@@ -836,11 +835,18 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
     readRows.zipWithIndex.foreach { case (row, i) =>
       assertEquals(i, row.getInt(row.fieldIndex("id")))
       val payload = row.getStruct(row.fieldIndex("payload"))
-      assertEquals(HoodieSchema.Blob.INLINE,
+      assertEquals(HoodieSchema.Blob.OUT_OF_LINE,
         payload.getString(payload.fieldIndex(HoodieSchema.Blob.TYPE)))
-      val bytes = payload.getAs[Array[Byte]](HoodieSchema.Blob.INLINE_DATA_FIELD)
-      val expected = (0 until payloadLen).map(j => ((i + j) % 256).toByte).toArray
-      assertArrayEquals(expected, bytes)
+      // data should be null (not materialized)
+      assertTrue(payload.isNullAt(payload.fieldIndex(HoodieSchema.Blob.INLINE_DATA_FIELD)),
+        "data should be null for OUT_OF_LINE blob")
+      // reference should be populated with lance file path and offset/length
+      val ref = payload.getStruct(payload.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE))
+      assertNotNull(ref, "reference struct should be non-null")
+      val extPath = ref.getString(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
+      assertTrue(extPath.endsWith(".lance"), s"external_path should be a .lance file, got: $extPath")
+      assertTrue(ref.getLong(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH)) > 0,
+        "length should be > 0")
     }
   }
 
