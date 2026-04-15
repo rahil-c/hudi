@@ -3408,14 +3408,14 @@ class HoodieSpark4_0ExtendedSqlAstBuilder(conf: SQLConf, delegate: ParserInterfa
   }
 
   /**
-   * Show indexes, returning a [[ShowIndexes]] logical plan.
+   * Show indexes, returning a [[HoodieShowIndexes]] logical plan.
    * For example:
    * {{{
    *   SHOW INDEXES (FROM | IN) [TABLE] table_name
    * }}}
    */
   override def visitShowIndexes(ctx: ShowIndexesContext): LogicalPlan = withOrigin(ctx) {
-    ShowIndexes(UnresolvedRelation(visitTableIdentifier(ctx.tableIdentifier())))
+    HoodieShowIndexes(UnresolvedRelation(visitTableIdentifier(ctx.tableIdentifier())))
   }
 
   /**
