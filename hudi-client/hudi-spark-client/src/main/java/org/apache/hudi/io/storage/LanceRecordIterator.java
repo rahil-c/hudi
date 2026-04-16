@@ -33,6 +33,7 @@ import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
@@ -70,6 +71,7 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
   private final UnsafeProjection projection;
   private final String path;
   private final Set<String> blobFieldNames;
+  private final StructType sparkSchema;
 
   private ColumnarBatch currentBatch;
   private Iterator<InternalRow> rowIterator;
@@ -118,6 +120,7 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     this.projection = UnsafeProjection.create(schema);
     this.path = path;
     this.blobFieldNames = blobFieldNames;
+    this.sparkSchema = schema;
   }
 
   @Override
@@ -138,7 +141,13 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
       if (arrowReader.loadNextBatch()) {
         VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
 
-        // Wrap each Arrow FieldVector in LanceArrowColumnVector.
+        // Wrap each Arrow FieldVector in LanceArrowColumnVector, ordered to match the
+        // Spark schema the UnsafeProjection was built for. Starting with lance-spark 0.4.0
+        // the returned VectorSchemaRoot may use the file's on-disk column order rather
+        // than the order of the columnNames we asked for, which caused
+        // UnsafeProjection to dispatch getInt(0) against a VarCharVector (see HUDI issue
+        // discovered on TestLanceDataSource MOR paths). Look each field up by name.
+        //
         // For blob struct fields in DESCRIPTOR mode, strip the "lance-encoding:blob"
         // metadata from nested children first. Without this, LanceArrowColumnVector
         // creates a BlobStructAccessor for the data child, which makes getChild()
@@ -147,9 +156,24 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
         // UInt64 natively (unlike Spark's ArrowColumnVector which doesn't support UInt64).
         if (columnVectors == null) {
           List<FieldVector> fieldVectors = root.getFieldVectors();
-          columnVectors = new ColumnVector[fieldVectors.size()];
-          for (int i = 0; i < fieldVectors.size(); i++) {
-            FieldVector fv = fieldVectors.get(i);
+          Map<String, FieldVector> byName = new HashMap<>(fieldVectors.size() * 2);
+          for (FieldVector fv : fieldVectors) {
+            byName.put(fv.getName(), fv);
+          }
+          StructField[] sparkFields = sparkSchema.fields();
+          if (sparkFields.length != fieldVectors.size()) {
+            throw new HoodieException("Lance batch column count " + fieldVectors.size()
+                + " does not match expected Spark schema size " + sparkFields.length
+                + " for file: " + path);
+          }
+          columnVectors = new ColumnVector[sparkFields.length];
+          for (int i = 0; i < sparkFields.length; i++) {
+            String name = sparkFields[i].name();
+            FieldVector fv = byName.get(name);
+            if (fv == null) {
+              throw new HoodieException("Lance batch missing expected column '" + name
+                  + "' for file: " + path + "; available columns: " + byName.keySet());
+            }
             if (blobFieldNames.contains(fv.getName())) {
               stripBlobMetadataFromChildren(fv);
             }
