@@ -191,9 +191,8 @@ public class HoodieSparkLanceReader implements HoodieSparkFileReader {
         columnNames.add(field.name());
       }
 
-      // Read only the requested columns from Lance file for efficiency.
-      // Materialize blob bytes (BlobReadMode.CONTENT) so BLOB columns round-trip
-      // as LargeBinary rather than Lance's default position+size descriptor.
+      // Use CONTENT mode so compaction/merge paths get actual blob bytes
+      // (DESCRIPTOR mode only returns position+size, which can't be re-written).
       FileReadOptions readOpts = FileReadOptions.builder().blobReadMode(BlobReadMode.CONTENT).build();
       ArrowReader arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts);
 
