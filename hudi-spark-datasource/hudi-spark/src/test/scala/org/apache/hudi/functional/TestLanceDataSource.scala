@@ -792,6 +792,16 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
     fsView.close()
   }
 
+  /**
+   * Scope note: this test only verifies the INLINE→OUT_OF_LINE descriptor
+   * rewrite produces the right row shape (type=OUT_OF_LINE, data=null,
+   * reference points at a .lance file with length>0). It does NOT assert
+   * byte-level round-trip via read_blob() — Tim's original BLOB PR
+   * (#18098) also did not validate INLINE end-to-end through Parquet, so
+   * the Lance side mirrors that scope. Byte round-trip for INLINE would
+   * require verifying Lance's DESCRIPTOR position is pread-able, which is
+   * the responsibility of a separate INLINE-support PR.
+   */
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieTableType])
   def testBlobInline(tableType: HoodieTableType): Unit = {
@@ -906,6 +916,26 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
       val extPath = ref.getString(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
       assertTrue(extPath.endsWith(expectedFiles(id)),
         s"Unexpected external_path for id=$id: $extPath")
+    }
+
+    // Byte-level round-trip: materialize via read_blob() and compare against
+    // the expected slice of the external file. createTestFile writes bytes
+    // where file[i] = (i % 256).toByte, so a slice [offset, offset+length)
+    // should match the pattern (offset + i) % 256 for i in [0, length).
+    val viewName = s"${tableName}_view"
+    spark.read.format("hudi").load(tablePath).createOrReplaceTempView(viewName)
+    val materialized = spark.sql(
+      s"SELECT id, read_blob(payload) AS bytes FROM $viewName ORDER BY id").collect()
+    assertEquals(4, materialized.length)
+
+    val expectedRanges = Map(1 -> 0L, 2 -> 256L, 3 -> 0L, 4 -> 0L)
+    val expectedLengths = Map(1 -> 256, 2 -> 256, 3 -> 1024, 4 -> 512)
+    materialized.foreach { row =>
+      val id = row.getInt(row.fieldIndex("id"))
+      val bytes = row.getAs[Array[Byte]]("bytes")
+      assertEquals(expectedLengths(id), bytes.length,
+        s"Unexpected blob length for id=$id")
+      BlobTestHelpers.assertBytesContent(bytes, expectedOffset = expectedRanges(id).toInt)
     }
   }
 

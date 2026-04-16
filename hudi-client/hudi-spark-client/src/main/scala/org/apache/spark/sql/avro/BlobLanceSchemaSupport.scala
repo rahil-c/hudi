@@ -67,11 +67,7 @@ object BlobLanceSchemaSupport {
    * that the nested `data` field carries the Lance blob-encoding metadata.
    */
   def annotateBlobFieldsForLance(sparkSchema: StructType, arrowSchema: Schema): Schema = {
-    val arrowFields = arrowSchema.getFields.asScala.toSeq
-    if (sparkSchema.fields.length != arrowFields.length) {
-      // Shape mismatch — bail out rather than produce a corrupt schema.
-      return arrowSchema
-    }
+    val arrowFields = arrowSchema.getFields.asScala
     val rebuilt = sparkSchema.fields.zip(arrowFields).map {
       case (sparkField, arrowField) => rewriteField(sparkField, arrowField)
     }
@@ -106,8 +102,8 @@ object BlobLanceSchemaSupport {
   }
 
   private def rewriteChildren(arrowField: Field, sparkStruct: StructType): Field = {
-    val arrowChildren = arrowField.getChildren.asScala.toSeq
-    if (arrowChildren.isEmpty || sparkStruct.fields.length != arrowChildren.length) {
+    val arrowChildren = arrowField.getChildren.asScala
+    if (arrowChildren.isEmpty) {
       return arrowField
     }
     val newChildren = sparkStruct.fields.zip(arrowChildren).map {
