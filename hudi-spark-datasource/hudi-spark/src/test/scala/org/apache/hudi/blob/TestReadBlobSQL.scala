@@ -45,6 +45,63 @@ import java.util.Collections
 class TestReadBlobSQL extends HoodieClientTestBase {
 
   @Test
+  def testReadBlobOnHudiBackedTable(): Unit = {
+    // Same setup as testBasicReadBlobSQL, but persist through Hudi first
+    // so the DataFrame is backed by a HoodieFileIndex-driven relation
+    // instead of an in-memory RDD.
+    val extFile = createTestFile(tempDir, "basic.bin", 10000)
+    val tablePath = s"$tempDir/hudi_blob_table"
+
+    val rawDf = sparkSession.createDataFrame(Seq(
+        (1, "rec1", extFile, 0L, 100L),
+        (2, "rec2", extFile, 100L, 100L),
+        (3, "rec3", extFile, 200L, 100L)
+      )).toDF("id", "name", "external_path", "offset", "length")
+      .withColumn("file_info",
+        blobStructCol("file_info", col("external_path"), col("offset"),
+          col("length")))
+      .select("id", "name", "file_info")
+
+    // Coerce to the canonical BlobType schema. blobStructCol produces a
+    // non-null reference struct, but HoodieSparkSchemaConverters
+    // .validateBlobStructure rejects that on write — it demands the
+    // reference field be nullable. Rebuild the DataFrame on its RDD
+    // against the canonical shape so .save() doesn't fail early.
+    val canonicalSchema = StructType(Seq(
+      StructField("id", IntegerType, nullable = false),
+      StructField("name", StringType, nullable = true),
+      StructField("file_info", BlobType().asInstanceOf[StructType],
+        nullable = true, blobMetadata)
+    ))
+    val df = sparkSession.createDataFrame(rawDf.rdd, canonicalSchema)
+
+    df.write.format("hudi")
+      .option("hoodie.table.name", "blob_test")
+      .option("hoodie.datasource.write.recordkey.field", "id")
+      .option("hoodie.datasource.write.precombine.field", "id")
+      .option("hoodie.datasource.write.operation", "bulk_insert")
+      .mode("overwrite")
+      .save(tablePath)
+
+    // Read back through Hudi — this is the path that brings HoodieFileIndex
+    // into the logical plan. read_blob's BatchedBlobReadExec then calls
+    // child.execute() which serializes the plan (including the file index)
+    // to executors, triggering:
+    //   java.io.InvalidClassException:
+    //     org.apache.hudi.HoodieFileIndex; no valid constructor
+    sparkSession.read.format("hudi").load(tablePath)
+      .createOrReplaceTempView("hudi_blob_view")
+
+    val result = sparkSession.sql("""
+      SELECT id, read_blob(file_info) AS data
+      FROM hudi_blob_view
+      ORDER BY id
+    """).collect()
+
+    assertEquals(3, result.length)
+  }
+
+  @Test
   def testBasicReadBlobSQL(): Unit = {
     val filePath = createTestFile(tempDir, "basic.bin", 10000)
 
