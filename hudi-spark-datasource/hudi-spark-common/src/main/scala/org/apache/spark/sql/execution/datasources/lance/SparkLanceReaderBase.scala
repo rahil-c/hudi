@@ -264,6 +264,14 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
    * reference structs (with `data: null, reference: {external_path, offset, length, managed}`).
    *
    * Non-blob columns are passed through unchanged.
+   *
+   * Scope: the OUT_OF_LINE branch is exercised end-to-end via
+   * [[org.apache.hudi.functional.TestLanceDataSource#testBlobOutline]] (bytes
+   * round-tripped through read_blob). The INLINE branch rewrites Lance's
+   * {position, size} into an OUT_OF_LINE reference pointing at the Lance file
+   * itself so downstream BatchedBlobReader can pread it, but it is not yet
+   * covered by a byte-level round-trip test — INLINE isn't validated
+   * end-to-end through Parquet either in the current BLOB PR.
    */
   private def buildBlobDescriptorTransform(
       descriptorSchema: StructType,
