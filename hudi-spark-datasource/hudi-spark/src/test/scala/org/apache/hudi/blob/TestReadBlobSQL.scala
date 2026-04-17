@@ -104,6 +104,171 @@ class TestReadBlobSQL extends HoodieClientTestBase {
   }
 
   @Test
+  def testInlineBlobRoundTrip(): Unit = {
+    // Three distinct byte patterns, written as INLINE blobs and pulled back
+    // through the read_blob() SQL function. The BLOB row shape is
+    // { type: "INLINE", data: <bytes>, reference: null } — reference is
+    // never consulted for INLINE, data carries the payload verbatim.
+    val pattern1 = Array[Byte](1, 2, 3)
+    val pattern2 = Array[Byte](10, 20, 30, 40, 50)
+    val pattern3 = Array[Byte](100, 101, 102, 103)
+
+    val df = sparkSession.createDataFrame(Seq(
+        (1, pattern1),
+        (2, pattern2),
+        (3, pattern3)
+      )).toDF("id", "bytes")
+      .withColumn("blob", inlineBlobStructCol("blob", col("bytes")))
+      .select("id", "blob")
+
+    df.createOrReplaceTempView("inline_blob_view")
+
+    val rows = sparkSession.sql("""
+      SELECT id, read_blob(blob) AS data
+      FROM inline_blob_view
+      ORDER BY id
+    """).collect()
+
+    assertEquals(3, rows.length)
+    assertArrayEquals(pattern1, rows(0).getAs[Array[Byte]]("data"))
+    assertArrayEquals(pattern2, rows(1).getAs[Array[Byte]]("data"))
+    assertArrayEquals(pattern3, rows(2).getAs[Array[Byte]]("data"))
+  }
+
+  @Test
+  def testMixedInlineAndOutOfLine(): Unit = {
+    // 10 rows, alternating INLINE and OUT_OF_LINE, read through
+    // read_blob(). Asserts (a) every row resolves to the correct
+    // bytes and (b) the output sequence matches input row order —
+    // BatchedBlobReader must interleave passthrough INLINE rows
+    // with batched OUT_OF_LINE pread results without reordering.
+    val fileSize = 1000
+    val filePath = createTestFile(tempDir, "mixed.bin", fileSize)
+
+    // Inline byte patterns for the five INLINE rows (id 0, 2, 4, 6, 8).
+    val inlineBytes: Seq[Array[Byte]] = Seq(
+      Array.emptyByteArray,
+      Array[Byte](1),
+      Array[Byte](2, 3, 4),
+      Array[Byte](5, 6, 7, 8, 9),
+      Array[Byte](10, 11, 12, 13, 14, 15, 16)
+    )
+    // (offset, length) for the five OUT_OF_LINE rows (id 1, 3, 5, 7, 9).
+    // Non-overlapping, not strictly sorted by offset so batching has
+    // to group before reading.
+    val rangeSpec: Seq[(Long, Long)] =
+      Seq((0L, 50L), (100L, 50L), (200L, 50L), (300L, 50L), (400L, 50L))
+
+    val referenceType = StructType(Seq(
+      StructField(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH, StringType, nullable = false),
+      StructField(HoodieSchema.Blob.EXTERNAL_REFERENCE_OFFSET, LongType, nullable = true),
+      StructField(HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH, LongType, nullable = true),
+      StructField(HoodieSchema.Blob.EXTERNAL_REFERENCE_IS_MANAGED, BooleanType, nullable = false)
+    ))
+    val blobType = StructType(Seq(
+      StructField(HoodieSchema.Blob.TYPE, StringType, nullable = false),
+      StructField(HoodieSchema.Blob.INLINE_DATA_FIELD, BinaryType, nullable = true),
+      StructField(HoodieSchema.Blob.EXTERNAL_REFERENCE, referenceType, nullable = true)
+    ))
+    val schema = StructType(Seq(
+      StructField("id", IntegerType, nullable = false),
+      StructField("blob", blobType, nullable = false, metadata = blobMetadata)
+    ))
+
+    val rows: Seq[Row] = (0 until 10).map { id =>
+      if (id % 2 == 0) {
+        val bytes = inlineBytes(id / 2)
+        Row(id, Row(HoodieSchema.Blob.INLINE, bytes, null))
+      } else {
+        val (offset, length) = rangeSpec(id / 2)
+        Row(id, Row(HoodieSchema.Blob.OUT_OF_LINE, null,
+          Row(filePath, offset, length, false)))
+      }
+    }
+
+    val df = sparkSession.createDataFrame(
+      sparkSession.sparkContext.parallelize(rows, 1), schema)
+    df.createOrReplaceTempView("mixed_blob_view")
+
+    val resultRows = sparkSession.sql("""
+      SELECT id, read_blob(blob) AS data
+      FROM mixed_blob_view
+      ORDER BY id
+    """).collect()
+
+    assertEquals(10, resultRows.length)
+    // Walk results in returned order and assert each row matches the
+    // payload that row was written with.
+    resultRows.zipWithIndex.foreach { case (row, i) =>
+      assertEquals(i, row.getInt(0), s"row $i: id mismatch")
+      val data = row.getAs[Array[Byte]]("data")
+      if (i % 2 == 0) {
+        assertArrayEquals(inlineBytes(i / 2), data,
+          s"row $i: inline bytes mismatch")
+      } else {
+        val (offset, length) = rangeSpec(i / 2)
+        assertEquals(length.toInt, data.length,
+          s"row $i: range length mismatch")
+        assertBytesContent(data, expectedOffset = offset.toInt)
+      }
+    }
+  }
+
+  @Test
+  def testInlineOnHudiBackedTable(): Unit = {
+    // End-to-end: write INLINE-shaped rows through spark.write.format("hudi")
+    // to a Parquet-backed Hudi table, then read back and resolve via
+    // read_blob(). Mirrors testReadBlobOnHudiBackedTable but for INLINE —
+    // exercises the full write -> HoodieFileIndex-backed read -> SQL path.
+    val tablePath = s"$tempDir/hudi_inline_blob_table"
+    val pattern1 = Array[Byte](1, 2, 3, 4, 5)
+    val pattern2 = Array[Byte](6, 7, 8, 9, 10, 11)
+    val pattern3 = Array[Byte](12, 13, 14, 15, 16, 17, 18, 19)
+
+    val rawDf = sparkSession.createDataFrame(Seq(
+        (1, "rec1", pattern1),
+        (2, "rec2", pattern2),
+        (3, "rec3", pattern3)
+      )).toDF("id", "name", "bytes")
+      .withColumn("blob", inlineBlobStructCol("blob", col("bytes")))
+      .select("id", "name", "blob")
+
+    // validateBlobStructure demands the blob column's StructType match
+    // HoodieSchema.createBlob() byte-for-byte, including top-level
+    // nullability. Coerce onto the canonical shape (same dance as
+    // testReadBlobOnHudiBackedTable above).
+    val canonicalSchema = StructType(Seq(
+      StructField("id", IntegerType, nullable = false),
+      StructField("name", StringType, nullable = true),
+      StructField("blob", BlobType().asInstanceOf[StructType],
+        nullable = true, blobMetadata)
+    ))
+    val df = sparkSession.createDataFrame(rawDf.rdd, canonicalSchema)
+
+    df.write.format("hudi")
+      .option("hoodie.table.name", "inline_blob_test")
+      .option("hoodie.datasource.write.recordkey.field", "id")
+      .option("hoodie.datasource.write.precombine.field", "id")
+      .option("hoodie.datasource.write.operation", "bulk_insert")
+      .mode("overwrite")
+      .save(tablePath)
+
+    sparkSession.read.format("hudi").load(tablePath)
+      .createOrReplaceTempView("hudi_inline_blob_view")
+
+    val rows = sparkSession.sql("""
+      SELECT id, read_blob(blob) AS data
+      FROM hudi_inline_blob_view
+      ORDER BY id
+    """).collect()
+
+    assertEquals(3, rows.length)
+    assertArrayEquals(pattern1, rows(0).getAs[Array[Byte]]("data"))
+    assertArrayEquals(pattern2, rows(1).getAs[Array[Byte]]("data"))
+    assertArrayEquals(pattern3, rows(2).getAs[Array[Byte]]("data"))
+  }
+
+  @Test
   def testBasicReadBlobSQL(): Unit = {
     val filePath = createTestFile(tempDir, "basic.bin", 10000)
 
