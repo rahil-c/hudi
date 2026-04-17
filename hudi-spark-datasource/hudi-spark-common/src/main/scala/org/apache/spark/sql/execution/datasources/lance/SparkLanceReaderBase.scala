@@ -31,6 +31,7 @@ import org.apache.hudi.storage.StorageConfiguration
 import org.apache.hadoop.conf.Configuration
 import org.apache.parquet.schema.MessageType
 import org.apache.spark.TaskContext
+import org.apache.spark.sql.avro.BlobLanceSchemaSupport
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, JoinedRow, UnsafeProjection, UnsafeRow}
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
@@ -115,6 +116,21 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         val requestSchema =
           SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema)
 
+        // Identify blob column names. When present we open Lance in DESCRIPTOR mode and let
+        // LanceRecordIterator synthesize the Hudi OUT_OF_LINE reference rows directly from
+        // lance-spark's BlobStructAccessor (public API). No descriptor-shape schema is exposed
+        // to the projection.
+        val hasBlobColumns = requestSchema.fields.exists(BlobLanceSchemaSupport.isBlobField)
+        val blobFieldNameSet: java.util.Set[String] = if (hasBlobColumns) {
+          val names = new java.util.HashSet[String]()
+          requestSchema.fields.foreach { f =>
+            if (BlobLanceSchemaSupport.isBlobField(f)) names.add(f.name)
+          }
+          names
+        } else {
+          java.util.Collections.emptySet[String]()
+        }
+
         // Lance returns null BLOB sub-structs as non-null parents with null children; widen
         // nullability inside BLOB subtrees so the codegen projection doesn't NPE on them.
         val iteratorSchema = widenBlobSubtreeNullability(requestSchema)
@@ -138,7 +154,8 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           lanceReader,
           arrowReader,
           iteratorSchema,
-          filePath
+          filePath,
+          blobFieldNameSet
         )
 
         // Register cleanup listener
