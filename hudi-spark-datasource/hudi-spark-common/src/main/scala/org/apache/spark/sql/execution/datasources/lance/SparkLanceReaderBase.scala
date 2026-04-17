@@ -29,15 +29,16 @@ import org.apache.hudi.storage.StorageConfiguration
 import org.apache.hadoop.conf.Configuration
 import org.apache.parquet.schema.MessageType
 import org.apache.spark.TaskContext
+import org.apache.spark.sql.avro.BlobLanceSchemaSupport
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, JoinedRow, UnsafeProjection, UnsafeRow}
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
 import org.apache.spark.sql.execution.datasources.{PartitionedFile, SparkColumnarFileReader, SparkSchemaTransformUtils}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructField, StructType}
 import org.apache.spark.sql.util.LanceArrowUtils
-import org.lance.file.LanceFileReader
+import org.lance.file.{BlobReadMode, FileReadOptions, LanceFileReader}
 
 import java.io.IOException
 
@@ -98,26 +99,57 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         val (implicitTypeChangeInfo, sparkRequestSchema) =
           SparkSchemaTransformUtils.buildImplicitSchemaChangeInfo(fileSchema, requiredSchema)
 
-        // Filter schema to only fields that exist in file (Lance can only read columns present in file)
-        val requestSchema = SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema)
+        // Filter schema to only fields that exist in file (Lance can only read columns present in file).
+        val requestSchema =
+          SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema)
 
-        val columnNames = if (requestSchema.nonEmpty) {
-          requestSchema.fieldNames.toList.asJava
+        // Identify blob column names. When present we open Lance in DESCRIPTOR mode and let
+        // LanceRecordIterator synthesize the Hudi OUT_OF_LINE reference rows directly from
+        // lance-spark's BlobStructAccessor (public API). No descriptor-shape schema is exposed
+        // to the projection.
+        val hasBlobColumns = requestSchema.fields.exists(BlobLanceSchemaSupport.isBlobField)
+        val blobFieldNameSet: java.util.Set[String] = if (hasBlobColumns) {
+          val names = new java.util.HashSet[String]()
+          requestSchema.fields.foreach { f =>
+            if (BlobLanceSchemaSupport.isBlobField(f)) names.add(f.name)
+          }
+          names
+        } else {
+          java.util.Collections.emptySet[String]()
+        }
+
+        // Widen nullability: Lance can return non-null parent structs whose leaf children
+        // are null (e.g. a BLOB's `reference` struct is non-null with all-null members).
+        val iteratorSchema = forceAllFieldsNullable(requestSchema)
+
+        val columnNames = if (iteratorSchema.nonEmpty) {
+          iteratorSchema.fieldNames.toList.asJava
         } else {
           // If only partition columns requested, read minimal data
           null
         }
 
-        // Read data with column projection (filters not supported yet)
-        val arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE)
+        // Read data with column projection. Use DESCRIPTOR mode for blob columns so the
+        // iterator can read {position, size} via BlobStructAccessor without materializing
+        // the bytes; the iterator maps these into a Hudi OUT_OF_LINE reference row.
+        val readOpts = if (hasBlobColumns) {
+          FileReadOptions.builder().blobReadMode(BlobReadMode.DESCRIPTOR).build()
+        } else {
+          null
+        }
+        val arrowReader = if (readOpts != null) {
+          lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts)
+        } else {
+          lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE)
+        }
 
-        // Create iterator using shared LanceRecordIterator
         lanceIterator = new LanceRecordIterator(
           allocator,
           lanceReader,
           arrowReader,
-          requestSchema,
-          filePath
+          iteratorSchema,
+          filePath,
+          blobFieldNameSet
         )
 
         // Register cleanup listener
@@ -125,11 +157,19 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           ctx.addTaskCompletionListener[Unit](_ => lanceIterator.close())
         }
 
+        // Iterator already emits rows in the Hudi OUT_OF_LINE shape; feed them straight into
+        // the padding + cast projections below.
+        val baseIter: Iterator[InternalRow] = lanceIterator.asScala
+
+        // iteratorSchema already matches forceAllFieldsNullable(requestSchema); reuse it
+        // for the padding/cast projections.
+        val nullableRequestSchema = iteratorSchema
+
         // Create the following projections for schema evolution:
         // 1. Padding projection: add NULL for missing columns
         // 2. Casting projection: handle type conversions
         val schemaUtils = sparkAdapter.getSchemaUtils
-        val paddingProj = SparkSchemaTransformUtils.generateNullPaddingProjection(requestSchema, requiredSchema)
+        val paddingProj = SparkSchemaTransformUtils.generateNullPaddingProjection(nullableRequestSchema, requiredSchema)
         val castProj = SparkSchemaTransformUtils.generateUnsafeProjection(
           schemaUtils.toAttributes(requiredSchema),
           Some(SQLConf.get.sessionLocalTimeZone),
@@ -144,7 +184,7 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           def apply(row: InternalRow): UnsafeRow =
             castProj(paddingProj(row))
         }
-        val projectedIter = lanceIterator.asScala.map(projection.apply)
+        val projectedIter = baseIter.map(projection.apply)
 
         // Handle partition columns
         if (partitionSchema.length == 0) {
@@ -171,5 +211,26 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           throw new IOException(s"Failed to read Lance file: $filePath", e)
       }
     }
+  }
+
+  /**
+   * Recursively widens nullability to true on every field of a Spark schema,
+   * including children of nested structs, arrays, and maps.
+   */
+  private def forceAllFieldsNullable(schema: StructType): StructType = {
+    StructType(schema.fields.map(forceFieldNullable))
+  }
+
+  private def forceFieldNullable(field: StructField): StructField =
+    field.copy(nullable = true, dataType = forceTypeNullable(field.dataType))
+
+  private def forceTypeNullable(dt: DataType): DataType = dt match {
+    case s: StructType => StructType(s.fields.map(forceFieldNullable))
+    case a: ArrayType => a.copy(elementType = forceTypeNullable(a.elementType), containsNull = true)
+    case m: MapType => m.copy(
+      keyType = forceTypeNullable(m.keyType),
+      valueType = forceTypeNullable(m.valueType),
+      valueContainsNull = true)
+    case other => other
   }
 }
