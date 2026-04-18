@@ -77,7 +77,7 @@ case class ReadBlobRule(spark: SparkSession) extends Rule[LogicalPlan] {
       Project(newProjectList, wrappedPlan)
 
     case node if containsReadBlobInAnyExpression(node) =>
-      throw new AnalysisException(
+      throw new IllegalArgumentException(
         s"read_blob() may only appear in SELECT or WHERE clauses. Found in unsupported logical plan node: ${node.nodeName}. " +
         s"Move read_blob() to a SELECT or WHERE clause. Full plan: ${node.simpleStringWithNodeId()}")
   }

@@ -24,6 +24,7 @@ import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType}
 import org.apache.hudi.io.SeekableDataInputStream
 import org.apache.hudi.storage.{HoodieStorage, HoodieStorageUtils, StorageConfiguration, StoragePath}
 
+import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Row}
@@ -213,10 +214,12 @@ class BatchedBlobReader(
                 index = rowIndex,
                 inlineBytes = Some(bytes)
               )
-            } else {
+            } else if (storageType  == HoodieSchema.Blob.OUT_OF_LINE) {
               // Case 2 or 3: Out-of-line — get reference struct (field 2)
+              require(!accessor.isNullAt(blobStruct, 2), s"Out-of-line blob at row $rowIndex must set reference")
               val referenceStruct = accessor.getStruct(blobStruct, 2, HoodieSchema.Blob.getReferenceFieldCount)
               val filePath = accessor.getString(referenceStruct, 0)
+              require(filePath != null && filePath.nonEmpty, s"Blob reference must have non-empty external_path at row $rowIndex")
               val offsetIsNull = accessor.isNullAt(referenceStruct, 1)
               val lengthIsNull = accessor.isNullAt(referenceStruct, 2)
               if (offsetIsNull && lengthIsNull) {
@@ -244,6 +247,8 @@ class BatchedBlobReader(
                   index = rowIndex
                 )
               }
+            } else {
+              throw new IllegalArgumentException(s"Unsupported blob storage_type at row $rowIndex: $storageType")
             }
             rowIndex += 1
             collected += 1
@@ -669,7 +674,9 @@ object BatchedBlobReader {
       import RowBuilder.rowBuilder
 
       // Process partition
-      reader.processPartition[Row](partition, structColIdx, outputSchema)
+      val iter = reader.processPartition[Row](partition, structColIdx, outputSchema)
+      TaskContext.get().addTaskCompletionListener[Unit](_ => storage.close())
+      iter
     } (sparkAdapter.getCatalystExpressionUtils.getEncoder(outputSchema))
 
     if (keepTempColumn) {
@@ -709,6 +716,9 @@ object BatchedBlobReader {
 
     // Get struct column index
     val structColIdx = schema.fieldIndex(columnName)
+    val structField = schema(structColIdx)
+    require(isCompatibleBlobType(structField.dataType),
+      s"Blob column '$columnName' must be compatible with BlobType (type, data, reference struct), found: ${structField.dataType}")
 
     // Create output schema (input + __temp__data column)
     val outputSchema = schema.add(StructField(DATA_COL, BinaryType, nullable = true))
@@ -723,7 +733,9 @@ object BatchedBlobReader {
       import RowAccessor.internalRowAccessor
       import RowBuilder.internalRowBuilder
 
-      reader.processPartition[InternalRow](partition, structColIdx, outputSchema)
+      val iter = reader.processPartition[InternalRow](partition, structColIdx, outputSchema)
+      TaskContext.get().addTaskCompletionListener[Unit](_ => storage.close())
+      iter
     }
   }
 
