@@ -29,7 +29,7 @@ import org.apache.hudi.config.HoodieIndexConfig
 import org.apache.hudi.index.HoodieIndex
 import org.apache.hudi.testutils.HoodieClientTestBase
 
-import org.apache.avro.generic.{GenericData, GenericRecord, IndexedRecord}
+import org.apache.avro.generic.{GenericData, IndexedRecord}
 import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
@@ -111,6 +111,11 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
       val filePath = reference.getString(reference.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
       assertTrue(filePath.endsWith("file2.bin"))
     }
+
+    // Verify SQL read_blob() function
+    table.createOrReplaceTempView("hudi_table_view")
+    val sqlRows = sparkSession.sql("SELECT id, value, read_blob(data) as full_bytes from hudi_table_view").collectAsList()
+    assertEquals(10, sqlRows.size())
   }
 
   private def createTestRecords(filePath: String): Seq[HoodieRecord[IndexedRecord]] = {

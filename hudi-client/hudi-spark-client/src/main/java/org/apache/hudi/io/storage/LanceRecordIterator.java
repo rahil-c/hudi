@@ -23,19 +23,29 @@ import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.complex.NonNullableStructVector;
+import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
-import org.apache.spark.sql.vectorized.LanceArrowColumnVector;
+import org.lance.spark.vectorized.LanceArrowColumnVector;
 import org.lance.file.LanceFileReader;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Shared iterator implementation for reading Lance files and converting Arrow batches to Spark rows.
@@ -53,11 +63,15 @@ import java.util.Iterator;
  * serialization and memory management.
  */
 public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
+  private static final String LANCE_BLOB_ENCODING_KEY = "lance-encoding:blob";
+
   private final BufferAllocator allocator;
   private final LanceFileReader lanceReader;
   private final ArrowReader arrowReader;
   private final UnsafeProjection projection;
   private final String path;
+  private final Set<String> blobFieldNames;
+  private final StructType sparkSchema;
 
   private ColumnarBatch currentBatch;
   private Iterator<InternalRow> rowIterator;
@@ -78,11 +92,35 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
                              ArrowReader arrowReader,
                              StructType schema,
                              String path) {
+    this(allocator, lanceReader, arrowReader, schema, path, java.util.Collections.emptySet());
+  }
+
+  /**
+   * Creates a new Lance record iterator with blob field awareness.
+   *
+   * @param allocator Arrow buffer allocator for memory management
+   * @param lanceReader Lance file reader
+   * @param arrowReader Arrow reader for batch reading
+   * @param schema Spark schema for the records
+   * @param path File path (for error messages)
+   * @param blobFieldNames names of top-level struct fields that contain blob descriptors.
+   *                       The "lance-encoding:blob" metadata is stripped from their nested
+   *                       children so LanceArrowColumnVector creates a standard struct
+   *                       accessor instead of BlobStructAccessor (which breaks getChild()).
+   */
+  public LanceRecordIterator(BufferAllocator allocator,
+                             LanceFileReader lanceReader,
+                             ArrowReader arrowReader,
+                             StructType schema,
+                             String path,
+                             Set<String> blobFieldNames) {
     this.allocator = allocator;
     this.lanceReader = lanceReader;
     this.arrowReader = arrowReader;
     this.projection = UnsafeProjection.create(schema);
     this.path = path;
+    this.blobFieldNames = blobFieldNames;
+    this.sparkSchema = schema;
   }
 
   @Override
@@ -103,12 +141,44 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
       if (arrowReader.loadNextBatch()) {
         VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
 
-        // Wrap each Arrow FieldVector in LanceArrowColumnVector for type-safe access
-        // Cache the column wrappers on first batch and reuse for all subsequent batches
+        // Wrap each Arrow FieldVector in LanceArrowColumnVector, ordered to match the
+        // Spark schema the UnsafeProjection was built for. Starting with lance-spark 0.4.0
+        // the returned VectorSchemaRoot may use the file's on-disk column order rather
+        // than the order of the columnNames we asked for, which caused
+        // UnsafeProjection to dispatch getInt(0) against a VarCharVector (see HUDI issue
+        // discovered on TestLanceDataSource MOR paths). Look each field up by name.
+        //
+        // For blob struct fields in DESCRIPTOR mode, strip the "lance-encoding:blob"
+        // metadata from nested children first. Without this, LanceArrowColumnVector
+        // creates a BlobStructAccessor for the data child, which makes getChild()
+        // return null and breaks normal struct field access. Stripping the metadata
+        // causes it to create a standard LanceStructAccessor instead, which handles
+        // UInt64 natively (unlike Spark's ArrowColumnVector which doesn't support UInt64).
         if (columnVectors == null) {
-          columnVectors = root.getFieldVectors().stream()
-                  .map(LanceArrowColumnVector::new)
-                  .toArray(ColumnVector[]::new);
+          List<FieldVector> fieldVectors = root.getFieldVectors();
+          Map<String, FieldVector> byName = new HashMap<>(fieldVectors.size() * 2);
+          for (FieldVector fv : fieldVectors) {
+            byName.put(fv.getName(), fv);
+          }
+          StructField[] sparkFields = sparkSchema.fields();
+          if (sparkFields.length != fieldVectors.size()) {
+            throw new HoodieException("Lance batch column count " + fieldVectors.size()
+                + " does not match expected Spark schema size " + sparkFields.length
+                + " for file: " + path);
+          }
+          columnVectors = new ColumnVector[sparkFields.length];
+          for (int i = 0; i < sparkFields.length; i++) {
+            String name = sparkFields[i].name();
+            FieldVector fv = byName.get(name);
+            if (fv == null) {
+              throw new HoodieException("Lance batch missing expected column '" + name
+                  + "' for file: " + path + "; available columns: " + byName.keySet());
+            }
+            if (blobFieldNames.contains(fv.getName())) {
+              stripBlobMetadataFromChildren(fv);
+            }
+            columnVectors[i] = new LanceArrowColumnVector(fv);
+          }
         }
 
         // Create ColumnarBatch and keep it alive while iterating
@@ -131,6 +201,41 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     InternalRow row = rowIterator.next();
     // Convert to UnsafeRow immediately while batch is still open
     return projection.apply(row).copy();
+  }
+
+  /**
+   * Strips "lance-encoding:blob" metadata from all child FieldVectors of a parent vector.
+   * This prevents LanceArrowColumnVector from creating BlobStructAccessor for nested
+   * blob descriptor structs (which breaks getChild()). Uses reflection to modify the
+   * protected {@code field} member on {@link NonNullableStructVector}.
+   */
+  private static void stripBlobMetadataFromChildren(FieldVector parentVector) {
+    if (!(parentVector instanceof StructVector)) {
+      return;
+    }
+    StructVector structVector = (StructVector) parentVector;
+    for (FieldVector child : structVector.getChildrenFromFields()) {
+      Field childField = child.getField();
+      Map<String, String> metadata = childField.getMetadata();
+      if (metadata != null && metadata.containsKey(LANCE_BLOB_ENCODING_KEY)) {
+        Map<String, String> newMeta = new HashMap<>(metadata);
+        newMeta.remove(LANCE_BLOB_ENCODING_KEY);
+        FieldType newFieldType = new FieldType(
+            childField.isNullable(), childField.getType(), childField.getDictionary(), newMeta);
+        Field newField = new Field(childField.getName(), newFieldType, childField.getChildren());
+        try {
+          java.lang.reflect.Field reflectField =
+              NonNullableStructVector.class.getDeclaredField("field");
+          reflectField.setAccessible(true);
+          reflectField.set(child, newField);
+        } catch (NoSuchFieldException | IllegalAccessException e) {
+          throw new HoodieException(
+              "Failed to strip blob metadata from Arrow FieldVector: " + childField.getName(), e);
+        }
+      }
+      // Recurse into nested structs
+      stripBlobMetadataFromChildren(child);
+    }
   }
 
   @Override
