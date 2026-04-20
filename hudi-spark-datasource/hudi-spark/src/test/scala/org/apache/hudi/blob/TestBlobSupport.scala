@@ -107,10 +107,20 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
     assertEquals(10, rows.size())
 
     rows.asScala.foreach { row =>
+      val i = row.getInt(row.fieldIndex("value"))
       val data = row.getStruct(row.fieldIndex("data"))
+      assertEquals(HoodieSchema.Blob.OUT_OF_LINE,
+        data.getString(data.fieldIndex(HoodieSchema.Blob.TYPE)))
+      assertTrue(data.isNullAt(data.fieldIndex(HoodieSchema.Blob.INLINE_DATA_FIELD)))
       val reference = data.getStruct(data.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE))
       val filePath = reference.getString(reference.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
       assertTrue(filePath.endsWith("file2.bin"))
+      assertEquals(i * 100L,
+        reference.getLong(reference.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_OFFSET)))
+      assertEquals(100L,
+        reference.getLong(reference.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH)))
+      assertEquals(false,
+        reference.getBoolean(reference.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_IS_MANAGED)))
     }
 
     // Verify SQL read_blob() returns bytes matching the referenced file region.
