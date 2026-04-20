@@ -18,6 +18,7 @@
 
 package org.apache.hudi.config;
 
+import org.apache.hudi.client.transaction.PreferWriterConflictResolutionStrategy;
 import org.apache.hudi.common.config.ConfigClassProperty;
 import org.apache.hudi.common.config.ConfigGroups;
 import org.apache.hudi.common.config.ConfigProperty;
@@ -26,6 +27,7 @@ import org.apache.hudi.common.config.EnumFieldDescription;
 import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.EngineType;
+import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.exception.HoodieNotSupportedException;
 import org.apache.hudi.index.HoodieIndex;
@@ -243,13 +245,44 @@ public class HoodieClusteringConfig extends HoodieConfig {
       .sinceVersion("0.7.0")
       .withDocumentation("Columns to sort the data by when clustering");
 
+  static final String SPARK_ALLOW_UPDATE_STRATEGY_CLASS_NAME =
+      "org.apache.hudi.client.clustering.update.strategy.SparkAllowUpdateStrategy";
+
+  static final String SPARK_REJECT_UPDATE_STRATEGY_CLASS_NAME =
+      "org.apache.hudi.client.clustering.update.strategy.SparkRejectUpdateStrategy";
+
   public static final ConfigProperty<String> UPDATES_STRATEGY = ConfigProperty
       .key("hoodie.clustering.updates.strategy")
-      .defaultValue("org.apache.hudi.client.clustering.update.strategy.SparkRejectUpdateStrategy")
+      .noDefaultValue()
+      .withInferFunction(cfg -> {
+        String strategy = cfg.getStringOrDefault(HoodieLockConfig.WRITE_CONFLICT_RESOLUTION_STRATEGY_CLASS_NAME, "");
+        if (PreferWriterConflictResolutionStrategy.class.getName().equals(strategy)) {
+          return Option.of(SPARK_ALLOW_UPDATE_STRATEGY_CLASS_NAME);
+        }
+        return Option.of(SPARK_REJECT_UPDATE_STRATEGY_CLASS_NAME);
+      })
       .markAdvanced()
       .sinceVersion("0.7.0")
       .withDocumentation("Determines how to handle updates, deletes to file groups that are under clustering."
           + " Default strategy just rejects the update");
+
+  public static final ConfigProperty<Boolean> ENABLE_EXPIRATIONS = ConfigProperty
+      .key("hoodie.clustering.enable.expirations")
+      .defaultValue(false)
+      .markAdvanced()
+      .withDocumentation("When enabled, rollback of failed writes (under LAZY cleaning policy) will also attempt to rollback "
+          + "clustering replacecommit instants whose heartbeat has expired. Clustering jobs will start a heartbeat before "
+          + "scheduling a plan, so that other writers can detect stale/failed clustering attempts. Note that the same "
+          + "client must be used to schedule, execute, and commit the clustering instant. And a clustering plan cannot be "
+          + "re-attempted");
+
+  public static final ConfigProperty<Long> EXPIRATION_THRESHOLD_MINS = ConfigProperty
+      .key("hoodie.clustering.expiration.threshold.mins")
+      .defaultValue(60L)
+      .markAdvanced()
+      .withDocumentation("When hoodie.clustering.enable.expirations is enabled, a clustering instant will not be "
+          + "considered expired unless its instant creation time is at least this many minutes old. This serves as a guardrail to avoid "
+          + "unnecessary work in rolling back clustering instants that other writers are already attempting to roll back.");
 
   public static final ConfigProperty<String> SCHEDULE_INLINE_CLUSTERING = ConfigProperty
       .key("hoodie.clustering.schedule.inline")
@@ -490,7 +523,7 @@ public class HoodieClusteringConfig extends HoodieConfig {
    * @deprecated Use {@link #UPDATES_STRATEGY} and its methods instead
    */
   @Deprecated
-  public static final String DEFAULT_CLUSTERING_UPDATES_STRATEGY = UPDATES_STRATEGY.defaultValue();
+  public static final String DEFAULT_CLUSTERING_UPDATES_STRATEGY = SPARK_REJECT_UPDATE_STRATEGY_CLASS_NAME;
   /**
    * @deprecated Use {@link #ASYNC_CLUSTERING_ENABLE} and its methods instead
    */

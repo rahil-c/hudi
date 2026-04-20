@@ -385,4 +385,62 @@ public class TestHoodieSplitReaderFunction {
 
     assertNotNull(function, "Function should be created with custom InternalSchemaManager");
   }
+
+  // -------------------------------------------------------------------------
+  //  Constructor tests (limit is now enforced in HoodieSourceSplitReader)
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void testConstructorWithEmitDelete() {
+    HoodieSplitReaderFunction function =
+        new HoodieSplitReaderFunction(
+            conf,
+            tableSchema,
+            requiredSchema,
+            mockInternalSchemaManager,
+            "AVRO_PAYLOAD",
+            Collections.emptyList(),
+            false
+        );
+
+    assertNotNull(function);
+  }
+
+  @Test
+  public void testConstructorWithNullTableSchemaThrows() {
+    assertThrows(IllegalArgumentException.class, () ->
+        new HoodieSplitReaderFunction(
+            conf,
+            null,
+            requiredSchema,
+            mockInternalSchemaManager,
+            "AVRO_PAYLOAD",
+            Collections.emptyList(),
+            false
+        ));
+  }
+
+  @Test
+  public void testConstructorWithNullRequiredSchemaThrows() {
+    assertThrows(IllegalArgumentException.class, () ->
+        new HoodieSplitReaderFunction(
+            conf,
+            tableSchema,
+            null,
+            mockInternalSchemaManager,
+            "AVRO_PAYLOAD",
+            Collections.emptyList(),
+            false
+        ));
+  }
+
+  @Test
+  public void testDefaultConstructor() {
+    HoodieSplitReaderFunction function =
+        new HoodieSplitReaderFunction(
+            conf, tableSchema, requiredSchema, mockInternalSchemaManager,
+            "AVRO_PAYLOAD", Collections.emptyList(), false);
+
+    assertNotNull(function);
+  }
 }

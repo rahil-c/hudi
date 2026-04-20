@@ -53,7 +53,8 @@ case class BatchedBlobReaderStrategy(sparkSession: SparkSession) extends SparkSt
         maxGapBytes,
         storageConf,
         lookaheadSize,
-        read
+        read.blobAttr.name,
+        read.output
       ) :: Nil
 
     case _ => Nil

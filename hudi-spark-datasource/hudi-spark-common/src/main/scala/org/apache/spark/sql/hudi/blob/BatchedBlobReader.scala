@@ -186,7 +186,11 @@ class BatchedBlobReader(
         var collected = 0
 
         while (bufferedRows.hasNext && collected < lookaheadRows) {
-          val row = bufferedRows.next()
+          // Spark's upstream InternalRow iterator can reuse a single buffer
+          // across next() calls; without copying, every buffered RowInfo
+          // aliases the last emitted row — non-blob columns (id, etc.) would
+          // collapse to the tail value by the time we emit the batch
+          val row = accessor.copy(bufferedRows.next())
           // Handle null struct column (null blob)
           if (accessor.isNullAt(row, structColIdx)) {
             batch += RowInfo[R](
@@ -473,6 +477,10 @@ private[blob] trait RowAccessor[R] {
   def getLong(struct: R, fieldIdx: Int): Long
   def getBytes(row: R, fieldIdx: Int): Array[Byte]
   def isNullAt(row: R, fieldIdx: Int): Boolean
+  // Return a deep copy safe to retain across iterator advances. Spark's child
+  // InternalRow iterator may hand out a single mutated buffer, so batching
+  // requires copying before stashing the row.
+  def copy(row: R): R
 }
 
 /**
@@ -495,6 +503,7 @@ private[blob] object RowAccessor {
     override def getLong(struct: Row, fieldIdx: Int): Long = struct.getLong(fieldIdx)
     override def getBytes(row: Row, fieldIdx: Int): Array[Byte] = row.getAs[Array[Byte]](fieldIdx)
     override def isNullAt(row: Row, fieldIdx: Int): Boolean = row.isNullAt(fieldIdx)
+    override def copy(row: Row): Row = row
   }
 
   implicit val internalRowAccessor: RowAccessor[InternalRow] = new RowAccessor[InternalRow] {
@@ -506,6 +515,7 @@ private[blob] object RowAccessor {
     override def getLong(struct: InternalRow, fieldIdx: Int): Long = struct.getLong(fieldIdx)
     override def getBytes(row: InternalRow, fieldIdx: Int): Array[Byte] = row.getBinary(fieldIdx)
     override def isNullAt(row: InternalRow, fieldIdx: Int): Boolean = row.isNullAt(fieldIdx)
+    override def copy(row: InternalRow): InternalRow = row.copy()
   }
 }
 

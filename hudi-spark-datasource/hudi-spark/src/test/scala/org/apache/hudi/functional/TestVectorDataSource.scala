@@ -991,10 +991,36 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     }
   }
 
+  @Test
+  def testNestedVectorWriteThrows(): Unit = {
+    // A VECTOR nested inside a struct field must be rejected at write time.
+    val meta = vectorMetadata("VECTOR(4)")
+    val nestedStruct = StructType(Seq(
+      StructField("embedding", ArrayType(FloatType, containsNull = false), nullable = false, metadata = meta)
+    ))
+    val schema = StructType(Seq(
+      StructField("id", StringType, nullable = false),
+      StructField("data", nestedStruct, nullable = false)
+    ))
+    val data = Seq(Row("key_1", Row(Seq(1.0f, 2.0f, 3.0f, 4.0f))))
+    val df = spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+
+    val ex = assertThrows(classOf[Exception], () => {
+      writeHudiTable(df, "nested_vector_test", basePath + "/nested_vector")
+    })
+    assertTrue(nestedVectorMessageInCauseChain(ex),
+      s"Expected nested VECTOR guard to fire, but got: ${ex.getMessage}")
+  }
+
   private def assertArrayEquals(expected: Array[Byte], actual: Array[Byte], message: String): Unit = {
     assertEquals(expected.length, actual.length, s"$message: length mismatch")
     expected.zip(actual).zipWithIndex.foreach { case ((e, a), idx) =>
       assertEquals(e, a, s"$message: mismatch at index $idx")
     }
   }
+
+  private def nestedVectorMessageInCauseChain(ex: Throwable): Boolean =
+    ex != null && (Option(ex.getMessage).exists(_.contains(
+      "VECTOR column 'embedding' must be a top-level field. Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported."))
+      || nestedVectorMessageInCauseChain(ex.getCause))
 }

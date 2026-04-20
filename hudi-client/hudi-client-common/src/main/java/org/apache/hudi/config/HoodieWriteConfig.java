@@ -21,6 +21,7 @@ package org.apache.hudi.config;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.bootstrap.BootstrapMode;
 import org.apache.hudi.client.transaction.ConflictResolutionStrategy;
+
 import org.apache.hudi.client.transaction.lock.InProcessLockProvider;
 import org.apache.hudi.common.config.ConfigClassProperty;
 import org.apache.hudi.common.config.ConfigGroups;
@@ -2685,6 +2686,14 @@ public class HoodieWriteConfig extends HoodieConfig {
     return getBooleanOrDefault(CLUSTERING_BLOCK_FOR_PENDING_INGESTION);
   }
 
+  public boolean isExpirationOfClusteringEnabled() {
+    return getBooleanOrDefault(HoodieClusteringConfig.ENABLE_EXPIRATIONS);
+  }
+
+  public long getClusteringExpirationThresholdMins() {
+    return getLong(HoodieClusteringConfig.EXPIRATION_THRESHOLD_MINS);
+  }
+
   /**
    * File listing metadata configs.
    */
@@ -3721,6 +3730,7 @@ public class HoodieWriteConfig extends HoodieConfig {
             HoodieFailedWritesCleaningPolicy.LAZY.name(),
             writeConcurrencyMode.name());
       }
+
     }
 
     private void validate() {

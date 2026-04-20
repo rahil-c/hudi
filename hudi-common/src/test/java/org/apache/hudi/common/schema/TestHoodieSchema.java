@@ -22,6 +22,7 @@ import org.apache.hudi.common.schema.HoodieSchema.VariantLogicalType;
 import org.apache.hudi.common.schema.HoodieSchema.VectorLogicalType;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.exception.HoodieAvroSchemaException;
+import org.apache.hudi.internal.schema.HoodieSchemaException;
 
 import org.apache.avro.JsonProperties;
 import org.apache.avro.LogicalType;
@@ -39,6 +40,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -1045,11 +1047,9 @@ public class TestHoodieSchema {
   }
 
   @Test
-  void testVectorInNestedStructures() throws Exception {
-    // Create vector schema
+  void testVectorAsTopLevelRecordField() {
     HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
 
-    // Test vector in record - verify it can be used as a field
     List<HoodieSchemaField> fields = Arrays.asList(
         HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT)),
         HoodieSchemaField.of("embedding", vectorSchema)
@@ -1057,13 +1057,13 @@ public class TestHoodieSchema {
     HoodieSchema recordSchema = HoodieSchema.createRecord("TestRecord", null, null, fields);
     assertEquals(HoodieSchemaType.RECORD, recordSchema.getType());
 
-    // Verify vector field is preserved in the Avro schema
+    // Verify the vector field is preserved in the Avro schema
     Schema.Field embeddingField = recordSchema.getAvroSchema().getField("embedding");
     assertNotNull(embeddingField);
     HoodieSchema embeddingSchema = HoodieSchema.fromAvroSchema(embeddingField.schema());
     assertVector(embeddingSchema, 128, HoodieSchema.Vector.VectorElementType.FLOAT);
 
-    // Round-trip record with vector field through JSON
+    // Round-trip the record with the vector field through JSON
     String recordJson = recordSchema.toString();
     HoodieSchema parsedRecord = HoodieSchema.parse(recordJson);
     assertEquals(recordSchema, parsedRecord);
@@ -1071,28 +1071,36 @@ public class TestHoodieSchema {
     assertNotNull(parsedEmbeddingField);
     HoodieSchema parsedEmbedding = HoodieSchema.fromAvroSchema(parsedEmbeddingField.schema());
     assertVector(parsedEmbedding, 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+  }
 
-    // Test vector in array
-    HoodieSchema arraySchema = HoodieSchema.createArray(vectorSchema);
-    assertEquals(HoodieSchemaType.ARRAY, arraySchema.getType());
-    assertVector(arraySchema.getElementType(), 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+  @Test
+  void testVectorAsArrayElementThrows() {
+    HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
+        () -> HoodieSchema.createArray(vectorSchema));
+    assertEquals("VECTOR type is not supported as an array element. VECTOR columns must be top-level fields.", ex.getMessage());
+  }
 
-    // Round-trip array of vectors through JSON
-    String arrayJson = arraySchema.toString();
-    HoodieSchema parsedArray = HoodieSchema.parse(arrayJson);
-    assertEquals(arraySchema, parsedArray);
-    assertVector(parsedArray.getElementType(), 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+  @Test
+  void testVectorAsMapValueThrows() {
+    HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
+        () -> HoodieSchema.createMap(vectorSchema));
+    assertEquals("VECTOR type is not supported as a map value. VECTOR columns must be top-level fields.", ex.getMessage());
+  }
 
-    // Test vector in map
-    HoodieSchema mapSchema = HoodieSchema.createMap(vectorSchema);
-    assertEquals(HoodieSchemaType.MAP, mapSchema.getType());
-    assertVector(mapSchema.getValueType(), 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+  @Test
+  void testVectorInNestedRecordThrows() {
+    HoodieSchema.Vector vectorSchema = HoodieSchema.createVector(128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchema innerRecord = HoodieSchema.createRecord("inner", null, null,
+        Arrays.asList(HoodieSchemaField.of("embedding", vectorSchema)));
 
-    // Round-trip map with vector values through JSON
-    String mapJson = mapSchema.toString();
-    HoodieSchema parsedMap = HoodieSchema.parse(mapJson);
-    assertEquals(mapSchema, parsedMap);
-    assertVector(parsedMap.getValueType(), 128, HoodieSchema.Vector.VectorElementType.FLOAT);
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class, () ->
+        HoodieSchema.createRecord("outer", null, null, Arrays.asList(
+            HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT)),
+            HoodieSchemaField.of("data", innerRecord))));
+    assertEquals("VECTOR column 'embedding' must be a top-level field. "
+        + "Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.", ex.getMessage());
   }
 
   @Test
@@ -2844,5 +2852,221 @@ public class TestHoodieSchema {
     HoodieSchema parsed = HoodieSchema.parseTypeDescriptor(typeString);
     assertEquals(HoodieSchemaType.BLOB, parsed.getType());
     assertInstanceOf(HoodieSchema.Blob.class, parsed);
+  }
+
+  @Test
+  public void testCreateArrayWithNullableVectorThrows() {
+    HoodieSchema vectorSchema = HoodieSchema.createNullable(HoodieSchema.createVector(128));
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
+        () -> HoodieSchema.createArray(vectorSchema));
+    assertEquals("VECTOR type is not supported as an array element. VECTOR columns must be top-level fields.", ex.getMessage());
+  }
+
+  @Test
+  public void testCreateMapWithNullableVectorThrows() {
+    HoodieSchema vectorSchema = HoodieSchema.createNullable(HoodieSchema.createVector(128));
+    HoodieSchemaException ex = assertThrows(HoodieSchemaException.class,
+        () -> HoodieSchema.createMap(vectorSchema));
+    assertEquals("VECTOR type is not supported as a map value. VECTOR columns must be top-level fields.", ex.getMessage());
+  }
+
+  @Test
+  public void testCreateShreddedFieldStruct() {
+    HoodieSchema fieldStruct = HoodieSchema.createShreddedFieldStruct("age", HoodieSchema.create(HoodieSchemaType.INT));
+
+    assertNotNull(fieldStruct);
+    assertEquals(HoodieSchemaType.RECORD, fieldStruct.getType());
+    assertEquals("age", fieldStruct.getAvroSchema().getName());
+
+    List<HoodieSchemaField> fields = fieldStruct.getFields();
+    assertEquals(2, fields.size());
+
+    // value: nullable bytes
+    assertEquals("value", fields.get(0).name());
+    assertTrue(fields.get(0).schema().isNullable());
+    assertEquals(HoodieSchemaType.BYTES, fields.get(0).schema().getNonNullType().getType());
+
+    // typed_value: nullable int
+    assertEquals("typed_value", fields.get(1).name());
+    assertTrue(fields.get(1).schema().isNullable());
+    assertEquals(HoodieSchemaType.INT, fields.get(1).schema().getNonNullType().getType());
+  }
+
+  @Test
+  public void testCreateShreddedFieldStructWithDecimal() {
+    HoodieSchema decimalSchema = HoodieSchema.createDecimal(15, 1);
+    HoodieSchema fieldStruct = HoodieSchema.createShreddedFieldStruct("price", decimalSchema);
+
+    assertNotNull(fieldStruct);
+    List<HoodieSchemaField> fields = fieldStruct.getFields();
+    assertEquals(2, fields.size());
+
+    // typed_value: nullable decimal(15,1)
+    HoodieSchema typedValueSchema = fields.get(1).schema().getNonNullType();
+    assertInstanceOf(HoodieSchema.Decimal.class, typedValueSchema);
+    assertEquals(15, ((HoodieSchema.Decimal) typedValueSchema).getPrecision());
+    assertEquals(1, ((HoodieSchema.Decimal) typedValueSchema).getScale());
+  }
+
+  @Test
+  public void testCreateVariantShreddedObject() {
+    Map<String, HoodieSchema> shreddedFields = new LinkedHashMap<>();
+    shreddedFields.put("a", HoodieSchema.create(HoodieSchemaType.INT));
+    shreddedFields.put("b", HoodieSchema.create(HoodieSchemaType.STRING));
+    shreddedFields.put("c", HoodieSchema.createDecimal(15, 1));
+
+    HoodieSchema.Variant variant = HoodieSchema.createVariantShreddedObject(shreddedFields);
+
+    assertNotNull(variant);
+    assertInstanceOf(HoodieSchema.Variant.class, variant);
+    assertTrue(variant.isShredded());
+    assertTrue(variant.getTypedValueField().isPresent());
+
+    // Top-level fields: value, metadata, typed_value
+    List<HoodieSchemaField> topFields = variant.getFields();
+    assertEquals(3, topFields.size());
+    assertEquals("metadata", topFields.get(0).name());
+    assertEquals("value", topFields.get(1).name());
+    assertEquals("typed_value", topFields.get(2).name());
+
+    // typed_value is a RECORD containing the shredded fields
+    HoodieSchema typedValueSchema = variant.getTypedValueField().get();
+    assertEquals(HoodieSchemaType.RECORD, typedValueSchema.getType());
+    List<HoodieSchemaField> typedValueFields = typedValueSchema.getFields();
+    assertEquals(3, typedValueFields.size());
+
+    // Verify field "a": nullable struct { value: nullable bytes, typed_value: nullable int }
+    HoodieSchemaField aField = typedValueFields.get(0);
+    assertEquals("a", aField.name());
+    assertTrue(aField.schema().isNullable());
+    HoodieSchema aStruct = aField.schema().getNonNullType();
+    assertEquals(HoodieSchemaType.RECORD, aStruct.getType());
+    List<HoodieSchemaField> aSubFields = aStruct.getFields();
+    assertEquals(2, aSubFields.size());
+    assertEquals("value", aSubFields.get(0).name());
+    assertTrue(aSubFields.get(0).schema().isNullable());
+    assertEquals(HoodieSchemaType.BYTES, aSubFields.get(0).schema().getNonNullType().getType());
+    assertEquals("typed_value", aSubFields.get(1).name());
+    assertTrue(aSubFields.get(1).schema().isNullable());
+    assertEquals(HoodieSchemaType.INT, aSubFields.get(1).schema().getNonNullType().getType());
+
+    // Verify field "b": nullable struct { value: nullable bytes, typed_value: nullable string }
+    HoodieSchemaField bField = typedValueFields.get(1);
+    assertEquals("b", bField.name());
+    HoodieSchema bStruct = bField.schema().getNonNullType();
+    List<HoodieSchemaField> bSubFields = bStruct.getFields();
+    assertEquals("typed_value", bSubFields.get(1).name());
+    assertEquals(HoodieSchemaType.STRING, bSubFields.get(1).schema().getNonNullType().getType());
+
+    // Verify field "c": nullable struct { value: nullable bytes, typed_value: nullable decimal(15,1) }
+    HoodieSchemaField cField = typedValueFields.get(2);
+    assertEquals("c", cField.name());
+    HoodieSchema cStruct = cField.schema().getNonNullType();
+    List<HoodieSchemaField> cSubFields = cStruct.getFields();
+    HoodieSchema cTypedValue = cSubFields.get(1).schema().getNonNullType();
+    assertInstanceOf(HoodieSchema.Decimal.class, cTypedValue);
+    assertEquals(15, ((HoodieSchema.Decimal) cTypedValue).getPrecision());
+    assertEquals(1, ((HoodieSchema.Decimal) cTypedValue).getScale());
+  }
+
+  @Test
+  public void testCreateVariantShreddedObjectWithCustomName() {
+    Map<String, HoodieSchema> shreddedFields = new LinkedHashMap<>();
+    shreddedFields.put("age", HoodieSchema.create(HoodieSchemaType.INT));
+
+    HoodieSchema.Variant variant = HoodieSchema.createVariantShreddedObject(
+        "my_variant", "org.apache.hudi", "A shredded variant", shreddedFields);
+
+    assertNotNull(variant);
+    assertEquals("my_variant", variant.getAvroSchema().getName());
+    assertEquals("org.apache.hudi", variant.getAvroSchema().getNamespace());
+    assertTrue(variant.isShredded());
+    assertTrue(TestHoodieSchema.isVariantSchema(variant.getAvroSchema()));
+  }
+
+  @Test
+  public void testCreateVariantShreddedObjectRoundTrip() {
+    Map<String, HoodieSchema> shreddedFields = new LinkedHashMap<>();
+    shreddedFields.put("a", HoodieSchema.create(HoodieSchemaType.INT));
+    shreddedFields.put("b", HoodieSchema.create(HoodieSchemaType.STRING));
+
+    HoodieSchema.Variant original = HoodieSchema.createVariantShreddedObject(shreddedFields);
+    String jsonSchema = original.toString();
+
+    // Parse back from JSON
+    HoodieSchema parsed = HoodieSchema.parse(jsonSchema);
+    assertInstanceOf(HoodieSchema.Variant.class, parsed);
+    HoodieSchema.Variant parsedVariant = (HoodieSchema.Variant) parsed;
+
+    assertTrue(parsedVariant.isShredded());
+    assertTrue(parsedVariant.getTypedValueField().isPresent());
+
+    // Verify typed_value structure is preserved
+    HoodieSchema typedValueSchema = parsedVariant.getTypedValueField().get();
+    assertEquals(HoodieSchemaType.RECORD, typedValueSchema.getType());
+    List<HoodieSchemaField> fields = typedValueSchema.getFields();
+    assertEquals(2, fields.size());
+    assertEquals("a", fields.get(0).name());
+    assertEquals("b", fields.get(1).name());
+
+    // Verify inner struct structure is preserved
+    HoodieSchema aStruct = fields.get(0).schema().getNonNullType();
+    assertEquals(HoodieSchemaType.RECORD, aStruct.getType());
+    assertEquals(2, aStruct.getFields().size());
+    assertEquals("value", aStruct.getFields().get(0).name());
+    assertEquals("typed_value", aStruct.getFields().get(1).name());
+  }
+
+  @Test
+  public void testGetPlainTypedValueSchemaFromNestedForm() {
+    // Create a variant using createVariantShreddedObject (nested form)
+    Map<String, HoodieSchema> shreddedFields = new LinkedHashMap<>();
+    shreddedFields.put("a", HoodieSchema.create(HoodieSchemaType.INT));
+    shreddedFields.put("b", HoodieSchema.create(HoodieSchemaType.STRING));
+    shreddedFields.put("c", HoodieSchema.createDecimal(15, 1));
+
+    HoodieSchema.Variant variant = HoodieSchema.createVariantShreddedObject(shreddedFields);
+
+    // getPlainTypedValueSchema should unwrap the nested {value, typed_value} structs
+    Option<HoodieSchema> plainOpt = variant.getPlainTypedValueSchema();
+    assertTrue(plainOpt.isPresent());
+    HoodieSchema plainSchema = plainOpt.get();
+    assertEquals(HoodieSchemaType.RECORD, plainSchema.getType());
+
+    List<HoodieSchemaField> fields = plainSchema.getFields();
+    assertEquals(3, fields.size());
+    assertEquals("a", fields.get(0).name());
+    assertEquals(HoodieSchemaType.INT, fields.get(0).schema().getNonNullType().getType());
+    assertEquals("b", fields.get(1).name());
+    assertEquals(HoodieSchemaType.STRING, fields.get(1).schema().getNonNullType().getType());
+    assertEquals("c", fields.get(2).name());
+    assertInstanceOf(HoodieSchema.Decimal.class, fields.get(2).schema().getNonNullType());
+  }
+
+  @Test
+  public void testGetPlainTypedValueSchemaFromPlainForm() {
+    // Create a variant using createVariantShredded (plain form)
+    HoodieSchema typedValueSchema = HoodieSchema.createRecord("TypedValue", null, null,
+        Collections.singletonList(HoodieSchemaField.of("data", HoodieSchema.create(HoodieSchemaType.STRING))));
+    HoodieSchema.Variant variant = HoodieSchema.createVariantShredded(typedValueSchema);
+
+    // getPlainTypedValueSchema should return as-is since it's already in plain form
+    Option<HoodieSchema> plainOpt = variant.getPlainTypedValueSchema();
+    assertTrue(plainOpt.isPresent());
+    HoodieSchema plainSchema = plainOpt.get();
+    assertEquals(HoodieSchemaType.RECORD, plainSchema.getType());
+    assertEquals(1, plainSchema.getFields().size());
+    assertEquals("data", plainSchema.getFields().get(0).name());
+  }
+
+  @Test
+  public void testGetPlainTypedValueSchemaEmpty() {
+    // Shredded variant without typed_value
+    HoodieSchema.Variant variant = HoodieSchema.createVariantShredded(null);
+    assertFalse(variant.getPlainTypedValueSchema().isPresent());
+
+    // Unshredded variant
+    HoodieSchema.Variant unshreddedVariant = HoodieSchema.createVariant();
+    assertFalse(unshreddedVariant.getPlainTypedValueSchema().isPresent());
   }
 }

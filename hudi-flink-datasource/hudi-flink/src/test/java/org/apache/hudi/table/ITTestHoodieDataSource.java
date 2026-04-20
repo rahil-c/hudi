@@ -31,6 +31,7 @@ import org.apache.hudi.common.table.marker.MarkerType;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.index.bucket.partition.PartitionBucketIndexUtils;
@@ -1358,6 +1359,34 @@ public class ITTestHoodieDataSource {
 
     List<Row> rows2 = CollectionUtil.iteratorToList(batchTableEnv.executeSql("select * from t1").collect());
     assertRowsEquals(rows2, "[]");
+  }
+
+  @Test
+  void testLanceFormatRejectedByFlink() {
+    // Lance base file format is only supported with the Spark engine.
+    // Flink should reject it early with a clear error on both read and write paths.
+    String createLanceTable = sql("lance_t1")
+        .option(FlinkOptions.PATH, tempFile.getAbsolutePath())
+        .options(getDefaultKeys())
+        .option("hoodie.table.base.file.format", "LANCE")
+        .end();
+
+    // Creating the table itself succeeds (DDL is just metadata registration),
+    // but any attempt to read or write should fail.
+    // Flink wraps our HoodieValidationException in its own ValidationException.
+    batchTableEnv.executeSql(createLanceTable);
+
+    // Source (read) path should throw
+    ValidationException readEx = assertThrows(ValidationException.class,
+        () -> execSelectSql(batchTableEnv, "select * from lance_t1"),
+        "Lance format should be rejected when reading via Flink");
+    assertTrue(ExceptionUtils.findThrowableWithMessage(readEx, HoodieFileFormat.LANCE_SPARK_ONLY_ERROR_MSG).isPresent());
+
+    // Sink (write) path should throw
+    ValidationException writeEx = assertThrows(ValidationException.class,
+        () -> execInsertSql(batchTableEnv, "insert into lance_t1 values ('id1', 'Alice', 23, TIMESTAMP '1970-01-01 00:00:01', 'par1')"),
+        "Lance format should be rejected when writing via Flink");
+    assertTrue(ExceptionUtils.findThrowableWithMessage(writeEx, HoodieFileFormat.LANCE_SPARK_ONLY_ERROR_MSG).isPresent());
   }
 
   @ParameterizedTest
@@ -3197,6 +3226,61 @@ public class ITTestHoodieDataSource {
     List<Row> result = CollectionUtil.iteratorToList(
         streamTableEnv.sqlQuery("select * from t1").execute().collect());
     assertRowsEquals(result, TestData.DATA_SET_SOURCE_INSERT);
+  }
+
+  @ParameterizedTest
+  @MethodSource("tableTypeAndBooleanTrueFalseParams")
+  void testBatchReadWithLimit(HoodieTableType tableType, boolean useSourceV2) {
+    TableEnvironment tableEnv = batchTableEnv;
+    String hoodieTableDDL = sql("t1")
+        .option(FlinkOptions.PATH, tempFile.getAbsolutePath())
+        .options(getDefaultKeys())
+        .option(FlinkOptions.TABLE_TYPE, tableType)
+        .option(FlinkOptions.READ_SOURCE_V2_ENABLED, useSourceV2)
+        .end();
+    tableEnv.executeSql(hoodieTableDDL);
+    execInsertSql(tableEnv, TestSQL.INSERT_T1);
+
+    // limit less than total records: only check the count since row ordering is not guaranteed
+    List<Row> result1 = CollectionUtil.iterableToList(
+        () -> tableEnv.sqlQuery("select * from t1 limit 3").execute().collect());
+    assertThat(result1).hasSize(3);
+
+    // limit equal to total records: all 8 rows should be returned
+    List<Row> result2 = CollectionUtil.iterableToList(
+        () -> tableEnv.sqlQuery("select * from t1 limit 8").execute().collect());
+    assertRowsEquals(result2, TestData.DATA_SET_SOURCE_INSERT);
+
+    // limit greater than total records: should return all rows without error
+    List<Row> result3 = CollectionUtil.iterableToList(
+        () -> tableEnv.sqlQuery("select * from t1 limit 100").execute().collect());
+    assertRowsEquals(result3, TestData.DATA_SET_SOURCE_INSERT);
+  }
+
+  @ParameterizedTest
+  @MethodSource("tableTypeAndBooleanTrueFalseParams")
+  void testBatchReadWithLimitAndFilter(HoodieTableType tableType, boolean useSourceV2) {
+    TableEnvironment tableEnv = batchTableEnv;
+    String hoodieTableDDL = sql("t1")
+        .option(FlinkOptions.PATH, tempFile.getAbsolutePath())
+        .options(getDefaultKeys())
+        .option(FlinkOptions.TABLE_TYPE, tableType)
+        .option(FlinkOptions.READ_SOURCE_V2_ENABLED, useSourceV2)
+        .end();
+    tableEnv.executeSql(hoodieTableDDL);
+    execInsertSql(tableEnv, TestSQL.INSERT_T1);
+
+    // limit with partition filter (par1 has 2 records: id1, id2); limit to 1
+    List<Row> result1 = CollectionUtil.iterableToList(
+        () -> tableEnv.sqlQuery("select * from t1 where `partition` = 'par1' limit 1").execute().collect());
+    assertThat(result1).hasSize(1);
+
+    // limit equal to the filtered result count (par4 has exactly 2 records: id7, id8)
+    List<Row> result2 = CollectionUtil.iterableToList(
+        () -> tableEnv.sqlQuery("select * from t1 where `partition` = 'par4' limit 2").execute().collect());
+    assertRowsEquals(result2, "["
+        + "+I[id7, Bob, 44, 1970-01-01T00:00:07, par4], "
+        + "+I[id8, Han, 56, 1970-01-01T00:00:08, par4]]");
   }
 
   // -------------------------------------------------------------------------
