@@ -33,20 +33,24 @@ import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
  * Reads blob data from storage using [[BatchedBlobReader]] to batch
  * reads efficiently when data is sorted by file and position.
  *
+ * Holds pre-extracted `blobAttrName` and `output` rather than the originating
+ * [[BatchedBlobRead]]: the logical tree reaches `HoodieFileIndex`, which
+ * isn't Serializable and would fail task dispatch on executor send.
+ *
  * @param child Child physical plan
  * @param maxGapBytes Maximum gap between reads to batch (from config)
  * @param storageConf Storage configuration for file access
  * @param lookaheadSize Number of rows to buffer for batch detection
- * @param logical The logical plan node this was created from
+ * @param blobAttrName Name of the blob column resolved from the logical plan
+ * @param output Output attributes resolved from the logical plan
  */
 case class BatchedBlobReadExec(child: SparkPlan,
                                 maxGapBytes: Int,
                                 storageConf: StorageConfiguration[_],
                                 lookaheadSize: Int,
-                                logical: BatchedBlobRead)
+                                blobAttrName: String,
+                                override val output: Seq[Attribute])
   extends UnaryExecNode {
-
-  override def output: Seq[Attribute] = logical.output
 
   override protected def doExecute(): RDD[InternalRow] = {
     val childRDD = child.execute()
@@ -59,7 +63,7 @@ case class BatchedBlobReadExec(child: SparkPlan,
       broadcastConf,
       maxGapBytes,
       lookaheadSize,
-      logical.blobAttr.name
+      blobAttrName
     )
   }
 
