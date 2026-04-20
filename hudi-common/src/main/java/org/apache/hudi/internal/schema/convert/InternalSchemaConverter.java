@@ -375,10 +375,6 @@ public class InternalSchemaConverter {
             HoodieSchema.Variant.VARIANT_VALUE_FIELD, Types.BinaryType.get(), "Variant value component"));
         return Types.RecordType.get(variantFields);
       case BLOB:
-        // Blob (fixed-shape RECORD with type/data/reference children) is represented as a
-        // RecordType with sentinel negative field IDs so the reverse path can detect and rebuild
-        // a HoodieSchema.Blob, preserving the `blob` logical-type annotation that downstream
-        // writers (e.g. Lance, Parquet) rely on.
         List<Types.Field> referenceFields = new ArrayList<>(4);
         referenceFields.add(Types.Field.get(0, false,
             HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH, Types.StringType.get()));

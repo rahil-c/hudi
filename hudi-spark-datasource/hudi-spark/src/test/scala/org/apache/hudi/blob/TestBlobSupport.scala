@@ -113,10 +113,18 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
       assertTrue(filePath.endsWith("file2.bin"))
     }
 
-    // Verify SQL read_blob() function
+    // Verify SQL read_blob() returns bytes matching the referenced file region.
     table.createOrReplaceTempView("hudi_table_view")
-    val sqlRows = sparkSession.sql("SELECT id, value, read_blob(data) as full_bytes from hudi_table_view").collectAsList()
+    val sqlRows = sparkSession.sql(
+      "SELECT id, value, read_blob(data) as full_bytes from hudi_table_view ORDER BY value")
+      .collectAsList()
     assertEquals(10, sqlRows.size())
+    sqlRows.asScala.foreach { row =>
+      val i = row.getInt(row.fieldIndex("value"))
+      val bytes = row.getAs[Array[Byte]]("full_bytes")
+      assertEquals(100, bytes.length)
+      assertBytesContent(bytes, expectedOffset = i * 100)
+    }
   }
 
   @ParameterizedTest
@@ -239,5 +247,94 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
 
       new HoodieAvroIndexedRecord(key, record)
     }
+  }
+
+  @ParameterizedTest
+  @EnumSource(classOf[HoodieTableType])
+  def testMixedInlineAndOutOfLine(tableType: HoodieTableType): Unit = {
+    val filePath = createTestFile(tempDir, "mixed_file.bin", 1000)
+
+    val properties = new Properties()
+    properties.put("hoodie.datasource.write.recordkey.field", "id")
+    properties.put("hoodie.datasource.write.partitionpath.field", "")
+    properties.put(HoodieTableConfig.RECORDKEY_FIELDS.key(), "id")
+    properties.put(HoodieTableConfig.PARTITION_FIELDS.key(), "")
+    properties.setProperty(HoodieTableConfig.BASE_FILE_FORMAT.key(), HoodieFileFormat.PARQUET.toString)
+
+    HoodieTableMetaClient.newTableBuilder()
+      .setTableName("test_mixed_blob_table")
+      .setTableType(tableType)
+      .fromProperties(properties)
+      .initTable(storageConf, basePath)
+
+    var client: SparkRDDWriteClient[IndexedRecord] = null
+    val config = getConfigBuilder(SCHEMA.toString())
+      .withIndexConfig(HoodieIndexConfig.newBuilder.withIndexType(HoodieIndex.IndexType.SIMPLE).build)
+      .build()
+    try {
+      client = getHoodieWriteClient(config).asInstanceOf[SparkRDDWriteClient[IndexedRecord]]
+      val commit = client.startCommit()
+      val records = (0 until 10).map { i =>
+        val storageType = if (i % 2 == 0) HoodieSchema.Blob.INLINE else HoodieSchema.Blob.OUT_OF_LINE
+        createMixedRecord(i, storageType, filePath, inlinePrefix = 0xC.toByte)
+      }
+      val statuses = client.insert(jsc.parallelize(records.asJava, 1), commit).collect()
+      client.commit(commit, jsc.parallelize(statuses, 1))
+    } finally {
+      if (client != null) client.close()
+    }
+
+    val table = sparkSession.read.format("hudi").load(basePath)
+    table.createOrReplaceTempView("hudi_mixed_table_view")
+    val sqlRows = sparkSession.sql(
+      "SELECT id, value, read_blob(data) as full_bytes from hudi_mixed_table_view ORDER BY value")
+      .collectAsList()
+    assertEquals(10, sqlRows.size())
+    sqlRows.asScala.foreach { row =>
+      val value = row.getInt(row.fieldIndex("value"))
+      val bytes = row.getAs[Array[Byte]]("full_bytes")
+      if (value % 2 == 0) {
+        assertArrayEquals(expectedInlinePayload(0xC.toByte, value), bytes)
+      } else {
+        assertEquals(100, bytes.length)
+        assertBytesContent(bytes, expectedOffset = value * 100)
+      }
+    }
+  }
+
+  private def createMixedRecord(
+      value: Int,
+      storageType: String,
+      filePath: String,
+      inlinePrefix: Byte): HoodieRecord[IndexedRecord] = {
+    val id = s"id_$value"
+    val key = new HoodieKey(id, "")
+    val dataSchema = SCHEMA.getField("data").get.schema
+    val blobRecord = new GenericData.Record(dataSchema.toAvroSchema)
+
+    if (storageType == HoodieSchema.Blob.INLINE) {
+      blobRecord.put(HoodieSchema.Blob.TYPE, new GenericData.EnumSymbol(
+        dataSchema.getField(HoodieSchema.Blob.TYPE).get.schema.toAvroSchema,
+        HoodieSchema.Blob.INLINE))
+      blobRecord.put(HoodieSchema.Blob.INLINE_DATA_FIELD,
+        ByteBuffer.wrap(expectedInlinePayload(inlinePrefix, value)))
+    } else {
+      val fileReference = new GenericData.Record(dataSchema.getField(HoodieSchema.Blob.EXTERNAL_REFERENCE)
+        .get.getNonNullSchema.toAvroSchema)
+      fileReference.put(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH, filePath)
+      fileReference.put(HoodieSchema.Blob.EXTERNAL_REFERENCE_OFFSET, value * 100L)
+      fileReference.put(HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH, 100L)
+      fileReference.put(HoodieSchema.Blob.EXTERNAL_REFERENCE_IS_MANAGED, false)
+      blobRecord.put(HoodieSchema.Blob.TYPE, new GenericData.EnumSymbol(
+        dataSchema.getField(HoodieSchema.Blob.TYPE).get.schema.toAvroSchema,
+        HoodieSchema.Blob.OUT_OF_LINE))
+      blobRecord.put(HoodieSchema.Blob.EXTERNAL_REFERENCE, fileReference)
+    }
+
+    val record = new GenericData.Record(SCHEMA.toAvroSchema)
+    record.put("id", id)
+    record.put("value", value)
+    record.put("data", blobRecord)
+    new HoodieAvroIndexedRecord(key, record)
   }
 }

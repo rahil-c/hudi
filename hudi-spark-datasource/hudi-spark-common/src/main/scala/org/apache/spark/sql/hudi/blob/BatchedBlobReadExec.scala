@@ -33,14 +33,9 @@ import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
  * Reads blob data from storage using [[BatchedBlobReader]] to batch
  * reads efficiently when data is sorted by file and position.
  *
- * Why this node does NOT hold the originating [[BatchedBlobRead]] logical
- * plan: Scala case classes are Serializable by default, and when Spark
- * serializes the task payload the reference would drag the entire logical
- * tree (Project → Filter → LogicalRelation → HoodieFileIndex) along.
- * `HoodieFileIndex` isn't Serializable, which blows up task dispatch with
- * `InvalidClassException`. Instead we pre-extract the two values the
- * physical node actually needs (`blobAttrName`, `output`) at construction
- * time and keep the serialized footprint small.
+ * Holds pre-extracted `blobAttrName` and `output` rather than the originating
+ * [[BatchedBlobRead]]: the logical tree reaches `HoodieFileIndex`, which
+ * isn't Serializable and would fail task dispatch on executor send.
  *
  * @param child Child physical plan
  * @param maxGapBytes Maximum gap between reads to batch (from config)
