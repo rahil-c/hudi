@@ -59,11 +59,9 @@ case class DropIndex(table: LogicalPlan,
 /**
  * The logical plan of the SHOW INDEXES command.
  *
- * NOTE: named `HoodieShowIndexes` (rather than `ShowIndexes`) to avoid a fully-qualified-class-name
- * collision with `org.apache.spark.sql.catalyst.plans.logical.ShowIndexes` that ships inside
- * `lance-spark-base` (>=0.4.0). Both jars end up on the classpath of `hudi-spark3.x`/`4.x` modules
- * and the lance-spark class (which has a different arity) otherwise shadows ours and breaks
- * pattern matching at compile time.
+ * NOTE: named `HoodieShowIndexes` to avoid an FQCN collision with
+ * `org.apache.spark.sql.catalyst.plans.logical.ShowIndexes` from `lance-spark-base` (>=0.4.0),
+ * which otherwise shadows this class on the `hudi-spark3.x`/`4.x` classpath and breaks pattern matching.
  */
 case class HoodieShowIndexes(table: LogicalPlan,
                              override val output: Seq[Attribute] = HoodieShowIndexes.getOutputAttrs) extends Command {

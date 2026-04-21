@@ -110,13 +110,9 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
       if (arrowReader.loadNextBatch()) {
         VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
 
-        // Wrap each Arrow FieldVector in LanceArrowColumnVector, ordered to match the
-        // Spark schema the UnsafeProjection was built for. Starting with lance-spark 0.4.0
-        // the returned VectorSchemaRoot may use the file's on-disk column order rather
-        // than the order of the columnNames we asked for, which caused
-        // UnsafeProjection to dispatch getInt(0) against a VarCharVector (see HUDI issue
-        // discovered on TestLanceDataSource MOR paths). Look each field up by name.
-        // Cache the column wrappers on first batch and reuse for all subsequent batches.
+        // Build ColumnVector[] in Spark-schema order by looking each field up by name;
+        // lance-spark 0.4.0's VectorSchemaRoot may return the file's on-disk order, which
+        // would misalign the UnsafeProjection. Cached on the first batch and reused thereafter.
         if (columnVectors == null) {
           List<FieldVector> fieldVectors = root.getFieldVectors();
           Map<String, FieldVector> byName = new HashMap<>(fieldVectors.size() * 2);
