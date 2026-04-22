@@ -46,10 +46,9 @@ import java.util.Collections
 class TestReadBlobSQL extends HoodieClientTestBase {
 
   @Test
-  def testReadBlobOnHudiBackedTable(): Unit = {
-    // Same setup as testBasicReadBlobSQL, but persist through Hudi first
-    // so the DataFrame is backed by a HoodieFileIndex-driven relation
-    // instead of an in-memory RDD.
+  def testReadOutOfLineBlobOnHudiBackedTable(): Unit = {
+    // Verifies read_blob()'s logical plan is task-serializable over a
+    // HoodieFileIndex-backed relation (DataFrame write path).
     val extFile = createTestFile(tempDir, "basic.bin", 10000)
     val tablePath = s"$tempDir/hudi_blob_table"
 
@@ -79,17 +78,12 @@ class TestReadBlobSQL extends HoodieClientTestBase {
     df.write.format("hudi")
       .option("hoodie.table.name", "blob_test")
       .option("hoodie.datasource.write.recordkey.field", "id")
-      .option("hoodie.datasource.write.precombine.field", "id")
       .option("hoodie.datasource.write.operation", "bulk_insert")
       .mode("overwrite")
       .save(tablePath)
 
-    // Read back through Hudi — this is the path that brings HoodieFileIndex
-    // into the logical plan. read_blob's BatchedBlobReadExec then calls
-    // child.execute() which serializes the plan (including the file index)
-    // to executors, triggering:
-    //   java.io.InvalidClassException:
-    //     org.apache.hudi.HoodieFileIndex; no valid constructor
+    // Hudi read pulls HoodieFileIndex into the plan that BatchedBlobReadExec
+    // serializes to executors — the scenario the exec-node fix must handle.
     sparkSession.read.format("hudi").load(tablePath)
       .createOrReplaceTempView("hudi_blob_view")
 
@@ -100,6 +94,13 @@ class TestReadBlobSQL extends HoodieClientTestBase {
     """).collect()
 
     assertEquals(3, result.length)
+    // Verify the bytes read from the external file match the recorded offsets.
+    result.zipWithIndex.foreach { case (row, idx) =>
+      assertEquals(idx + 1, row.getInt(0))
+      val bytes = row.getAs[Array[Byte]]("data")
+      assertEquals(100, bytes.length)
+      assertBytesContent(bytes, expectedOffset = idx * 100)
+    }
   }
 
   @Test

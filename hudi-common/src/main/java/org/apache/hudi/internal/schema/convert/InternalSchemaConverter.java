@@ -63,6 +63,30 @@ public class InternalSchemaConverter {
   static final int BLOB_DATA_FIELD_ID = -11;
   static final int BLOB_REFERENCE_FIELD_ID = -12;
 
+  // The BLOB internal-schema record is fully determined by the BLOB type definition, so we build
+  // it once and reuse it on every HoodieSchema -> InternalSchema conversion.
+  private static final Types.RecordType BLOB_INTERNAL_RECORD_TYPE = buildBlobInternalRecordType();
+
+  private static Types.RecordType buildBlobInternalRecordType() {
+    List<Types.Field> referenceFields = new ArrayList<>(4);
+    referenceFields.add(Types.Field.get(0, false,
+        HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH, Types.StringType.get()));
+    referenceFields.add(Types.Field.get(1, true,
+        HoodieSchema.Blob.EXTERNAL_REFERENCE_OFFSET, Types.LongType.get()));
+    referenceFields.add(Types.Field.get(2, true,
+        HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH, Types.LongType.get()));
+    referenceFields.add(Types.Field.get(3, false,
+        HoodieSchema.Blob.EXTERNAL_REFERENCE_IS_MANAGED, Types.BooleanType.get()));
+    List<Types.Field> blobFields = new ArrayList<>(3);
+    blobFields.add(Types.Field.get(BLOB_TYPE_FIELD_ID, false,
+        HoodieSchema.Blob.TYPE, Types.StringType.get(), "Blob storage type (INLINE | OUT_OF_LINE)"));
+    blobFields.add(Types.Field.get(BLOB_DATA_FIELD_ID, true,
+        HoodieSchema.Blob.INLINE_DATA_FIELD, Types.BinaryType.get(), "Inline blob bytes"));
+    blobFields.add(Types.Field.get(BLOB_REFERENCE_FIELD_ID, true,
+        HoodieSchema.Blob.EXTERNAL_REFERENCE, Types.RecordType.get(referenceFields), "Out-of-line blob reference"));
+    return Types.RecordType.get(blobFields);
+  }
+
   /**
    * Convert internalSchema to HoodieSchema.
    *
@@ -375,23 +399,7 @@ public class InternalSchemaConverter {
             HoodieSchema.Variant.VARIANT_VALUE_FIELD, Types.BinaryType.get(), "Variant value component"));
         return Types.RecordType.get(variantFields);
       case BLOB:
-        List<Types.Field> referenceFields = new ArrayList<>(4);
-        referenceFields.add(Types.Field.get(0, false,
-            HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH, Types.StringType.get()));
-        referenceFields.add(Types.Field.get(1, true,
-            HoodieSchema.Blob.EXTERNAL_REFERENCE_OFFSET, Types.LongType.get()));
-        referenceFields.add(Types.Field.get(2, true,
-            HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH, Types.LongType.get()));
-        referenceFields.add(Types.Field.get(3, false,
-            HoodieSchema.Blob.EXTERNAL_REFERENCE_IS_MANAGED, Types.BooleanType.get()));
-        List<Types.Field> blobFields = new ArrayList<>(3);
-        blobFields.add(Types.Field.get(BLOB_TYPE_FIELD_ID, false,
-            HoodieSchema.Blob.TYPE, Types.StringType.get(), "Blob storage type (INLINE | OUT_OF_LINE)"));
-        blobFields.add(Types.Field.get(BLOB_DATA_FIELD_ID, true,
-            HoodieSchema.Blob.INLINE_DATA_FIELD, Types.BinaryType.get(), "Inline blob bytes"));
-        blobFields.add(Types.Field.get(BLOB_REFERENCE_FIELD_ID, true,
-            HoodieSchema.Blob.EXTERNAL_REFERENCE, Types.RecordType.get(referenceFields), "Out-of-line blob reference"));
-        return Types.RecordType.get(blobFields);
+        return BLOB_INTERNAL_RECORD_TYPE;
       default:
         throw new UnsupportedOperationException("Unsupported primitive type: " + schema.getType());
     }

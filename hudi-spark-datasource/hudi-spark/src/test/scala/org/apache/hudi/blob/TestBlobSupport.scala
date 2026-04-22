@@ -141,8 +141,6 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
   @EnumSource(classOf[HoodieTableType])
   def testEndToEndInline(tableType: HoodieTableType): Unit = {
     val properties = new Properties()
-    properties.put("hoodie.datasource.write.recordkey.field", "id")
-    properties.put("hoodie.datasource.write.partitionpath.field", "")
     properties.put(HoodieTableConfig.RECORDKEY_FIELDS.key(), "id")
     properties.put(HoodieTableConfig.PARTITION_FIELDS.key(), "")
     properties.setProperty(HoodieTableConfig.BASE_FILE_FORMAT.key(), HoodieFileFormat.PARQUET.toString)
@@ -160,15 +158,17 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
     try {
       client = getHoodieWriteClient(config).asInstanceOf[SparkRDDWriteClient[IndexedRecord]]
 
-      // First commit - insert with payload byte "A"
+      // First commit - insert ids 0..9 with payload prefix 0xA.
       val commit1 = client.startCommit()
-      val firstBatch = createInlineTestRecords(payloadPrefix = 0xA.toByte)
+      val firstBatch = createInlineTestRecords(0 until 10, payloadPrefix = 0xA.toByte)
       val statuses1 = client.insert(jsc.parallelize(firstBatch.asJava, 1), commit1).collect()
       client.commit(commit1, jsc.parallelize(statuses1, 1))
 
-      // Second commit - upsert with payload byte "B"; same keys so commit2 wins.
+      // Second commit - upsert only ids 5..9 with payload prefix 0xB. This leaves ids 0..4
+      // untouched (still 0xA) and forces the read side to correctly merge updated and
+      // non-updated records — a pure full-overwrite upsert would not exercise that path.
       val commit2 = client.startCommit()
-      val secondBatch = createInlineTestRecords(payloadPrefix = 0xB.toByte)
+      val secondBatch = createInlineTestRecords(5 until 10, payloadPrefix = 0xB.toByte)
       val statuses2 = client.upsert(jsc.parallelize(secondBatch.asJava, 1), commit2).collect()
       client.commit(commit2, jsc.parallelize(statuses2, 1))
     } finally {
@@ -181,6 +181,8 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
 
     // Direct struct-field access — verifies INLINE bytes round-tripped
     // through Parquet and the data field is populated (reference null).
+    // ids 0..4 retain the 0xA payload from commit1; ids 5..9 carry the
+    // 0xB payload produced by the partial upsert in commit2.
     rows.asScala.foreach { row =>
       val data = row.getStruct(row.fieldIndex("data"))
       assertEquals(HoodieSchema.Blob.INLINE,
@@ -188,7 +190,8 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
       assertTrue(data.isNullAt(data.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE)))
       val bytes = data.getAs[Array[Byte]](HoodieSchema.Blob.INLINE_DATA_FIELD)
       val value = row.getInt(row.fieldIndex("value"))
-      assertArrayEquals(expectedInlinePayload(0xB.toByte, value), bytes)
+      val expectedPrefix: Byte = if (value < 5) 0xA.toByte else 0xB.toByte
+      assertArrayEquals(expectedInlinePayload(expectedPrefix, value), bytes)
     }
 
     // SQL read_blob() — INLINE passthrough through the planner/exec path.
@@ -200,7 +203,8 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
     sqlRows.asScala.foreach { row =>
       val value = row.getInt(row.fieldIndex("value"))
       val bytes = row.getAs[Array[Byte]]("full_bytes")
-      assertArrayEquals(expectedInlinePayload(0xB.toByte, value), bytes)
+      val expectedPrefix: Byte = if (value < 5) 0xA.toByte else 0xB.toByte
+      assertArrayEquals(expectedInlinePayload(expectedPrefix, value), bytes)
     }
   }
 
@@ -209,8 +213,8 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
     Array[Byte](prefix, value.toByte, (value + 1).toByte, (value + 2).toByte)
   }
 
-  private def createInlineTestRecords(payloadPrefix: Byte): Seq[HoodieRecord[IndexedRecord]] = {
-    (0 until 10).map { i =>
+  private def createInlineTestRecords(ids: Range, payloadPrefix: Byte): Seq[HoodieRecord[IndexedRecord]] = {
+    ids.map { i =>
       val id = s"id_$i"
       val key = new HoodieKey(id, "")
 
@@ -265,8 +269,6 @@ class TestBlobSupport extends HoodieClientTestBase with SparkDatasetMixin {
     val filePath = createTestFile(tempDir, "mixed_file.bin", 1000)
 
     val properties = new Properties()
-    properties.put("hoodie.datasource.write.recordkey.field", "id")
-    properties.put("hoodie.datasource.write.partitionpath.field", "")
     properties.put(HoodieTableConfig.RECORDKEY_FIELDS.key(), "id")
     properties.put(HoodieTableConfig.PARTITION_FIELDS.key(), "")
     properties.setProperty(HoodieTableConfig.BASE_FILE_FORMAT.key(), HoodieFileFormat.PARQUET.toString)
