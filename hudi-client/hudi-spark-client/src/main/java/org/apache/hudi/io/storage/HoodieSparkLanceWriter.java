@@ -35,6 +35,7 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.sql.avro.BlobLanceSchemaSupport;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
@@ -121,7 +122,12 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
                                  long maxFileSize) {
     super(file, DEFAULT_BATCH_SIZE, bloomFilterOpt.map(HoodieBloomFilterRowWriteSupport::new));
     this.sparkSchema = sparkSchema;
-    this.arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, DEFAULT_TIMEZONE, true, false);
+    // Build the base Arrow schema via lance-spark, then annotate Hudi BLOB
+    // fields so the nested `data` bytes column uses Lance's blob writer (the
+    // metadata key `lance-encoding:blob=true` on a LargeBinary column).
+    // No-op for schemas without any BLOB fields.
+    Schema baseArrow = LanceArrowUtils.toArrowSchema(sparkSchema, DEFAULT_TIMEZONE, true);
+    this.arrowSchema = BlobLanceSchemaSupport.annotateBlobFieldsForLance(sparkSchema, baseArrow);
     this.fileName = UTF8String.fromString(file.getName());
     this.instantTime = UTF8String.fromString(instantTime);
     this.populateMetaFields = populateMetaFields;
