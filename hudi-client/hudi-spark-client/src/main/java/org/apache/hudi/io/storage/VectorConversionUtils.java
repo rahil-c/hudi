@@ -39,6 +39,7 @@ import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 
 import java.nio.ByteBuffer;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -95,9 +96,15 @@ public final class VectorConversionUtils {
     }
     StructField[] fields = schema.fields();
     Map<Integer, HoodieSchema.Vector> detected = detectVectorColumnsFromMetadata(schema);
-    java.util.LinkedHashMap<String, HoodieSchema.Vector> named = new java.util.LinkedHashMap<>();
-    for (Map.Entry<Integer, HoodieSchema.Vector> entry : detected.entrySet()) {
-      named.put(fields[entry.getKey()].name(), entry.getValue());
+    // Walk fields in ordinal order (not detected.entrySet()) so the footer value
+    // is emitted in stable, schema-ordered form. detectVectorColumnsFromMetadata
+    // returns a plain HashMap, whose iteration order is unspecified.
+    LinkedHashMap<String, HoodieSchema.Vector> named = new LinkedHashMap<>();
+    for (int i = 0; i < fields.length; i++) {
+      HoodieSchema.Vector vec = detected.get(i);
+      if (vec != null) {
+        named.put(fields[i].name(), vec);
+      }
     }
     return HoodieSchema.serializeVectorColumnsMetadata(named);
   }

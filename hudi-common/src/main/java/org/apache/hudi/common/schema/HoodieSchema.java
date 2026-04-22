@@ -41,6 +41,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -254,7 +255,7 @@ public class HoodieSchema implements Serializable {
     if (schema == null || schema.isSchemaNull()) {
       return "";
     }
-    java.util.LinkedHashMap<String, Vector> vectorColumns = new java.util.LinkedHashMap<>();
+    LinkedHashMap<String, Vector> vectorColumns = new LinkedHashMap<>();
     for (HoodieSchemaField field : schema.getFields()) {
       HoodieSchema fieldSchema = field.schema().getNonNullType();
       if (fieldSchema.getType() == HoodieSchemaType.VECTOR) {

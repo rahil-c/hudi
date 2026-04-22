@@ -261,7 +261,7 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
    * without a writer bump.
    */
   @Override
-  protected java.util.Map<String, String> additionalSchemaMetadata() {
+  protected Map<String, String> additionalSchemaMetadata() {
     String value = VectorConversionUtils.buildVectorColumnsFooterValue(sparkSchema);
     if (value.isEmpty()) {
       return Collections.emptyMap();
