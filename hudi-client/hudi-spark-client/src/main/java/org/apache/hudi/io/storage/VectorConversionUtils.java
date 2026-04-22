@@ -274,9 +274,13 @@ public final class VectorConversionUtils {
    * Re-attaches {@link HoodieSchema#TYPE_METADATA_FIELD} to Spark fields that were
    * Arrow {@code FixedSizeList<Float32|Float64, dim>} in the Lance file.
    * {@code LanceArrowUtils.fromArrowSchema} drops all field metadata, so without this
-   * step VECTOR columns are indistinguishable from plain arrays.
+   * step VECTOR columns written by Hudi are indistinguishable from plain arrays.
    *
-   * <p>Only top-level FLOAT/DOUBLE fields are inspected; nested structs are not recursed.
+   * <p>Only fields whose names appear in the {@link HoodieSchema#VECTOR_COLUMNS_METADATA_KEY}
+   * footer value are considered. This avoids false-positive annotation of Arrow
+   * {@code FixedSizeList<Float/Double>} columns in externally-written Lance files that
+   * weren't intended as Hudi VECTORs. Only top-level fields are inspected; nested
+   * structs are not recursed.
    *
    * @param arrowSchema     original Arrow schema from the Lance file
    * @param convertedSpark  Spark schema from {@code LanceArrowUtils.fromArrowSchema}
@@ -288,12 +292,20 @@ public final class VectorConversionUtils {
     if (arrowSchema == null || convertedSpark == null) {
       return convertedSpark;
     }
+    java.util.Set<String> vectorFieldNames = HoodieSchema.parseVectorColumnNames(
+        arrowSchema.getCustomMetadata().get(HoodieSchema.VECTOR_COLUMNS_METADATA_KEY));
+    if (vectorFieldNames.isEmpty()) {
+      return convertedSpark;
+    }
     List<Field> arrowFields = arrowSchema.getFields();
     StructField[] sparkFields = convertedSpark.fields();
     StructField[] newFields = new StructField[sparkFields.length];
-    boolean anyChanged = false;
     for (int i = 0; i < sparkFields.length; i++) {
       StructField sf = sparkFields[i];
+      if (!vectorFieldNames.contains(sf.name())) {
+        newFields[i] = sf;
+        continue;
+      }
       String descriptor = deriveVectorDescriptor(arrowFields.get(i));
       if (descriptor == null) {
         newFields[i] = sf;
@@ -306,10 +318,9 @@ public final class VectorConversionUtils {
                 .withMetadata(sf.metadata())
                 .putString(HoodieSchema.TYPE_METADATA_FIELD, descriptor)
                 .build());
-        anyChanged = true;
       }
     }
-    return anyChanged ? new StructType(newFields) : convertedSpark;
+    return new StructType(newFields);
   }
 
   /**

@@ -142,10 +142,17 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
   /**
    * For every field carrying a Hudi VECTOR logical type annotation
    * (Spark metadata key {@link HoodieSchema#TYPE_METADATA_FIELD} starting with {@code "VECTOR"}),
-   * attach the lance-spark metadata key {@link LanceArrowUtils#ARROW_FIXED_SIZE_LIST_SIZE_KEY()}
+   * auto-attach the lance-spark metadata key {@link LanceArrowUtils#ARROW_FIXED_SIZE_LIST_SIZE_KEY()}
    * with the vector's dimension so that {@link LanceArrowUtils#toArrowSchema} emits a native
    * Arrow {@code FixedSizeList<elem, dim>} (Lance's vector column encoding) and
    * {@link LanceArrowWriter} selects its fixed-size-list field writer when serializing values.
+   *
+   * <p><b>Why we auto-attach this metadata:</b> lance-spark requires the
+   * {@code arrow.fixed-size-list.size} Spark field metadata key to be present as a
+   * {@code Long} for it to emit a fixed-size list Arrow type. Rather than making
+   * users manually attach that key alongside the Hudi VECTOR descriptor, the writer
+   * derives it from the VECTOR dimension so a Hudi table declaring a VECTOR column
+   * "just works" on the Lance write path.
    *
    * <p>Currently only FLOAT and DOUBLE element vectors are supported on Lance, matching
    * lance-spark's {@code VectorUtils.shouldBeFixedSizeList}. Other element types would

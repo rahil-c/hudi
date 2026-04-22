@@ -265,6 +265,44 @@ public class HoodieSchema implements Serializable {
     return serializeVectorColumnsMetadata(vectorColumns);
   }
 
+  /**
+   * Parses the comma-separated {@link #VECTOR_COLUMNS_METADATA_KEY} footer value and
+   * returns the set of vector column field names. Commas inside parentheses (e.g. inside
+   * the VECTOR descriptor {@code VECTOR(128, DOUBLE)}) are not treated as separators.
+   *
+   * @param footerValue raw value from the file footer, or null / empty
+   * @return set of field names (preserves insertion order), or empty set if input is null / empty
+   */
+  public static Set<String> parseVectorColumnNames(String footerValue) {
+    if (footerValue == null || footerValue.isEmpty()) {
+      return Collections.emptySet();
+    }
+    java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+    int depth = 0;
+    int start = 0;
+    for (int i = 0; i < footerValue.length(); i++) {
+      char c = footerValue.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+      } else if (c == ',' && depth == 0) {
+        addVectorColumnName(footerValue, start, i, names);
+        start = i + 1;
+      }
+    }
+    addVectorColumnName(footerValue, start, footerValue.length(), names);
+    return names;
+  }
+
+  private static void addVectorColumnName(String s, int start, int end, Set<String> names) {
+    int colon = s.indexOf(':', start);
+    if (colon > start && colon < end) {
+      names.add(s.substring(start, colon).trim());
+    }
+  }
+
+
   private Schema avroSchema;
   private HoodieSchemaType type;
   private transient List<HoodieSchemaField> fields;
