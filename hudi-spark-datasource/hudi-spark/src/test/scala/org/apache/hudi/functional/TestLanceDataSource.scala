@@ -888,6 +888,7 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
     )
 
     // Test 5: DELETE a row
+    // TODO(#18558): test DELETE with MOR table type once the bug is fixed
     if (tableType == HoodieTableType.COPY_ON_WRITE) {
       spark.sql(s"delete from $tableName where id = 3")
 
