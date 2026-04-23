@@ -38,9 +38,11 @@ import java.io.IOException;
  * This class is required for catalog/metastore registration during CREATE TABLE operations
  * for MOR tables with Lance base file format.
  * <p>
- * TODO: Lance reading through Hive InputFormat is not yet supported. When support is added,
- * this should route through {@code HoodieFileGroupReaderBasedRecordReader} to get unified
- * MOR log merging, schema evolution, and bootstrap support.
+ * TODO(#18557): Lance reading through Hive InputFormat is not yet supported. When support is
+ * added, this should route through {@code HoodieFileGroupReaderBasedRecordReader} to get
+ * unified MOR log merging, schema evolution, and bootstrap support.
+ *
+ * @see <a href="https://github.com/apache/hudi/issues/18557">#18557</a>
  */
 @UseRecordReaderFromInputFormat
 @UseFileSplitsFromInputFormat

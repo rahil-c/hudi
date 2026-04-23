@@ -802,18 +802,18 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
 
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieTableType])
-  def testBasicSqlInsertOperations(tableType: HoodieTableType): Unit = {
+  def testSqlCommands(tableType: HoodieTableType): Unit = {
     Seq(true, false).foreach { isPartitioned =>
       val tableName = generateTableName
       val tablePath = s"$basePath/$tableName"
-      testSqlInsertWithSubsetOfColumns(tableType, tableName, tablePath, isPartitioned)
+      testSqlCommands(tableType, tableName, tablePath, isPartitioned)
     }
   }
 
-  private def testSqlInsertWithSubsetOfColumns(tableType: HoodieTableType,
-                                               tableName: String,
-                                               tablePath: String,
-                                               isPartitioned: Boolean): Unit = {
+  private def testSqlCommands(tableType: HoodieTableType,
+                              tableName: String,
+                              tablePath: String,
+                              isPartitioned: Boolean): Unit = {
     val createTablePartitionClause = if (isPartitioned) "partitioned by (dt)" else ""
 
     // CREATE TABLE with Lance configuration
@@ -851,42 +851,76 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
     // Test 2: INSERT with reordered columns
     spark.sql(s"""
       insert into $tableName (dt, name, id, age, score)
-      values ('2025-01-03', 'Charlie', 3, 35, 92.1)
+      values ('2025-01-02', 'Charlie', 3, 35, 92.1)
     """.stripMargin)
 
     checkAnswer(s"select id, name, age, score, dt from $tableName order by id")(
       Seq(1, "Alice", 30, 95.5, "2025-01-01"),
       Seq(2, "Bob", 25, 87.3, "2025-01-02"),
-      Seq(3, "Charlie", 35, 92.1, "2025-01-03")
+      Seq(3, "Charlie", 35, 92.1, "2025-01-02")
     )
+
+    // Disable small file handling so the next insert creates a new file group
+    // and updates in MOR generate log file(s)
+    spark.sql(s"alter table $tableName set tblproperties ('hoodie.merge.small.file.group.candidates.limit' = '0')")
 
     // Test 3: INSERT with subset of columns (null handling)
     spark.sql(s"""
       insert into $tableName (dt, age, name, id)
-      values ('2025-01-04', 40, 'Diana', 4)
+      values ('2025-01-01', 40, 'Diana', 4)
     """.stripMargin)
 
     checkAnswer(s"select id, name, age, score, dt from $tableName order by id")(
       Seq(1, "Alice", 30, 95.5, "2025-01-01"),
       Seq(2, "Bob", 25, 87.3, "2025-01-02"),
-      Seq(3, "Charlie", 35, 92.1, "2025-01-03"),
-      Seq(4, "Diana", 40, null, "2025-01-04")
+      Seq(3, "Charlie", 35, 92.1, "2025-01-02"),
+      Seq(4, "Diana", 40, null, "2025-01-01")
     )
 
-    // Test 4: INSERT with static partition (only for partitioned tables)
+    // Test 4: UPDATE existing row
+    spark.sql(s"update $tableName set score = 99.9, age = 31 where id = 1")
+
+    checkAnswer(s"select id, name, age, score, dt from $tableName order by id")(
+      Seq(1, "Alice", 31, 99.9, "2025-01-01"),
+      Seq(2, "Bob", 25, 87.3, "2025-01-02"),
+      Seq(3, "Charlie", 35, 92.1, "2025-01-02"),
+      Seq(4, "Diana", 40, null, "2025-01-01")
+    )
+
+    // Test 5: DELETE a row
+    if (tableType == HoodieTableType.COPY_ON_WRITE) {
+      spark.sql(s"delete from $tableName where id = 3")
+
+      checkAnswer(s"select id, name, age, score, dt from $tableName order by id")(
+        Seq(1, "Alice", 31, 99.9, "2025-01-01"),
+        Seq(2, "Bob", 25, 87.3, "2025-01-02"),
+        Seq(4, "Diana", 40, null, "2025-01-01")
+      )
+    }
+
+    // Test 6: INSERT with static partition (only for partitioned tables)
     if (isPartitioned) {
       spark.sql(s"""
         insert into $tableName partition(dt='2025-01-05') (age, id, name)
         values (28, 5, 'Eve')
       """.stripMargin)
 
-      checkAnswer(s"select id, name, age, score, dt from $tableName order by id")(
-        Seq(1, "Alice", 30, 95.5, "2025-01-01"),
-        Seq(2, "Bob", 25, 87.3, "2025-01-02"),
-        Seq(3, "Charlie", 35, 92.1, "2025-01-03"),
-        Seq(4, "Diana", 40, null, "2025-01-04"),
-        Seq(5, "Eve", 28, null, "2025-01-05")
-      )
+      if (tableType == HoodieTableType.COPY_ON_WRITE) {
+        checkAnswer(s"select id, name, age, score, dt from $tableName order by id")(
+          Seq(1, "Alice", 31, 99.9, "2025-01-01"),
+          Seq(2, "Bob", 25, 87.3, "2025-01-02"),
+          Seq(4, "Diana", 40, null, "2025-01-01"),
+          Seq(5, "Eve", 28, null, "2025-01-05")
+        )
+      } else {
+        checkAnswer(s"select id, name, age, score, dt from $tableName order by id")(
+          Seq(1, "Alice", 31, 99.9, "2025-01-01"),
+          Seq(2, "Bob", 25, 87.3, "2025-01-02"),
+          Seq(3, "Charlie", 35, 92.1, "2025-01-02"),
+          Seq(4, "Diana", 40, null, "2025-01-01"),
+          Seq(5, "Eve", 28, null, "2025-01-05")
+        )
+      }
     }
 
     // Verify Lance files were created
