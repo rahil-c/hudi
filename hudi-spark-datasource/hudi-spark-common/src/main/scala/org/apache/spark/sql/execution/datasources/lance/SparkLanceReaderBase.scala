@@ -154,8 +154,7 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           lanceReader,
           arrowReader,
           iteratorSchema,
-          filePath,
-          blobFieldNameSet
+          filePath
         )
 
         // Register cleanup listener
