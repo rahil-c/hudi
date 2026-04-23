@@ -68,6 +68,9 @@ object BlobLanceSchemaSupport {
    */
   def annotateBlobFieldsForLance(sparkSchema: StructType, arrowSchema: Schema): Schema = {
     val arrowFields = arrowSchema.getFields.asScala
+    require(sparkSchema.fields.length == arrowFields.size,
+      s"Spark/Arrow top-level field count mismatch: " +
+        s"${sparkSchema.fields.length} vs ${arrowFields.size}")
     val rebuilt = sparkSchema.fields.zip(arrowFields).map {
       case (sparkField, arrowField) => rewriteField(sparkField, arrowField)
     }
@@ -106,6 +109,9 @@ object BlobLanceSchemaSupport {
     if (arrowChildren.isEmpty) {
       return arrowField
     }
+    require(sparkStruct.fields.length == arrowChildren.size,
+      s"Spark/Arrow child field count mismatch for ${arrowField.getName}: " +
+        s"${sparkStruct.fields.length} vs ${arrowChildren.size}")
     val newChildren = sparkStruct.fields.zip(arrowChildren).map {
       case (sf, af) => rewriteField(sf, af)
     }
