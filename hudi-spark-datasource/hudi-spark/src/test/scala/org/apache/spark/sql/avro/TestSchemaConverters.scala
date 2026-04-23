@@ -249,6 +249,101 @@ class TestSchemaConverters extends SparkAdapterSupport {
     assertEquals(HoodieSchemaType.VARIANT, nullableField.schema().getNonNullType.getType)
   }
 
+  @Test
+  def testInvalidVariantSchemaWrongFieldCount(): Unit = {
+    val invalidStruct = new StructType(Array[StructField](
+      StructField(HoodieSchema.Variant.VARIANT_METADATA_FIELD, DataTypes.BinaryType, nullable = false)
+    ))
+    assertInvalidVariantSchema(invalidStruct)
+  }
+
+  @Test
+  def testInvalidVariantSchemaNullableMetadataField(): Unit = {
+    val invalidStruct = new StructType(Array[StructField](
+      StructField(HoodieSchema.Variant.VARIANT_METADATA_FIELD, DataTypes.BinaryType, nullable = true),
+      StructField(HoodieSchema.Variant.VARIANT_VALUE_FIELD, DataTypes.BinaryType, nullable = false)
+    ))
+    assertInvalidVariantSchema(invalidStruct)
+  }
+
+  @Test
+  def testInvalidVariantSchemaWrongValueFieldType(): Unit = {
+    val invalidStruct = new StructType(Array[StructField](
+      StructField(HoodieSchema.Variant.VARIANT_METADATA_FIELD, DataTypes.BinaryType, nullable = false),
+      StructField(HoodieSchema.Variant.VARIANT_VALUE_FIELD, DataTypes.StringType, nullable = false)
+    ))
+    assertInvalidVariantSchema(invalidStruct)
+  }
+
+  @Test
+  def testInvalidVariantSchemaWrongFieldNames(): Unit = {
+    val invalidStruct = new StructType(Array[StructField](
+      StructField("foo", DataTypes.BinaryType, nullable = false),
+      StructField("bar", DataTypes.BinaryType, nullable = false)
+    ))
+    assertInvalidVariantSchema(invalidStruct)
+  }
+
+  private def assertInvalidVariantSchema(invalidStruct: StructType): Unit = {
+    val metadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchemaType.VARIANT.name())
+      .build()
+    val exception = assertThrows(classOf[IllegalArgumentException], () => {
+      HoodieSparkSchemaConverters.toHoodieType(invalidStruct, metadata = metadata)
+    })
+    assertTrue(exception.getMessage.startsWith("Invalid variant schema structure"))
+  }
+
+  @Test
+  def testTopLevelVectorStillAllowed(): Unit = {
+    val vectorMetadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
+      .build()
+    val sparkType = new StructType(Array[StructField](
+      StructField("id", DataTypes.LongType, nullable = false),
+      StructField("embedding", ArrayType(FloatType, containsNull = false), nullable = false, metadata = vectorMetadata)
+    ))
+    val hoodieSchema = HoodieSparkSchemaConverters.toHoodieType(sparkType, recordName = "record")
+    assertEquals(HoodieSchemaType.VECTOR, hoodieSchema.getField("embedding").get().schema().getType)
+  }
+
+  @Test
+  def testVectorInNestedStructThrows(): Unit = {
+    val vectorMetadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
+      .build()
+    // Outer struct has a nested struct whose field is a VECTOR
+    val innerStruct = new StructType(Array[StructField](
+      StructField("embedding", ArrayType(FloatType, containsNull = false), nullable = false, metadata = vectorMetadata)
+    ))
+    val outerStruct = new StructType(Array[StructField](
+      StructField("id", DataTypes.LongType, nullable = false),
+      StructField("data", innerStruct, nullable = false)
+    ))
+    val exception = assertThrows(classOf[HoodieSchemaException], () => {
+      HoodieSparkSchemaConverters.toHoodieType(outerStruct, recordName = "record")
+    })
+    assertEquals("VECTOR column 'embedding' must be a top-level field. Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.", exception.getMessage)
+  }
+
+  @Test
+  def testVectorInsideArrayOfStructsThrows(): Unit = {
+    // VECTOR nested inside an array of structs: ARRAY<STRUCT<embedding VECTOR(4)>>
+    val vectorMetadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(4)")
+      .build()
+    val innerStruct = new StructType(Array[StructField](
+      StructField("embedding", ArrayType(FloatType, containsNull = false), nullable = false, metadata = vectorMetadata)
+    ))
+    val outerStruct = new StructType(Array[StructField](
+      StructField("items", ArrayType(innerStruct, containsNull = false), nullable = false)
+    ))
+    val exception = assertThrows(classOf[HoodieSchemaException], () => {
+      HoodieSparkSchemaConverters.toHoodieType(outerStruct, recordName = "record")
+    })
+    assertEquals("VECTOR column 'embedding' must be a top-level field. Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.", exception.getMessage)
+  }
+
   /**
    * Validates the content of the blob fields to ensure the fields match our expectations.
    * @param dataType the StructType containing the blob fields to validate

@@ -145,8 +145,7 @@ public class HiveIncrementalPuller {
         lastCommitTime = config.fromCommitTime;
       }
 
-      Connection conn = getConnection();
-      stmt = conn.createStatement();
+      stmt = getConnection().createStatement();
       // drop the temp table if exists
       String tempDbTable = config.tmpDb + "." + config.targetTable + "__" + config.sourceTable;
       String tempDbTablePath =
@@ -172,6 +171,15 @@ public class HiveIncrementalPuller {
       } catch (SQLException e) {
         LOG.error("Could not close the resultSet opened ", e);
       }
+      try {
+        if (this.connection != null) {
+          this.connection.close();
+        }
+      } catch (SQLException e) {
+        LOG.error("Could not close the JDBC connection", e);
+      } finally {
+        this.connection = null;
+      }
     }
   }
 
@@ -183,7 +191,10 @@ public class HiveIncrementalPuller {
     String storedAsClause = getStoredAsClause();
 
     incrementalPullSQLTemplate.add("storedAsClause", storedAsClause);
-    String incrementalSQL = new Scanner(new File(config.incrementalSQLFile)).useDelimiter("\\Z").next();
+    String incrementalSQL;
+    try (Scanner scanner = new Scanner(new File(config.incrementalSQLFile))) {
+      incrementalSQL = scanner.useDelimiter("\\Z").next();
+    }
     if (!incrementalSQL.contains(config.sourceDb + "." + config.sourceTable)) {
       LOG.error("Incremental SQL does not have " + config.sourceDb + "." + config.sourceTable
           + ", which means its pulling from a different table. Fencing this from happening.");

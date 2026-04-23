@@ -36,5 +36,9 @@ public enum BufferType {
 
   @EnumFieldDescription("Lock-free ring buffer using LMAX Disruptor. Provides better throughput for high-volume "
       + "write operations by decoupling record ingestion from sorting and writing.")
-  DISRUPTOR
+  DISRUPTOR,
+
+  @EnumFieldDescription("Continuous sorting using a TreeMap. Provides O(log n) inserts and incremental draining "
+      + "for predictable latency without sort spikes.")
+  CONTINUOUS_SORT
 }

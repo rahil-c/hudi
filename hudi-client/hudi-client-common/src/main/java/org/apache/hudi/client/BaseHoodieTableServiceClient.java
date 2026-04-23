@@ -29,6 +29,7 @@ import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.avro.model.HoodieRollbackPlan;
 import org.apache.hudi.client.embedded.EmbeddedTimelineService;
 import org.apache.hudi.client.heartbeat.HeartbeatUtils;
+import org.apache.hudi.client.heartbeat.HoodieHeartbeatClient;
 import org.apache.hudi.client.timeline.HoodieTimelineArchiver;
 import org.apache.hudi.client.timeline.TimelineArchivers;
 import org.apache.hudi.common.HoodiePendingRollbackInfo;
@@ -43,6 +44,7 @@ import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.InstantGenerator;
 import org.apache.hudi.common.table.timeline.TimelineUtils;
@@ -81,12 +83,17 @@ import lombok.extern.slf4j.Slf4j;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.text.ParseException;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.Collections;
+
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -172,11 +179,15 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
    *
    * @param metadata commit metadata for which pre commit is being invoked.
    */
-  protected void preCommit(HoodieCommitMetadata metadata) {
+  protected void preCommit(HoodieCommitMetadata metadata, boolean executeConflictResolution) {
     // Create a Hoodie table after startTxn which encapsulated the commits and files visible.
     // Important to create this after the lock to ensure the latest commits show up in the timeline without need for reload
     HoodieTable table = createTable(config, storageConf);
-    resolveWriteConflict(table, metadata, this.pendingInflightAndRequestedInstants);
+    if (executeConflictResolution) {
+      resolveWriteConflict(table, metadata, this.pendingInflightAndRequestedInstants);
+    }
+    // Merge rolling metadata after conflict resolution, still within the lock
+    mergeRollingMetadata(table, metadata);
   }
 
   /**
@@ -394,6 +405,7 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
       final HoodieInstant compactionInstant = instantGenerator.getCompactionInflightInstant(compactionCommitTime);
       try {
         this.txnManager.beginStateChange(Option.of(compactionInstant), Option.empty());
+        preCommit(metadata, false);
         finalizeWrite(table, compactionCommitTime, writeStats);
         // commit to data table after committing to metadata table.
         writeToMetadataTable(table, compactionCommitTime, metadata, partialMetadataWriteStats);
@@ -465,7 +477,7 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
         logCompactionCommitTime);
     try {
       this.txnManager.beginStateChange(Option.of(logCompactionInstant), Option.empty());
-      preCommit(metadata);
+      preCommit(metadata, true);
       finalizeWrite(table, logCompactionCommitTime, writeStats);
       // commit to data table after committing to metadata table.
       writeToMetadataTable(table, logCompactionCommitTime, metadata, partialMetadataWriteStats);
@@ -600,8 +612,8 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
       finalizeWrite(table, clusteringCommitTime, writeStats);
       // Only in some cases conflict resolution needs to be performed.
       // So, check if preCommit method that does conflict resolution needs to be triggered.
-      if (isPreCommitRequired()) {
-        preCommit(replaceCommitMetadata);
+      if (isPreCommitConflictResolutionRequired() || !config.getRollingMetadataKeys().isEmpty()) {
+        preCommit(replaceCommitMetadata, isPreCommitConflictResolutionRequired());
       }
       // Update table's metadata (table)
       writeToMetadataTable(table, clusteringInstant.requestedTime(), replaceCommitMetadata, partialMetadataWriteStats);
@@ -624,6 +636,9 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
       TimelineUtils.parseDateFromInstantTimeSafely(clusteringCommitTime).ifPresent(parsedInstant ->
           metrics.updateCommitMetrics(parsedInstant.getTime(), durationInMs, replaceCommitMetadata, HoodieActiveTimeline.CLUSTERING_ACTION)
       );
+    }
+    if (config.isExpirationOfClusteringEnabled()) {
+      heartbeatClient.stop(clusteringCommitTime);
     }
     log.info("Clustering successfully on commit {} for table {}", clusteringCommitTime, table.getConfig().getBasePath());
   }
@@ -726,6 +741,10 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
           Option<HoodieClusteringPlan> clusteringPlan = table
               .scheduleClustering(context, instantTime, extraMetadata);
           option = clusteringPlan.map(plan -> instantTime);
+          if (option.isPresent() && config.isExpirationOfClusteringEnabled()) {
+            heartbeatClient.start(instantTime);
+            log.info("Started heartbeat for clustering instant {}", instantTime);
+          }
           break;
         case COMPACT:
           log.info("Scheduling compaction at instant time: {} for table {}", instantTime, config.getBasePath());
@@ -1007,15 +1026,18 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
         String instantToRollback = rollbackPlan.getInstantToRollback().getCommitTime();
         if (ignoreCompactionAndClusteringInstants) {
           if (!HoodieTimeline.COMPACTION_ACTION.equals(action)) {
-            InstantGenerator instantGenerator = metaClient.getInstantGenerator();
-            boolean isClustering = ClusteringUtils.isClusteringInstant(metaClient.getActiveTimeline(),
-                instantGenerator.createNewInstant(HoodieInstant.State.INFLIGHT, action, instantToRollback), instantGenerator);
-            if (!isClustering) {
-              infoMap.putIfAbsent(instantToRollback, Option.of(new HoodiePendingRollbackInfo(rollbackInstant, rollbackPlan)));
+            HoodieInstant instant = metaClient.getInstantGenerator()
+                .createNewInstant(HoodieInstant.State.INFLIGHT, action, instantToRollback);
+            boolean isClustering = ClusteringUtils.isClusteringInstant(
+                metaClient.getActiveTimeline(), instant, metaClient.getInstantGenerator());
+            if (!isClustering || isClusteringInstantEligibleForRollback(metaClient, instant, config, heartbeatClient)) {
+              infoMap.putIfAbsent(instantToRollback,
+                  Option.of(new HoodiePendingRollbackInfo(rollbackInstant, rollbackPlan)));
             }
           }
         } else {
-          infoMap.putIfAbsent(instantToRollback, Option.of(new HoodiePendingRollbackInfo(rollbackInstant, rollbackPlan)));
+          infoMap.putIfAbsent(instantToRollback,
+              Option.of(new HoodiePendingRollbackInfo(rollbackInstant, rollbackPlan)));
         }
       } catch (Exception e) {
         log.warn("Processing rollback plan failed for {}, skip the plan", rollbackInstant, e);
@@ -1132,6 +1154,20 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
         }
       }).collect(Collectors.toList());
     } else if (cleaningPolicy.isLazy()) {
+      if (config.isExpirationOfClusteringEnabled()) {
+        Stream<HoodieInstant> eligibleClusteringInstants =
+            metaClient.getActiveTimeline().filterPendingClusteringTimeline()
+                .getInstantsAsStream()
+                .filter(instant -> {
+                  try {
+                    return isClusteringInstantEligibleForRollback(metaClient, instant, config, heartbeatClient);
+                  } catch (Exception e) {
+                    log.warn("Failed to check clustering eligibility for instant {}, skipping", instant.requestedTime(), e);
+                    return false;
+                  }
+                });
+        inflightInstantsStream = Stream.concat(inflightInstantsStream, eligibleClusteringInstants);
+      }
       return getInstantsToRollbackForLazyCleanPolicy(metaClient, inflightInstantsStream);
     } else if (cleaningPolicy.isNever()) {
       return Collections.emptyList();
@@ -1155,11 +1191,33 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
     if (!expiredInstants.isEmpty()) {
       // Only return instants that haven't been completed by other writers
       metaClient.reloadActiveTimeline();
-      HoodieTimeline refreshedInflightTimeline = getInflightTimelineExcludeCompactionAndClustering(metaClient);
-      return expiredInstants.stream().filter(refreshedInflightTimeline::containsInstant).collect(Collectors.toList());
+      HoodieTimeline refreshedIncompleteTimeline = metaClient.getActiveTimeline().filterInflightsAndRequested();
+      return expiredInstants.stream().filter(instantTime ->
+          refreshedIncompleteTimeline.containsInstant(instantTime)
+      ).collect(Collectors.toList());
     } else {
       return Collections.emptyList();
     }
+  }
+
+  public static boolean isClusteringInstantEligibleForRollback(
+      HoodieTableMetaClient metaClient, HoodieInstant instant,
+      HoodieWriteConfig config, HoodieHeartbeatClient heartbeatClient) {
+    try {
+      return config.isExpirationOfClusteringEnabled()
+          && hasInstantExpired(metaClient, instant.requestedTime(), config.getClusteringExpirationThresholdMins())
+          && heartbeatClient.isHeartbeatExpired(instant.requestedTime());
+    } catch (Exception e) {
+      throw new HoodieException("Failed to check heartbeat for clustering instant " + instant.requestedTime(), e);
+    }
+  }
+
+  private static boolean hasInstantExpired(HoodieTableMetaClient metaClient, String instantTime, long expirationMins) throws ParseException {
+    ZoneId zoneId = metaClient.getTableConfig().getTimelineTimezone().getZoneId();
+    long currentTimeMs = ZonedDateTime.ofInstant(java.time.Instant.now(), zoneId).toInstant().toEpochMilli();
+    long instantTimeMs = HoodieInstantTimeGenerator.parseDateFromInstantTime(instantTime).toInstant().toEpochMilli();
+    long ageMs = currentTimeMs - instantTimeMs;
+    return ageMs >= TimeUnit.MINUTES.toMillis(expirationMins);
   }
 
   /**
@@ -1195,52 +1253,136 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
       Option<HoodieInstant> commitInstantOpt = Option.fromJavaOptional(table.getActiveTimeline().getCommitsTimeline().getInstantsAsStream()
           .filter(instant -> EQUALS.test(instant.requestedTime(), commitInstantTime))
           .findFirst());
-      Option<HoodieRollbackPlan> rollbackPlanOption;
-      String rollbackInstantTime;
-      if (pendingRollbackInfo.isPresent()) {
-        rollbackPlanOption = Option.of(pendingRollbackInfo.get().getRollbackPlan());
-        rollbackInstantTime = pendingRollbackInfo.get().getRollbackInstant().requestedTime();
-      } else {
-        if (commitInstantOpt.isEmpty()) {
-          log.error("Cannot find instant {} in the timeline of table {} for rollback", commitInstantTime, config.getBasePath());
+
+      // ---- SCHEDULE PHASE ----
+      // Determines which rollback plan to use and creates a new one if necessary.
+      Option<Pair<HoodieInstant, Option<HoodieRollbackPlan>>> scheduleResult =
+          resolveOrScheduleRollback(table, commitInstantTime, commitInstantOpt, pendingRollbackInfo, suppliedRollbackInstantTime, skipLocking);
+      if (scheduleResult.isEmpty()) {
+        return false;
+      }
+      Option<HoodieInstant> rollbackInstantOpt = Option.of(scheduleResult.get().getLeft());
+      Option<HoodieRollbackPlan> rollbackPlanOption = scheduleResult.get().getRight();
+
+      // ---- EXECUTION PHASE ----
+      boolean isMultiWriter = config.getWriteConcurrencyMode().supportsMultiWriter();
+      if (rollbackPlanOption.isPresent()) {
+        if (isMultiWriter && !acquireRollbackHeartbeatIfMultiWriter(table, rollbackInstantOpt)) {
           return false;
         }
-        if (!skipLocking) {
-          txnManager.beginStateChange(Option.empty(), Option.empty());
-        }
+
         try {
-          rollbackInstantTime = suppliedRollbackInstantTime.orElseGet(() -> createNewInstantTime(false));
-          rollbackPlanOption = table.scheduleRollback(context, rollbackInstantTime, commitInstantOpt.get(), false, config.shouldRollbackUsingMarkers(), false);
+          // Execute rollback — no lock held during this operation.
+
+          // There can be a case where the inflight rollback failed after the instant files
+          // are deleted for commitInstantTime, so that commitInstantOpt is empty as it is
+          // not present in the timeline.  In such a case, the hoodie instant instance
+          // is reconstructed to allow the rollback to be reattempted, and the deleteInstants
+          // is set to false since they are already deleted.
+          HoodieRollbackMetadata rollbackMetadata = commitInstantOpt.isPresent()
+              ? table.rollback(context, rollbackInstantOpt.get().requestedTime(), commitInstantOpt.get(), true, skipLocking)
+              : table.rollback(context, rollbackInstantOpt.get().requestedTime(), table.getMetaClient().createNewInstant(
+                  HoodieInstant.State.INFLIGHT, rollbackPlanOption.get().getInstantToRollback().getAction(), commitInstantTime),
+              false, skipLocking);
+          if (timerContext != null) {
+            long durationInMs = metrics.getDurationInMs(timerContext.stop());
+            metrics.updateRollbackMetrics(durationInMs, rollbackMetadata.getTotalFilesDeleted());
+          }
+          return true;
         } finally {
-          if (!skipLocking) {
-            txnManager.endStateChange(Option.empty());
+          if (isMultiWriter) {
+            try {
+              heartbeatClient.stop(rollbackInstantOpt.get().requestedTime());
+            } catch (Exception e) {
+              log.warn("Failed to stop heartbeat for rollback instant {}", rollbackInstantOpt.get().requestedTime(), e);
+            }
           }
         }
-      }
-
-      if (rollbackPlanOption.isPresent()) {
-        // There can be a case where the inflight rollback failed after the instant files
-        // are deleted for commitInstantTime, so that commitInstantOpt is empty as it is
-        // not present in the timeline.  In such a case, the hoodie instant instance
-        // is reconstructed to allow the rollback to be reattempted, and the deleteInstants
-        // is set to false since they are already deleted.
-        // Execute rollback
-        HoodieRollbackMetadata rollbackMetadata = commitInstantOpt.isPresent()
-            ? table.rollback(context, rollbackInstantTime, commitInstantOpt.get(), true, skipLocking)
-            : table.rollback(context, rollbackInstantTime, table.getMetaClient().createNewInstant(
-                HoodieInstant.State.INFLIGHT, rollbackPlanOption.get().getInstantToRollback().getAction(), commitInstantTime),
-            false, skipLocking);
-        if (timerContext != null) {
-          long durationInMs = metrics.getDurationInMs(timerContext.stop());
-          metrics.updateRollbackMetrics(durationInMs, rollbackMetadata.getTotalFilesDeleted());
-        }
-        return true;
       } else {
         throw new HoodieRollbackException("Failed to rollback " + config.getBasePath() + " commits " + commitInstantTime);
       }
     } catch (Exception e) {
       metrics.emitRollbackFailure(e.getClass().getSimpleName());
       throw new HoodieRollbackException("Failed to rollback " + config.getBasePath() + " commits " + commitInstantTime, e);
+    }
+  }
+
+  /**
+   * In multi-writer mode, acquires a heartbeat for the rollback instant under a transaction to ensure
+   * only one writer executes the rollback at a time. No-op if multi-writer is not enabled.
+   *
+   * @return true if heartbeat was successfully acquired and rollback can be executed by the writer, else false
+   */
+  private boolean acquireRollbackHeartbeatIfMultiWriter(HoodieTable table, Option<HoodieInstant> rollbackInstantOpt) throws IOException {
+    try {
+      txnManager.beginStateChange(rollbackInstantOpt, txnManager.getLastCompletedTransactionOwner());
+      if (!this.heartbeatClient.isHeartbeatExpired(rollbackInstantOpt.get().requestedTime())) {
+        LOG.error("Rollback heartbeat already exists for instant {}", rollbackInstantOpt.get().requestedTime());
+        return false;
+      }
+      if (table.getMetaClient().reloadActiveTimeline().getRollbackTimeline().filterCompletedInstants().getInstantsAsStream()
+          .anyMatch(instant -> EQUALS.test(instant.requestedTime(), rollbackInstantOpt.get().requestedTime()))) {
+        LOG.info("Requested rollback instant {} is already completed in the active timeline", rollbackInstantOpt.get().requestedTime());
+        return false;
+      }
+
+      this.heartbeatClient.start(rollbackInstantOpt.get().requestedTime());
+      return true;
+    } finally {
+      txnManager.endStateChange(rollbackInstantOpt);
+    }
+  }
+
+  /**
+   * Resolves an existing pending rollback or schedules a new one for the given commit instant.
+   *
+   * @return Option containing the rollback instant and plan pair, or empty if the commit instant
+   *         is no longer present on the timeline (indicating no rollback is needed).
+   */
+  private Option<Pair<HoodieInstant, Option<HoodieRollbackPlan>>> resolveOrScheduleRollback(
+      HoodieTable table, String commitInstantTime, Option<HoodieInstant> commitInstantOpt,
+      Option<HoodiePendingRollbackInfo> pendingRollbackInfo, Option<String> suppliedRollbackInstantTime,
+      boolean skipLocking) {
+    if (pendingRollbackInfo.isPresent()) {
+      // Case 1: caller already resolved a pending rollback — re-use it without taking a lock.
+      return Option.of(Pair.of(pendingRollbackInfo.get().getRollbackInstant(),
+          Option.of(pendingRollbackInfo.get().getRollbackPlan())));
+    }
+
+    // Case 2: no pending rollback supplied — reload the timeline under lock to get the latest view.
+    if (!skipLocking) {
+      txnManager.beginStateChange(Option.empty(), Option.empty());
+    }
+    try {
+      if (config.shouldAvoidDuplicateRollbackPlan()) {
+        // Check if another writer already scheduled a rollback for this instant to avoid duplicates.
+        table.getMetaClient().reloadActiveTimeline();
+        Option<HoodiePendingRollbackInfo> pendingRollbackOpt = getPendingRollbackInfo(table.getMetaClient(), commitInstantTime);
+        if (pendingRollbackOpt.isPresent()) {
+          // Case 2a: a concurrent writer already scheduled the rollback — re-use it.
+          return Option.of(Pair.of(pendingRollbackOpt.get().getRollbackInstant(),
+              Option.of(pendingRollbackOpt.get().getRollbackPlan())));
+        }
+        commitInstantOpt = Option.fromJavaOptional(table.getActiveTimeline().getCommitsTimeline().getInstantsAsStream()
+            .filter(instant -> EQUALS.test(instant.requestedTime(), commitInstantTime))
+            .findFirst());
+      }
+      if (commitInstantOpt.isEmpty()) {
+        log.error("Cannot find instant {} in the timeline of table {} for rollback", commitInstantTime, config.getBasePath());
+        return Option.empty();
+      }
+      // Case 2b: no pending rollback exists — schedule one now.
+      // Refresh commitInstantOpt from the reloaded timeline.
+      String newRollbackInstantTime = suppliedRollbackInstantTime.orElseGet(() -> createNewInstantTime(false));
+      HoodieInstant rollbackInstant = new HoodieInstant(HoodieInstant.State.REQUESTED, HoodieTimeline.ROLLBACK_ACTION, newRollbackInstantTime,
+          table.getMetaClient().getTimelineLayout().getInstantComparator().requestedTimeOrderedComparator());
+      Option<HoodieRollbackPlan> rollbackPlan = table.scheduleRollback(context, newRollbackInstantTime, commitInstantOpt.get(),
+          false, config.shouldRollbackUsingMarkers(), false);
+      return Option.of(Pair.of(rollbackInstant, rollbackPlan));
+    } finally {
+      if (!skipLocking) {
+        txnManager.endStateChange(Option.empty());
+      }
     }
   }
 
@@ -1271,7 +1413,7 @@ public abstract class BaseHoodieTableServiceClient<I, T, O> extends BaseHoodieCl
    *
    * @return boolean
    */
-  protected boolean isPreCommitRequired() {
+  protected boolean isPreCommitConflictResolutionRequired() {
     return this.config.getWriteConflictResolutionStrategy().isPreCommitRequired();
   }
 

@@ -186,6 +186,17 @@ public class TestWriteBase {
       return this;
     }
 
+    public TestHarness preparePipelineWithObjectReuse(File basePath, Configuration conf) throws Exception {
+      this.baseFile = basePath;
+      this.basePath = this.baseFile.getAbsolutePath();
+      this.conf = conf;
+      this.pipeline = TestData.getWritePipelineWithObjectReuse(this.basePath, conf);
+      // open the function and ingest data
+      this.pipeline.openFunction();
+      HoodieWriteConfig writeConfig = this.pipeline.getCoordinator().getWriteClient().getConfig();
+      return this;
+    }
+
     public TestHarness consume(List<RowData> inputs) throws Exception {
       for (RowData rowData : inputs) {
         this.pipeline.invoke(rowData);
@@ -483,6 +494,11 @@ public class TestWriteBase {
       return this;
     }
 
+    public TestHarness assertGlobalFailure(boolean failed) {
+      assertEquals(failed, this.pipeline.getCoordinatorContext().isJobFailed());
+      return this;
+    }
+
     public TestHarness checkpointThrows(long checkpointId, String message) {
       // this returns early because there is no inflight instant
       assertThrows(HoodieException.class, () -> checkpoint(checkpointId), message);
@@ -612,6 +628,14 @@ public class TestWriteBase {
       for (HoodieKey key : keys) {
         assertTrue(this.pipeline.isKeyInState(key),
             "Key: " + key + " assumes to be in the index state");
+      }
+      return this;
+    }
+
+    public TestHarness checkIndexNotLoaded(HoodieKey... keys) {
+      for (HoodieKey key : keys) {
+        assertFalse(this.pipeline.isKeyInState(key),
+            "Key: " + key + " assumes to not in the index state");
       }
       return this;
     }

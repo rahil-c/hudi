@@ -36,6 +36,7 @@ import org.apache.hudi.sync.common.HoodieSyncConfig
 import org.apache.hudi.util.{JFunction, SparkConfigUtils}
 
 import org.apache.spark.sql.execution.datasources.{DataSourceUtils => SparkDataSourceUtils}
+import org.apache.spark.sql.hudi.HoodieSqlCommonUtils
 import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
@@ -238,6 +239,17 @@ object DataSourceReadOptions {
         " of the same file in the same partition and it could lead to Out of Memory on the driver if" +
         " the dataset is too large. Another important limitation is that this config should not be" +
         " used if there are bootstrap files present in the file system. NOTE: Only works for COW tables with snapshot queries.")
+
+  val FILE_INDEX_PARTITION_LISTING_VIA_CATALOG: ConfigProperty[Boolean] =
+    ConfigProperty.key("hoodie.datasource.read.file.index.list.partitions.from.catalog")
+      .defaultValue(false)
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("Controls whether partition listing is obtained from the catalog instead of listing " +
+        "the file system to avoid recursively listing of large number of directories. Enabling this can reduce " +
+        "large amount of listing calls and speed up the queries for very large tables. This is only necessary " +
+        "when MDT is not enabled on the dataset as otherwise the MDT can provide the partition listing faster " +
+        "and without any actual listing on the file system.")
 
   val INCREMENTAL_FALLBACK_TO_FULL_TABLE_SCAN: ConfigProperty[String] = ConfigProperty
     .key("hoodie.datasource.read.incr.fallback.fulltablescan.enable")
@@ -1131,9 +1143,17 @@ object DataSourceOptionsHelper {
       .map(is => if (is.toBoolean) QUERY_TYPE_READ_OPTIMIZED_OPT_VAL else QUERY_TYPE_SNAPSHOT_OPT_VAL)
       .getOrElse(paramsWithGlobalProps.getOrElse(QUERY_TYPE.key, QUERY_TYPE.defaultValue()))
 
-    Map(
-      QUERY_TYPE.key -> queryType
-    ) ++ translateConfigurations(paramsWithGlobalProps)
+    val translatedParams = translateConfigurations(paramsWithGlobalProps)
+
+    val startCommitKey = DataSourceReadOptions.START_COMMIT.key
+    val endCommitKey = DataSourceReadOptions.END_COMMIT.key
+    val normalizedStartCommit = translatedParams.get(startCommitKey)
+      .map(v => startCommitKey -> HoodieSqlCommonUtils.formatIncrementalInstant(v))
+    val normalizedEndCommit = translatedParams.get(endCommitKey)
+      .map(v => endCommitKey -> HoodieSqlCommonUtils.formatIncrementalInstant(v))
+
+    Map(QUERY_TYPE.key -> queryType) ++ translatedParams ++
+      normalizedStartCommit ++ normalizedEndCommit
   }
 
   def inferKeyGenClazz(props: TypedProperties): String = {

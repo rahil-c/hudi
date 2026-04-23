@@ -660,6 +660,16 @@ public class TestData {
     }
   }
 
+  /**
+   * Initializes a writing pipeline with object reuse enabled.
+   */
+  public static TestFunctionWrapper<RowData> getWritePipelineWithObjectReuse(
+      String basePath, Configuration conf) throws Exception {
+    org.apache.flink.api.common.ExecutionConfig execConfig = new org.apache.flink.api.common.ExecutionConfig();
+    execConfig.enableObjectReuse();
+    return new InsertFunctionWrapper<>(basePath, conf, execConfig);
+  }
+
   private static String toStringSafely(Object obj) {
     return obj == null ? "null" : obj.toString();
   }

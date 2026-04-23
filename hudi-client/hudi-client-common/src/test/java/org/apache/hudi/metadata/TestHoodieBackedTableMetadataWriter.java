@@ -20,6 +20,7 @@ package org.apache.hudi.metadata;
 
 import org.apache.hudi.client.BaseHoodieWriteClient;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
+import org.apache.hudi.common.config.HoodieTableServiceManagerConfig;
 import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy;
@@ -47,6 +48,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.stream.Stream;
 
 import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
@@ -95,6 +97,8 @@ class TestHoodieBackedTableMetadataWriter {
     HoodieTableMetaClient metaClient = mock(HoodieTableMetaClient.class);
     HoodieActiveTimeline initialTimeline = mock(HoodieActiveTimeline.class, RETURNS_DEEP_STUBS);
     BaseHoodieWriteClient writeClient = mock(BaseHoodieWriteClient.class);
+    HoodieWriteConfig writeConfig = HoodieWriteConfig.newBuilder().withPath("/tmp/").build();
+    when(writeClient.getConfig()).thenReturn(writeConfig);
     if (requiresRefresh) {
       when(metaClient.reloadActiveTimeline()).thenReturn(initialTimeline);
     } else {
@@ -121,6 +125,63 @@ class TestHoodieBackedTableMetadataWriter {
     verify(writeClient, times(hasPendingLogCompaction ? 1 : 0)).runAnyPendingLogCompactions();
     int expectedTimelineReloads = (requiresRefresh ? 1 : 0) + (ranService ? 1 : 0);
     verify(metaClient, times(expectedTimelineReloads)).reloadActiveTimeline();
+  }
+
+  @Test
+  void runPendingTableServicesSkipsExecutionWhenTSMEnabled() {
+    HoodieTableMetaClient metaClient = mock(HoodieTableMetaClient.class);
+    HoodieActiveTimeline initialTimeline = mock(HoodieActiveTimeline.class, RETURNS_DEEP_STUBS);
+    BaseHoodieWriteClient writeClient = mock(BaseHoodieWriteClient.class);
+
+    Properties tsmProps = new Properties();
+    tsmProps.put(HoodieTableServiceManagerConfig.TABLE_SERVICE_MANAGER_ENABLED.key(), "true");
+    tsmProps.put(HoodieTableServiceManagerConfig.TABLE_SERVICE_MANAGER_ACTIONS.key(), "compaction,logcompaction");
+    HoodieWriteConfig writeConfig = HoodieWriteConfig.newBuilder().withPath("/tmp/").withProperties(tsmProps).build();
+    when(writeClient.getConfig()).thenReturn(writeConfig);
+    when(writeClient.shouldDelegateToTableServiceManager(any(), any())).thenCallRealMethod();
+
+    when(metaClient.getActiveTimeline()).thenReturn(initialTimeline);
+    when(initialTimeline.filterPendingCompactionTimeline().countInstants()).thenReturn(1);
+    when(initialTimeline.filterPendingLogCompactionTimeline().countInstants()).thenReturn(1);
+
+    HoodieActiveTimeline result = HoodieBackedTableMetadataWriter.runPendingTableServicesOperationsAndRefreshTimeline(
+        metaClient, writeClient, false, Option.empty());
+
+    // TSM-delegated actions should not be executed
+    verify(writeClient, times(0)).runAnyPendingCompactions();
+    verify(writeClient, times(0)).runAnyPendingLogCompactions();
+    // No services ran, so no timeline reload needed
+    assertSame(initialTimeline, result);
+  }
+
+  @Test
+  void runPendingTableServicesPartialTSMDelegation() {
+    HoodieTableMetaClient metaClient = mock(HoodieTableMetaClient.class);
+    HoodieActiveTimeline initialTimeline = mock(HoodieActiveTimeline.class, RETURNS_DEEP_STUBS);
+    BaseHoodieWriteClient writeClient = mock(BaseHoodieWriteClient.class);
+
+    // Only compaction is delegated to TSM, logcompaction is not
+    Properties tsmProps = new Properties();
+    tsmProps.put(HoodieTableServiceManagerConfig.TABLE_SERVICE_MANAGER_ENABLED.key(), "true");
+    tsmProps.put(HoodieTableServiceManagerConfig.TABLE_SERVICE_MANAGER_ACTIONS.key(), "compaction");
+    HoodieWriteConfig writeConfig = HoodieWriteConfig.newBuilder().withPath("/tmp/").withProperties(tsmProps).build();
+    when(writeClient.getConfig()).thenReturn(writeConfig);
+    when(writeClient.shouldDelegateToTableServiceManager(any(), any())).thenCallRealMethod();
+
+    when(metaClient.getActiveTimeline()).thenReturn(initialTimeline);
+    when(initialTimeline.filterPendingCompactionTimeline().countInstants()).thenReturn(1);
+    when(initialTimeline.filterPendingLogCompactionTimeline().countInstants()).thenReturn(1);
+
+    HoodieActiveTimeline reloadedTimeline = mock(HoodieActiveTimeline.class);
+    when(metaClient.reloadActiveTimeline()).thenReturn(reloadedTimeline);
+
+    HoodieActiveTimeline result = HoodieBackedTableMetadataWriter.runPendingTableServicesOperationsAndRefreshTimeline(
+        metaClient, writeClient, false, Option.empty());
+
+    // Compaction delegated to TSM → skipped; logcompaction not delegated → executed
+    verify(writeClient, times(0)).runAnyPendingCompactions();
+    verify(writeClient, times(1)).runAnyPendingLogCompactions();
+    assertSame(reloadedTimeline, result);
   }
 
   @Test
@@ -376,6 +437,7 @@ class TestHoodieBackedTableMetadataWriter {
     when(writeConfig.getMetadataConfig()).thenReturn(metadataConfig);
     when(metadataConfig.shouldFailOnTableServiceFailures()).thenReturn(shouldFailOnTableServiceFailures);
     when(writeConfig.getTableName()).thenReturn("test_table");
+    when(writeConfig.getTableServiceManagerConfig()).thenReturn(HoodieTableServiceManagerConfig.newBuilder().build());
 
     // Set up timeline mocks
     when(metaClient.reloadActiveTimeline()).thenReturn(timeline);

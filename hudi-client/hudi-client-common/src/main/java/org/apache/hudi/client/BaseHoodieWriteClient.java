@@ -429,6 +429,9 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
     // Important to create this after the lock to ensure the latest commits show up in the timeline without need for reload
     HoodieTable table = createTable(config);
     resolveWriteConflict(table, metadata, this.pendingInflightAndRequestedInstants);
+
+    // Merge rolling metadata after conflict resolution, still within the lock
+    mergeRollingMetadata(table, metadata);
   }
 
   /**

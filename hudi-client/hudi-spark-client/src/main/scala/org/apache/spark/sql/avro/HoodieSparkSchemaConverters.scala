@@ -60,6 +60,24 @@ object HoodieSparkSchemaConverters extends SparkAdapterSupport {
                    recordName: String = "topLevelRecord",
                    nameSpace: String = "",
                    metadata: Metadata = Metadata.empty): HoodieSchema = {
+    toHoodieTypeNested(catalystType, nullable, recordName, nameSpace, metadata, depth = 0)
+  }
+
+  /**
+   * Converts a Spark DataType to a HoodieSchema, tracking how deeply nested the current type is
+   * relative to the top-level table schema. This depth is used to enforce that VECTOR columns can
+   * only appear as direct fields of the root record — not inside nested structs, arrays, or maps.
+   *
+   * The caller passes depth=0 for the root StructType. Each level of nesting increments depth by 1,
+   * so direct fields of the root record are at depth=1 (VECTOR allowed), and anything deeper is
+   * at depth≥2 (VECTOR not allowed).
+   */
+  private def toHoodieTypeNested(catalystType: DataType,
+                                  nullable: Boolean,
+                                  recordName: String,
+                                  nameSpace: String,
+                                  metadata: Metadata,
+                                  depth: Int): HoodieSchema = {
     val schema = catalystType match {
       // Primitive types
       case BooleanType => HoodieSchema.create(HoodieSchemaType.BOOLEAN)
@@ -86,6 +104,10 @@ object HoodieSparkSchemaConverters extends SparkAdapterSupport {
       case ArrayType(elementSparkType, containsNull)
           if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
             HoodieSchema.parseTypeDescriptor(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.VECTOR =>
+        if (depth > 1) {
+          throw new HoodieSchemaException(
+            s"VECTOR column '$recordName' must be a top-level field. Nested VECTOR columns (inside STRUCT, ARRAY, or MAP) are not supported.")
+        }
         if (containsNull) {
           throw new HoodieSchemaException(
             s"VECTOR type does not support nullable elements (field: $recordName)")
@@ -107,11 +129,11 @@ object HoodieSparkSchemaConverters extends SparkAdapterSupport {
         HoodieSchema.createVector(dimension, elementType)
 
       case ArrayType(elementType, containsNull) =>
-        val elementSchema = toHoodieType(elementType, containsNull, recordName, nameSpace, metadata)
+        val elementSchema = toHoodieTypeNested(elementType, containsNull, recordName, nameSpace, metadata, depth + 1)
         HoodieSchema.createArray(elementSchema)
 
       case MapType(StringType, valueType, valueContainsNull) =>
-        val valueSchema = toHoodieType(valueType, valueContainsNull, recordName, nameSpace, metadata)
+        val valueSchema = toHoodieTypeNested(valueType, valueContainsNull, recordName, nameSpace, metadata, depth + 1)
         HoodieSchema.createMap(valueSchema)
 
       case blobStruct: StructType if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
@@ -119,13 +141,19 @@ object HoodieSparkSchemaConverters extends SparkAdapterSupport {
         // Validate blob structure before accepting
         validateBlobStructure(blobStruct)
         HoodieSchema.createBlob()
+
+      case variantStruct: StructType if metadata.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
+        HoodieSchema.parseTypeDescriptor(metadata.getString(HoodieSchema.TYPE_METADATA_FIELD)).getType == HoodieSchemaType.VARIANT =>
+        validateVariantStructure(variantStruct)
+        HoodieSchema.createVariant(recordName, nameSpace, null)
+
       case st: StructType =>
         val childNameSpace = if (nameSpace != "") s"$nameSpace.$recordName" else recordName
 
         // Check if this might be a union (using heuristic like Avro converter)
         if (canBeUnion(st)) {
           val nonNullUnionFieldTypes = st.map { f =>
-            toHoodieType(f.dataType, nullable = false, f.name, childNameSpace, f.metadata)
+            toHoodieTypeNested(f.dataType, nullable = false, f.name, childNameSpace, f.metadata, depth + 1)
           }
           val unionFieldTypes = if (nullable) {
             (HoodieSchema.create(HoodieSchemaType.NULL) +: nonNullUnionFieldTypes).asJava
@@ -136,7 +164,7 @@ object HoodieSparkSchemaConverters extends SparkAdapterSupport {
         } else {
           // Create record
           val fields = st.map { f =>
-            val fieldSchema = toHoodieType(f.dataType, f.nullable, f.name, childNameSpace, f.metadata)
+            val fieldSchema = toHoodieTypeNested(f.dataType, f.nullable, f.name, childNameSpace, f.metadata, depth + 1)
             val doc = f.getComment.orNull
             // Match existing Avro SchemaConverters behavior: use NULL_VALUE for nullable unions
             // to avoid serializing "default":null in JSON representation
@@ -330,6 +358,33 @@ object HoodieSparkSchemaConverters extends SparkAdapterSupport {
       throw new IllegalArgumentException(
         s"""Invalid blob schema structure. Expected schema:
            |${expectedBlobStructType.toDDL}
+           |Got schema:
+           |${structType.toDDL}""".stripMargin)
+    }
+  }
+
+  private lazy val expectedVariantStructType: StructType = {
+    val metadataField = StructField(HoodieSchema.Variant.VARIANT_METADATA_FIELD, BinaryType, nullable = false)
+    val valueField = StructField(HoodieSchema.Variant.VARIANT_VALUE_FIELD, BinaryType, nullable = false)
+    StructType(Seq(metadataField, valueField))
+  }
+
+  /**
+   * Validates that a StructType matches the expected unshredded variant schema
+   * (two non-null {@code BinaryType} fields: {@code metadata} and {@code value}).
+   *
+   * @param structType the StructType to validate
+   * @throws IllegalArgumentException if the structure does not match the expected variant schema
+   */
+  private def validateVariantStructure(structType: StructType): Unit = {
+    val fieldsByName = structType.fields.map(f => f.name -> f).toMap
+    val ok = structType.length == 2 &&
+      fieldsByName.get(HoodieSchema.Variant.VARIANT_METADATA_FIELD).exists(f => f.dataType == BinaryType && !f.nullable) &&
+      fieldsByName.get(HoodieSchema.Variant.VARIANT_VALUE_FIELD).exists(f => f.dataType == BinaryType && !f.nullable)
+    if (!ok) {
+      throw new IllegalArgumentException(
+        s"""Invalid variant schema structure. Expected schema:
+           |${expectedVariantStructType.toDDL}
            |Got schema:
            |${structType.toDDL}""".stripMargin)
     }

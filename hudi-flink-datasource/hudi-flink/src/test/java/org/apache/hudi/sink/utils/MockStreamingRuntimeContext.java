@@ -70,6 +70,19 @@ public class MockStreamingRuntimeContext extends StreamingRuntimeContext {
     this.taskInfo = new MockTaskInfo(numParallelSubtasks, subtaskIndex, 0);
   }
 
+  public MockStreamingRuntimeContext(
+      boolean isCheckpointingEnabled,
+      int numParallelSubtasks,
+      int subtaskIndex,
+      MockEnvironment environment,
+      ExecutionConfig executionConfig) {
+
+    super(new MockStreamOperator(executionConfig), environment, new HashMap<>());
+
+    this.isCheckpointingEnabled = isCheckpointingEnabled;
+    this.taskInfo = new MockTaskInfo(numParallelSubtasks, subtaskIndex, 0);
+  }
+
   public int getIndexOfThisSubtask() {
     return taskInfo.getIndexOfThisSubtask();
   }
@@ -90,14 +103,23 @@ public class MockStreamingRuntimeContext extends StreamingRuntimeContext {
     private static final long serialVersionUID = -1153976702711944427L;
 
     private transient TestProcessingTimeService testProcessingTimeService;
+    private final transient ExecutionConfig executionConfig;
 
     @Setter
     private transient Object currentKey;
     private final transient Map<Object, MockKeyedStateStore> mockKeyedStateStoreMap = new HashMap<>();
 
+    MockStreamOperator() {
+      this(new ExecutionConfig());
+    }
+
+    MockStreamOperator(ExecutionConfig executionConfig) {
+      this.executionConfig = executionConfig;
+    }
+
     @Override
     public ExecutionConfig getExecutionConfig() {
-      return new ExecutionConfig();
+      return executionConfig;
     }
 
     @Override

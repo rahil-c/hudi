@@ -50,7 +50,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.util.CleanerUtils.SAVEPOINTED_TIMESTAMPS;
-import static org.apache.hudi.common.util.MapUtils.nonEmpty;
+import static org.apache.hudi.common.util.CollectionUtils.nonEmpty;
 
 @Slf4j
 public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K, O, Option<HoodieCleanerPlan>> {
@@ -87,7 +87,7 @@ public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
   private boolean needsCleaning(CleaningTriggerStrategy strategy) {
     if (strategy == CleaningTriggerStrategy.NUM_COMMITS) {
       int numberOfCommits = getCommitsSinceLastCleaning();
-      int maxInlineCommitsForNextClean = config.getCleaningMaxCommits();
+      int maxInlineCommitsForNextClean = config.getCleanTriggerMaxCommits();
       return numberOfCommits >= maxInlineCommitsForNextClean;
     } else {
       throw new HoodieException("Unsupported cleaning trigger strategy: " + config.getCleaningTriggerStrategy());

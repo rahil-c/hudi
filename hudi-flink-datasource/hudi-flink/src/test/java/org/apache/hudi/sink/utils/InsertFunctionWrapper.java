@@ -77,13 +77,18 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
   private AppendWriteFunction<RowData> writeFunction;
 
   public InsertFunctionWrapper(String tablePath, Configuration conf) throws Exception {
+    this(tablePath, conf, new ExecutionConfig());
+  }
+
+  public InsertFunctionWrapper(String tablePath, Configuration conf, ExecutionConfig executionConfig) throws Exception {
     IOManager ioManager = new IOManagerAsync();
     MockEnvironment environment = new MockEnvironmentBuilder()
         .setTaskName("mockTask")
         .setManagedMemorySize(4 * MemoryManager.DEFAULT_PAGE_SIZE)
         .setIOManager(ioManager)
+        .setExecutionConfig(executionConfig)
         .build();
-    this.runtimeContext = new MockStreamingRuntimeContext(false, 1, 0, environment);
+    this.runtimeContext = new MockStreamingRuntimeContext(false, 1, 0, environment, executionConfig);
     this.gateway = new MockOperatorEventGateway();
     this.subtaskGateway = new MockSubtaskGateway();
     this.conf = conf;

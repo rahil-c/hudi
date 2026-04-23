@@ -33,6 +33,7 @@ import org.apache.spark.sql.execution.command._
 import org.apache.spark.sql.execution.datasources.{CreateTable, LogicalRelation}
 import org.apache.spark.sql.hudi.HoodieSqlCommonUtils.{isMetaField, removeMetaFields}
 import org.apache.spark.sql.hudi.analysis.HoodieAnalysis.{sparkAdapter, MatchCreateIndex, MatchCreateTableLike, MatchDropIndex, MatchInsertIntoStatement, MatchMergeIntoTable, MatchRefreshIndex, MatchShowIndexes, ResolvesToHudiTable}
+import org.apache.spark.sql.hudi.blob.ReadBlobRule
 import org.apache.spark.sql.hudi.command._
 import org.apache.spark.sql.hudi.command.HoodieLeafRunnableCommand.stripMetaFieldAttributes
 import org.apache.spark.sql.hudi.command.InsertIntoHoodieTableCommand.alignQueryOutput
@@ -160,10 +161,16 @@ object HoodieAnalysis extends SparkAdapterSupport {
     //          - Precedes actual [[customEarlyScanPushDownRules]] invocation
     val pruneFileSourcePartitionsClass = if (HoodieSparkUtils.gteqSpark4_0) {
       "org.apache.spark.sql.hudi.analysis.Spark4HoodiePruneFileSourcePartitions"
-    } else {
+    } else if (HoodieSparkUtils.gteqSpark3_4) {
+      // Spark 3.4 and 3.5: PhysicalOperation and ScanOperation unified (SPARK-39764)
       "org.apache.spark.sql.hudi.analysis.Spark3HoodiePruneFileSourcePartitions"
+    } else {
+      // Spark 3.3: Use ScanOperation for better compatibility
+      "org.apache.spark.sql.hudi.analysis.Spark33HoodiePruneFileSourcePartitions"
     }
     rules += (spark => instantiateKlass(pruneFileSourcePartitionsClass, spark))
+
+    rules += (session => ReadBlobRule(session))
 
     rules.toSeq
   }

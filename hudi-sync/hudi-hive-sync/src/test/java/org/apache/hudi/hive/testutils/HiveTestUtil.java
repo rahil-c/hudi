@@ -193,11 +193,15 @@ public class HiveTestUtil {
         .setPayloadClass(HoodieAvroPayload.class)
         .initTable(HadoopFSUtils.getStorageConfWithCopy(configuration), basePath);
 
-    for (String tableName : createdTablesSet) {
-      ddlExecutor.runSQL("drop table if exists " + tableName);
+    if (ddlExecutor != null) {
+      for (String tableName : createdTablesSet) {
+        ddlExecutor.runSQL("drop table if exists " + tableName);
+      }
     }
     createdTablesSet.clear();
-    ddlExecutor.runSQL("drop database if exists " + DB_NAME + " cascade");
+    if (ddlExecutor != null) {
+      ddlExecutor.runSQL("drop database if exists " + DB_NAME + " cascade");
+    }
   }
 
   public static HiveConf getHiveConf() {
@@ -226,6 +230,7 @@ public class HiveTestUtil {
     try {
       if (hiveServer != null) {
         hiveServer.stop();
+        hiveServer = null;
       }
     } catch (Exception e) {
       e.printStackTrace();
@@ -235,6 +240,7 @@ public class HiveTestUtil {
     try {
       if (hiveTestService != null) {
         hiveTestService.stop();
+        hiveTestService = null;
       }
     } catch (Exception e) {
       e.printStackTrace();
@@ -244,6 +250,7 @@ public class HiveTestUtil {
     try {
       if (zkServer != null) {
         zkServer.shutdown(true);
+        zkServer = null;
       }
     } catch (Exception e) {
       e.printStackTrace();
@@ -253,6 +260,7 @@ public class HiveTestUtil {
     try {
       if (zkService != null) {
         zkService.stop();
+        zkService = null;
       }
     } catch (RuntimeException re) {
       re.printStackTrace();
@@ -262,6 +270,7 @@ public class HiveTestUtil {
     try {
       if (fileSystem != null) {
         fileSystem.close();
+        fileSystem = null;
       }
     } catch (IOException ie) {
       ie.printStackTrace();

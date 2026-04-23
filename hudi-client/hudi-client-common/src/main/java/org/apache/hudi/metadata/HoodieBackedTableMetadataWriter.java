@@ -25,9 +25,11 @@ import org.apache.hudi.avro.model.HoodieRestoreMetadata;
 import org.apache.hudi.avro.model.HoodieRestorePlan;
 import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.client.BaseHoodieWriteClient;
+import org.apache.hudi.client.RunsTableService;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
+import org.apache.hudi.common.model.ActionType;
 import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.engine.EngineType;
 import org.apache.hudi.common.engine.HoodieEngineContext;
@@ -156,7 +158,7 @@ import static org.apache.hudi.metadata.SecondaryIndexRecordGenerationUtils.readS
  *
  * @param <I> Type of input for the write client
  */
-public abstract class HoodieBackedTableMetadataWriter<I, O> implements HoodieTableMetadataWriter<I, O> {
+public abstract class HoodieBackedTableMetadataWriter<I, O> implements HoodieTableMetadataWriter<I, O>, RunsTableService {
 
   static final Logger LOG = LoggerFactory.getLogger(HoodieBackedTableMetadataWriter.class);
 
@@ -2153,12 +2155,20 @@ public abstract class HoodieBackedTableMetadataWriter<I, O> implements HoodieTab
       // finish off any pending log compaction or compactions operations if any from previous attempt.
       boolean ranServices = false;
       if (activeTimeline.filterPendingCompactionTimeline().countInstants() > 0) {
-        writeClient.runAnyPendingCompactions();
-        ranServices = true;
+        if (writeClient.shouldDelegateToTableServiceManager(writeClient.getConfig(), ActionType.compaction)) {
+          LOG.info("Skipping pending compactions on MDT as they are delegated to table service manager.");
+        } else {
+          writeClient.runAnyPendingCompactions();
+          ranServices = true;
+        }
       }
       if (activeTimeline.filterPendingLogCompactionTimeline().countInstants() > 0) {
-        writeClient.runAnyPendingLogCompactions();
-        ranServices = true;
+        if (writeClient.shouldDelegateToTableServiceManager(writeClient.getConfig(), ActionType.logcompaction)) {
+          LOG.info("Skipping pending log compactions on MDT as they are delegated to table service manager.");
+        } else {
+          writeClient.runAnyPendingLogCompactions();
+          ranServices = true;
+        }
       }
       return ranServices ? metadataMetaClient.reloadActiveTimeline() : activeTimeline;
     } catch (Exception e) {
@@ -2201,7 +2211,11 @@ public abstract class HoodieBackedTableMetadataWriter<I, O> implements HoodieTab
         LOG.info("Compaction with same {} time is already present in the timeline.", compactionInstantTime);
       } else if (writeClient.scheduleCompactionAtInstant(compactionInstantTime, Option.empty())) {
         LOG.info("Compaction is scheduled for timestamp {}", compactionInstantTime);
-        writeClient.compact(compactionInstantTime, true);
+        if (shouldDelegateToTableServiceManager(metadataWriteConfig, ActionType.compaction)) {
+          LOG.info("Skipping execution of compaction on MDT as it is delegated to table service manager.");
+        } else {
+          writeClient.compact(compactionInstantTime, true);
+        }
       }
     } catch (Exception e) {
       metrics.ifPresent(m -> m.incrementMetric(HoodieMetadataMetrics.COMPACTION_FAILURES, 1));
@@ -2217,7 +2231,11 @@ public abstract class HoodieBackedTableMetadataWriter<I, O> implements HoodieTab
         Option<String> scheduledLogCompaction = writeClient.scheduleLogCompaction(Option.empty());
         if (scheduledLogCompaction.isPresent()) {
           LOG.info("Log compaction is scheduled for timestamp {}", scheduledLogCompaction.get());
-          writeClient.logCompact(scheduledLogCompaction.get(), true);
+          if (shouldDelegateToTableServiceManager(metadataWriteConfig, ActionType.logcompaction)) {
+            LOG.info("Skipping execution of log compaction on MDT as it is delegated to table service manager.");
+          } else {
+            writeClient.logCompact(scheduledLogCompaction.get(), true);
+          }
         }
       }
     } catch (Exception e) {

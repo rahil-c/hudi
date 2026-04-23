@@ -51,7 +51,9 @@ public abstract class AppendWriteFunctions {
     }
 
     String bufferType = resolveBufferType(conf);
-    if (BufferType.DISRUPTOR.name().equalsIgnoreCase(bufferType)) {
+    if (BufferType.CONTINUOUS_SORT.name().equalsIgnoreCase(bufferType)) {
+      return new AppendWriteFunctionWithContinuousSort<>(conf, rowType);
+    } else if (BufferType.DISRUPTOR.name().equalsIgnoreCase(bufferType)) {
       return new AppendWriteFunctionWithDisruptorBufferSort<>(conf, rowType);
     } else if (BufferType.BOUNDED_IN_MEMORY.name().equalsIgnoreCase(bufferType)) {
       return new AppendWriteFunctionWithBIMBufferSort<>(conf, rowType);
@@ -97,8 +99,13 @@ public abstract class AppendWriteFunctions {
     ValidationUtils.checkArgument(StringUtils.nonEmpty(sortKeys),
         "Sort keys can't be null or empty for append write with buffer sort. "
             + "Either set write.buffer.sort.keys or ensure record key field is configured.");
-    return Arrays.stream(sortKeys.split(","))
+    List<String> sortKeyList = Arrays.stream(sortKeys.split(","))
         .map(String::trim)
+        .filter(s -> !s.isEmpty())
         .collect(Collectors.toList());
+    ValidationUtils.checkArgument(!sortKeyList.isEmpty(),
+        "Sort keys can't be empty for append write with buffer sort. "
+            + "Either set write.buffer.sort.keys or ensure record key field is configured.");
+    return sortKeyList;
   }
 }

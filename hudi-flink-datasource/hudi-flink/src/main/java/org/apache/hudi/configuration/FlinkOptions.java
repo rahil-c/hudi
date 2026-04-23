@@ -748,6 +748,16 @@ public class FlinkOptions extends HoodieConfig {
           + "The order of entire written file is not guaranteed.");
 
   @AdvancedConfig
+  public static final ConfigOption<Integer> WRITE_BUFFER_SORT_CONTINUOUS_DRAIN_SIZE = ConfigOptions
+      .key("write.buffer.sort.continuous.drain.size")
+      .intType()
+      .defaultValue(1) // default drain 1 record at a time
+      .withDescription("Number of records to drain each time the max capacity is reached when using continuous sorting. "
+          + "Default value of 1 provides smooth, incremental draining. "
+          + "Can be increased for batching if needed (e.g., 10, 100). "
+          + "Larger values reduce drain frequency but may cause latency spikes.");
+
+  @AdvancedConfig
   public static final ConfigOption<Long> WRITE_BUFFER_SIZE = ConfigOptions
       .key("write.buffer.size")
       .longType()
@@ -764,7 +774,8 @@ public class FlinkOptions extends HoodieConfig {
       .withDescription("Buffer type for append write function: "
           + "NONE (no buffer sort, default), "
           + "BOUNDED_IN_MEMORY (double buffer with async write), "
-          + "DISRUPTOR (ring buffer with async write, recommended for better throughput)");
+          + "DISRUPTOR (ring buffer with async write, recommended for better throughput), "
+          + "CONTINUOUS_SORT (TreeMap-based continuous sorting with incremental draining)");
 
   @AdvancedConfig
   public static final ConfigOption<Integer> WRITE_BUFFER_DISRUPTOR_RING_SIZE = ConfigOptions
@@ -907,14 +918,6 @@ public class FlinkOptions extends HoodieConfig {
       .stringType()
       .defaultValue(ClientIds.INIT_CLIENT_ID)
       .withDescription("Unique identifier used to distinguish different writer pipelines for concurrent mode");
-
-  // this is only for internal use
-  @AdvancedConfig
-  public static final ConfigOption<String> WRITE_OPERATOR_UID = ConfigOptions
-      .key("write.operator.uid")
-      .stringType()
-      .noDefaultValue()
-      .withDescription("The write operator uid used as the uid for hudi sink transformation.");
 
   // ------------------------------------------------------------------------
   //  Compaction Options

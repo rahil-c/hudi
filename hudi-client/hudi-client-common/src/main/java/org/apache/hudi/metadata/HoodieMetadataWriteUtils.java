@@ -22,6 +22,7 @@ import org.apache.hudi.avro.model.HoodieMetadataRecord;
 import org.apache.hudi.client.FailOnFirstErrorWriteStatus;
 import org.apache.hudi.client.transaction.lock.InProcessLockProvider;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
+import org.apache.hudi.common.config.HoodieTableServiceManagerConfig;
 import org.apache.hudi.common.config.HoodieReaderConfig;
 import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.config.RecordMergeMode;
@@ -146,15 +147,37 @@ public class HoodieMetadataWriteUtils {
       HoodieWriteConfig writeConfig, HoodieFailedWritesCleaningPolicy failedWritesCleaningPolicy,
       HoodieTableVersion datatableVersion) {
     String tableName = writeConfig.getTableName() + METADATA_TABLE_NAME_SUFFIX;
-    boolean isStreamingWritesToMetadataEnabled = writeConfig.isMetadataStreamingWritesEnabled(datatableVersion);
-    WriteConcurrencyMode concurrencyMode = isStreamingWritesToMetadataEnabled
-        ? WriteConcurrencyMode.NON_BLOCKING_CONCURRENCY_CONTROL : WriteConcurrencyMode.SINGLE_WRITER;
-    HoodieLockConfig lockConfig = isStreamingWritesToMetadataEnabled
-        ? HoodieLockConfig.newBuilder().withLockProvider(InProcessLockProvider.class).build() : HoodieLockConfig.newBuilder().build();
-    // HUDI-9407 tracks adding support for separate lock configuration for MDT. Until then, all writes to MDT will happen within data table lock.
+    WriteConcurrencyMode metadataWriteConcurrencyMode =
+        WriteConcurrencyMode.valueOf(writeConfig.getMetadataConfig().getWriteConcurrencyMode());
+    // Multi-writer on MDT is for separate table service execution; streaming writes are not compatible,
+    // so force it off to avoid confusing config mismatch errors.
+    boolean isStreamingWritesToMetadataEnabled = !metadataWriteConcurrencyMode.supportsMultiWriter()
+        && writeConfig.isMetadataStreamingWritesEnabled(datatableVersion);
 
-    if (isStreamingWritesToMetadataEnabled) {
+    WriteConcurrencyMode concurrencyMode;
+    HoodieLockConfig lockConfig;
+    if (metadataWriteConcurrencyMode.supportsMultiWriter()) {
+      checkState(metadataWriteConcurrencyMode == writeConfig.getWriteConcurrencyMode(),
+          "If multiwriter is used on metadata table, its concurrency mode (" + metadataWriteConcurrencyMode
+              + ") must match the data table concurrency mode (" + writeConfig.getWriteConcurrencyMode() + ")");
+      String lockProviderClass = writeConfig.getLockProviderClass();
+      checkState(lockProviderClass != null,
+          "Lock provider class must be set for data table to enable async executions of table services in metadata table");
+      checkState(!InProcessLockProvider.class.getCanonicalName().equals(lockProviderClass),
+          "InProcessLockProvider cannot be used for metadata table multi-writer mode as it does not support cross-process locking. "
+              + "Configure a distributed lock provider on the data table.");
+      concurrencyMode = metadataWriteConcurrencyMode;
       failedWritesCleaningPolicy = HoodieFailedWritesCleaningPolicy.LAZY;
+      lockConfig = HoodieLockConfig.deriveLockConfigForDifferentTable(lockProviderClass, writeConfig);
+    } else {
+      if (isStreamingWritesToMetadataEnabled) {
+        concurrencyMode = WriteConcurrencyMode.NON_BLOCKING_CONCURRENCY_CONTROL;
+        lockConfig = HoodieLockConfig.newBuilder().withLockProvider(InProcessLockProvider.class).build();
+        failedWritesCleaningPolicy = HoodieFailedWritesCleaningPolicy.LAZY;
+      } else {
+        concurrencyMode = WriteConcurrencyMode.SINGLE_WRITER;
+        lockConfig = HoodieLockConfig.newBuilder().build();
+      }
     }
 
     final long maxLogFileSizeBytes = writeConfig.getMetadataConfig().getMaxLogFileSize();
@@ -165,7 +188,7 @@ public class HoodieMetadataWriteUtils {
         .withAutoClean(false)
         .withCleanerParallelism(MDT_DEFAULT_PARALLELISM)
         .withFailedWritesCleaningPolicy(failedWritesCleaningPolicy)
-        .withMaxCommitsBeforeCleaning(writeConfig.getCleaningMaxCommits())
+        .withMaxCommitsBeforeCleaning(writeConfig.getCleanTriggerMaxCommits())
         .withCleanOptimizationWithLocalEngineEnabled(
             writeConfig.isCleanOptimizationWithLocalEngineEnabled());
 
@@ -261,6 +284,11 @@ public class HoodieMetadataWriteUtils {
     properties.put(HoodieTableConfig.TYPE.key(), HoodieTableType.MERGE_ON_READ.name());
     properties.put(HoodieTableConfig.RECORDKEY_FIELDS.key(), RECORD_KEY_FIELD_NAME);
     properties.put("hoodie.datasource.write.recordkey.field", RECORD_KEY_FIELD_NAME);
+    // Pass table service manager config for MDT
+    properties.put(HoodieTableServiceManagerConfig.TABLE_SERVICE_MANAGER_ENABLED.key(),
+        String.valueOf(writeConfig.getMetadataConfig().isTableServiceManagerEnabled()));
+    properties.put(HoodieTableServiceManagerConfig.TABLE_SERVICE_MANAGER_ACTIONS.key(),
+        writeConfig.getMetadataConfig().getTableServiceManagerActions());
     if (nonEmpty(writeConfig.getMetricReporterMetricsNamePrefix())) {
       properties.put(HoodieMetricsConfig.METRICS_REPORTER_PREFIX.key(),
           writeConfig.getMetricReporterMetricsNamePrefix() + METADATA_TABLE_NAME_SUFFIX);
@@ -375,7 +403,6 @@ public class HoodieMetadataWriteUtils {
    * @param enabledPartitionTypes       - Set of enabled MDT partitions to update
    * @param bloomFilterType             - Type of generated bloom filter records
    * @param bloomIndexParallelism       - Parallelism for bloom filter record generation
-   * @param enableOptimizeLogBlocksScan - flag used to enable scanInternalV2 for log blocks in data table
    * @return Map of partition to metadata records for the commit action
    */
   public static Map<String, HoodieData<HoodieRecord>> convertMetadataToRecords(HoodieEngineContext context, HoodieWriteConfig dataWriteConfig, HoodieCommitMetadata commitMetadata,

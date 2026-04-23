@@ -24,6 +24,7 @@ import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableVersion;
+import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.TimelineUtils;
@@ -138,7 +139,7 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseTableServi
     return new HoodieCompactionPlan();
   }
 
-  private Option<Pair<Integer, String>> getLatestDeltaCommitInfo() {
+  private Option<Pair<Integer, String>> getLatestDeltaCommitInfoSinceCompaction() {
     Option<Pair<HoodieTimeline, HoodieInstant>> deltaCommitsInfo =
         CompactionUtils.getCompletedDeltaCommitsSinceLatestCompaction(table.getActiveTimeline());
     if (deltaCommitsInfo.isPresent()) {
@@ -160,55 +161,69 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseTableServi
     return Option.empty();
   }
 
+  private Option<Pair<Integer, String>> getLatestDeltaCommitInfoSinceLogCompaction() {
+    HoodieActiveTimeline rawActiveTimeline = table.getMetaClient().getTableFormat()
+        .getTimelineFactory().createActiveTimeline(table.getMetaClient(), false);
+    Option<Pair<HoodieTimeline, HoodieInstant>> deltaCommitsInfo =
+        CompactionUtils.getDeltaCommitsSinceLatestCompletedLogCompaction(
+            table.getActiveTimeline().getDeltaCommitTimeline(), rawActiveTimeline);
+    if (deltaCommitsInfo.isPresent()) {
+      return Option.of(Pair.of(
+          deltaCommitsInfo.get().getLeft().countInstants(),
+          deltaCommitsInfo.get().getRight().requestedTime()));
+    }
+    return Option.empty();
+  }
+
   private boolean needCompact(CompactionTriggerStrategy compactionTriggerStrategy) {
     boolean compactable;
     // get deltaCommitsSinceLastCompaction and lastCompactionTs
-    Option<Pair<Integer, String>> latestDeltaCommitInfoOption = getLatestDeltaCommitInfo();
-    if (!latestDeltaCommitInfoOption.isPresent()) {
+    Option<Pair<Integer, String>> latestDeltaCommitInfoSinceCompactOption = getLatestDeltaCommitInfoSinceCompaction();
+    if (!latestDeltaCommitInfoSinceCompactOption.isPresent()) {
       return false;
     }
-    Pair<Integer, String> latestDeltaCommitInfo = latestDeltaCommitInfoOption.get();
+    Pair<Integer, String> latestDeltaCommitInfoSinceCompact = latestDeltaCommitInfoSinceCompactOption.get();
     if (WriteOperationType.LOG_COMPACT.equals(operationType)) {
-      return true;
+      return needLogCompact(latestDeltaCommitInfoSinceCompact);
     }
     int inlineCompactDeltaCommitMax = config.getInlineCompactDeltaCommitMax();
     int inlineCompactDeltaSecondsMax = config.getInlineCompactDeltaSecondsMax();
     switch (compactionTriggerStrategy) {
       case NUM_COMMITS:
-        compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfo.getLeft();
+        compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfoSinceCompact.getLeft();
         if (compactable) {
           log.info("The delta commits >= {}, trigger compaction scheduler.", inlineCompactDeltaCommitMax);
         }
         break;
       case NUM_COMMITS_AFTER_LAST_REQUEST:
-        latestDeltaCommitInfoOption = getLatestDeltaCommitInfoSinceLastCompactionRequest();
+        latestDeltaCommitInfoSinceCompactOption = getLatestDeltaCommitInfoSinceLastCompactionRequest();
 
-        if (!latestDeltaCommitInfoOption.isPresent()) {
+        if (!latestDeltaCommitInfoSinceCompactOption.isPresent()) {
           return false;
         }
-        latestDeltaCommitInfo = latestDeltaCommitInfoOption.get();
-        compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfo.getLeft();
+        latestDeltaCommitInfoSinceCompact = latestDeltaCommitInfoSinceCompactOption.get();
+        compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfoSinceCompact.getLeft();
         if (compactable) {
           log.info("The delta commits >= {} since the last compaction request, trigger compaction scheduler.", inlineCompactDeltaCommitMax);
         }
         break;
       case TIME_ELAPSED:
-        compactable = inlineCompactDeltaSecondsMax <= parsedToSeconds(instantTime) - parsedToSeconds(latestDeltaCommitInfo.getRight());
+        compactable = inlineCompactDeltaSecondsMax <= parsedToSeconds(instantTime) - parsedToSeconds(latestDeltaCommitInfoSinceCompact.getRight());
         if (compactable) {
           log.info("The elapsed time >={}s, trigger compaction scheduler.", inlineCompactDeltaSecondsMax);
         }
         break;
       case NUM_OR_TIME:
-        compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfo.getLeft()
-            || inlineCompactDeltaSecondsMax <= parsedToSeconds(instantTime) - parsedToSeconds(latestDeltaCommitInfo.getRight());
+        compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfoSinceCompact.getLeft()
+            || inlineCompactDeltaSecondsMax <= parsedToSeconds(instantTime) - parsedToSeconds(latestDeltaCommitInfoSinceCompact.getRight());
         if (compactable) {
           log.info("The delta commits >= {} or elapsed_time >={}s, trigger compaction scheduler.", inlineCompactDeltaCommitMax,
               inlineCompactDeltaSecondsMax);
         }
         break;
       case NUM_AND_TIME:
-        compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfo.getLeft()
-            && inlineCompactDeltaSecondsMax <= parsedToSeconds(instantTime) - parsedToSeconds(latestDeltaCommitInfo.getRight());
+        compactable = inlineCompactDeltaCommitMax <= latestDeltaCommitInfoSinceCompact.getLeft()
+            && inlineCompactDeltaSecondsMax <= parsedToSeconds(instantTime) - parsedToSeconds(latestDeltaCommitInfoSinceCompact.getRight());
         if (compactable) {
           log.info("The delta commits >= {} and elapsed_time >={}s, trigger compaction scheduler.", inlineCompactDeltaCommitMax,
               inlineCompactDeltaSecondsMax);
@@ -218,6 +233,26 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseTableServi
         throw new HoodieCompactionException("Unsupported compaction trigger strategy: " + config.getInlineCompactTriggerStrategy());
     }
     return compactable;
+  }
+
+  /**
+   * Determines whether log compaction should be scheduled based on the number of delta commits
+   * since the last compaction and the last log compaction, compared against the
+   * {@code hoodie.log.compaction.blocks.threshold} config.
+   */
+  private boolean needLogCompact(Pair<Integer, String> latestDeltaCommitInfoSinceCompact) {
+    Option<Pair<Integer, String>> latestDeltaCommitInfoSinceLogCompactOption = getLatestDeltaCommitInfoSinceLogCompaction();
+    int numDeltaCommitsSinceLatestCompaction = latestDeltaCommitInfoSinceCompact.getLeft();
+    int numDeltaCommitsSinceLatestLogCompaction = latestDeltaCommitInfoSinceLogCompactOption.isPresent()
+        ? latestDeltaCommitInfoSinceLogCompactOption.get().getLeft()
+        : 0;
+
+    int numDeltaCommitsSince = Math.min(numDeltaCommitsSinceLatestCompaction, numDeltaCommitsSinceLatestLogCompaction);
+    boolean shouldLogCompact = numDeltaCommitsSince >= config.getLogCompactionBlocksThreshold();
+    if (shouldLogCompact) {
+      log.info("There have been {} delta commits since last compaction or log compaction, triggering log compaction.", numDeltaCommitsSince);
+    }
+    return shouldLogCompact;
   }
 
   private Long parsedToSeconds(String time) {
