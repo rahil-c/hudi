@@ -90,13 +90,11 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         // Open Lance file reader
         val lanceReader = LanceFileReader.open(filePath, allocator)
 
-        // Get schema from Lance file. lance-spark drops all Arrow field metadata during
-        // StructType conversion, so re-attach Hudi's VECTOR logical-type descriptor onto
-        // fields that are encoded as Arrow FixedSizeList<Float32|Float64, dim>. This mirrors
-        // the Parquet read path, where VECTOR metadata is restored from footer entries.
-        val arrowSchema = lanceReader.schema()
-        val fileSchema = VectorConversionUtils.restoreVectorMetadataFromArrowSchema(
-          arrowSchema, LanceArrowUtils.fromArrowSchema(arrowSchema))
+        // Get schema from Lance file. lance-spark strips Hudi's VECTOR descriptor during
+        // Arrow→Spark conversion but keeps the fixed-size-list dimension on the Spark
+        // field metadata; rebuild the descriptor from that.
+        val fileSchema = VectorConversionUtils.restoreVectorMetadata(
+          LanceArrowUtils.fromArrowSchema(lanceReader.schema()))
 
         // Build type change info for schema evolution
         val (implicitTypeChangeInfo, sparkRequestSchema) =

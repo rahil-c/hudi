@@ -18,21 +18,21 @@
 
 package org.apache.hudi.io.storage;
 
-import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.schema.HoodieSchemaField;
 import org.apache.hudi.common.schema.HoodieSchemaType;
 
-import org.apache.arrow.vector.types.FloatingPointPrecision;
-import org.apache.arrow.vector.types.pojo.ArrowType;
-import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.spark.sql.catalyst.expressions.UnsafeArrayData;
 import org.apache.spark.sql.catalyst.util.ArrayData;
 import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.BinaryType$;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
@@ -271,85 +271,71 @@ public final class VectorConversionUtils {
   }
 
   /**
-   * Re-attaches {@link HoodieSchema#TYPE_METADATA_FIELD} to Spark fields that were
+   * Re-attaches {@link HoodieSchema#TYPE_METADATA_FIELD} to Spark fields that are
    * Arrow {@code FixedSizeList<Float32|Float64, dim>} in the Lance file.
-   * {@code LanceArrowUtils.fromArrowSchema} drops all field metadata, so without this
-   * step VECTOR columns written by Hudi are indistinguishable from plain arrays.
-   *
-   * <p>Only fields whose names appear in the {@link HoodieSchema#VECTOR_COLUMNS_METADATA_KEY}
-   * footer value are considered. This avoids false-positive annotation of Arrow
-   * {@code FixedSizeList<Float/Double>} columns in externally-written Lance files that
-   * weren't intended as Hudi VECTORs. Only top-level fields are inspected; nested
-   * structs are not recursed.
-   *
-   * @param arrowSchema     original Arrow schema from the Lance file
-   * @param convertedSpark  Spark schema from {@code LanceArrowUtils.fromArrowSchema}
-   *                        (same field count and order as {@code arrowSchema})
-   * @return StructType with VECTOR metadata restored on eligible fields
+   * {@code LanceArrowUtils.fromArrowSchema} strips Hudi's VECTOR descriptor during
+   * Arrow→Spark conversion but preserves the fixed-size-list dimension under the
+   * lance-spark metadata key {@link LanceArrowUtils#ARROW_FIXED_SIZE_LIST_SIZE_KEY()}.
+   * This method reads that key together with the Spark {@link ArrayType} element type
+   * to rebuild the VECTOR descriptor. The Lance footer is not consulted on read —
+   * the Hudi table schema / Arrow type carry enough information on their own.
+   * Nested structs are not recursed.
    */
-  public static StructType restoreVectorMetadataFromArrowSchema(
-          Schema arrowSchema, StructType convertedSpark) {
-    if (arrowSchema == null || convertedSpark == null) {
-      return convertedSpark;
+  public static StructType restoreVectorMetadata(StructType convertedSpark) {
+    if (convertedSpark == null) {
+      return null;
     }
-    java.util.Set<String> vectorFieldNames = HoodieSchema.parseVectorColumnNames(
-        arrowSchema.getCustomMetadata().get(HoodieSchema.VECTOR_COLUMNS_METADATA_KEY));
-    if (vectorFieldNames.isEmpty()) {
-      return convertedSpark;
-    }
-    List<Field> arrowFields = arrowSchema.getFields();
     StructField[] sparkFields = convertedSpark.fields();
     StructField[] newFields = new StructField[sparkFields.length];
+    boolean changed = false;
     for (int i = 0; i < sparkFields.length; i++) {
       StructField sf = sparkFields[i];
-      if (!vectorFieldNames.contains(sf.name())) {
-        newFields[i] = sf;
-        continue;
-      }
-      String descriptor = deriveVectorDescriptor(arrowFields.get(i));
+      String descriptor = deriveVectorDescriptor(sf);
       if (descriptor == null) {
         newFields[i] = sf;
       } else {
+        // VECTOR contract: elements are non-nullable. lance-spark's Arrow→Spark
+        // conversion produces ArrayType(containsNull=true); force containsNull=false
+        // so the field round-trips through HoodieSchema conversion.
+        DataType arrayType = DataTypes.createArrayType(
+            ((ArrayType) sf.dataType()).elementType(), false);
         newFields[i] = new StructField(
             sf.name(),
-            sf.dataType(),
+            arrayType,
             sf.nullable(),
             new MetadataBuilder()
                 .withMetadata(sf.metadata())
                 .putString(HoodieSchema.TYPE_METADATA_FIELD, descriptor)
                 .build());
+        changed = true;
       }
     }
-    return new StructType(newFields);
+    return changed ? new StructType(newFields) : convertedSpark;
   }
 
   /**
-   * Derives Hudi's VECTOR type descriptor for an Arrow field if it represents a
-   * fixed-size list of single- or double-precision floats, otherwise returns null.
+   * Derives Hudi's VECTOR type descriptor for a Spark field if lance-spark tagged it
+   * with {@link LanceArrowUtils#ARROW_FIXED_SIZE_LIST_SIZE_KEY()} and its data type is
+   * {@code ArrayType(Float|Double, containsNull=false)}; otherwise returns null.
    */
-  private static String deriveVectorDescriptor(Field arrowField) {
-    ArrowType type = arrowField.getType();
-    if (!(type instanceof ArrowType.FixedSizeList)) {
+  private static String deriveVectorDescriptor(StructField sf) {
+    String sizeKey = LanceArrowUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY();
+    if (!sf.metadata().contains(sizeKey)) {
       return null;
     }
-    int dim = ((ArrowType.FixedSizeList) type).getListSize();
-    List<Field> children = arrowField.getChildren();
-    if (children.size() != 1) {
+    if (!(sf.dataType() instanceof ArrayType)) {
       return null;
     }
-    ArrowType childType = children.get(0).getType();
-    if (!(childType instanceof ArrowType.FloatingPoint)) {
-      return null;
-    }
-    FloatingPointPrecision precision = ((ArrowType.FloatingPoint) childType).getPrecision();
+    DataType elemType = ((ArrayType) sf.dataType()).elementType();
     HoodieSchema.Vector.VectorElementType elementType;
-    if (precision == FloatingPointPrecision.SINGLE) {
+    if (DataTypes.FloatType.equals(elemType)) {
       elementType = HoodieSchema.Vector.VectorElementType.FLOAT;
-    } else if (precision == FloatingPointPrecision.DOUBLE) {
+    } else if (DataTypes.DoubleType.equals(elemType)) {
       elementType = HoodieSchema.Vector.VectorElementType.DOUBLE;
     } else {
       return null;
     }
+    int dim = (int) sf.metadata().getLong(sizeKey);
     return HoodieSchema.createVector(dim, elementType).toTypeDescriptor();
   }
 }
