@@ -38,10 +38,10 @@ import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 
 import java.nio.ByteBuffer;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
@@ -67,7 +67,7 @@ public final class VectorConversionUtils {
    * @return map from field index to Vector schema; empty map if schema is null or has no vectors
    */
   public static Map<Integer, HoodieSchema.Vector> detectVectorColumns(HoodieSchema schema) {
-    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new HashMap<>();
+    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new LinkedHashMap<>();
     if (schema == null) {
       return vectorColumnInfo;
     }
@@ -94,17 +94,11 @@ public final class VectorConversionUtils {
     if (schema == null) {
       return "";
     }
-    StructField[] fields = schema.fields();
     Map<Integer, HoodieSchema.Vector> detected = detectVectorColumnsFromMetadata(schema);
-    // Walk fields in ordinal order (not detected.entrySet()) so the footer value
-    // is emitted in stable, schema-ordered form. detectVectorColumnsFromMetadata
-    // returns a plain HashMap, whose iteration order is unspecified.
+    StructField[] fields = schema.fields();
     LinkedHashMap<String, HoodieSchema.Vector> named = new LinkedHashMap<>();
-    for (int i = 0; i < fields.length; i++) {
-      HoodieSchema.Vector vec = detected.get(i);
-      if (vec != null) {
-        named.put(fields[i].name(), vec);
-      }
+    for (Map.Entry<Integer, HoodieSchema.Vector> entry : detected.entrySet()) {
+      named.put(fields[entry.getKey()].name(), entry.getValue());
     }
     return HoodieSchema.serializeVectorColumnsMetadata(named);
   }
@@ -118,7 +112,8 @@ public final class VectorConversionUtils {
    * @return map from field index to Vector schema; empty map if no vectors found
    */
   public static Map<Integer, HoodieSchema.Vector> detectVectorColumnsFromMetadata(StructType schema) {
-    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new HashMap<>();
+    // Use LinkedHashMap so callers iterate in field-ordinal order (stable across JDKs).
+    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new LinkedHashMap<>();
     if (schema == null) {
       return vectorColumnInfo;
     }
@@ -276,21 +271,28 @@ public final class VectorConversionUtils {
    * {@code LanceArrowUtils.fromArrowSchema} strips Hudi's VECTOR descriptor during
    * Arrow→Spark conversion but preserves the fixed-size-list dimension under the
    * lance-spark metadata key {@link LanceArrowUtils#ARROW_FIXED_SIZE_LIST_SIZE_KEY()}.
-   * This method reads that key together with the Spark {@link ArrayType} element type
-   * to rebuild the VECTOR descriptor. The Lance footer is not consulted on read —
-   * the Hudi table schema / Arrow type carry enough information on their own.
-   * Nested structs are not recursed.
+   *
+   * <p>A FixedSizeList alone does not prove the column is a Hudi VECTOR — a
+   * non-Hudi Lance file could contain one. Callers must pass {@code vectorColumnNames}
+   * (the set parsed from the {@link HoodieSchema#VECTOR_COLUMNS_METADATA_KEY} footer
+   * entry) so that only fields known to be Hudi VECTORs are restored. Pass an empty
+   * set to skip the restore entirely.
+   *
+   * <p>Nested structs are not recursed.
    */
-  public static StructType restoreVectorMetadata(StructType convertedSpark) {
+  public static StructType restoreVectorMetadata(StructType convertedSpark, Set<String> vectorColumnNames) {
     if (convertedSpark == null) {
       return null;
+    }
+    if (vectorColumnNames == null || vectorColumnNames.isEmpty()) {
+      return convertedSpark;
     }
     StructField[] sparkFields = convertedSpark.fields();
     StructField[] newFields = new StructField[sparkFields.length];
     boolean changed = false;
     for (int i = 0; i < sparkFields.length; i++) {
       StructField sf = sparkFields[i];
-      String descriptor = deriveVectorDescriptor(sf);
+      String descriptor = vectorColumnNames.contains(sf.name()) ? deriveVectorDescriptor(sf) : null;
       if (descriptor == null) {
         newFields[i] = sf;
       } else {

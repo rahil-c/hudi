@@ -790,14 +790,13 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
   }
 
   /**
-   * Consolidated vector round-trip test. Covers, parameterized over COW + MOR,
-   * what used to be separate float-only / double-only / MOR-update-path tests:
-   *  - two non-null VECTOR columns of different element types (FLOAT, DOUBLE) and dims
-   *  - insert then upsert exercises the MOR log-merge path on MOR (COW rewrite on COW)
+   * Vector round-trip test parameterized over COW + MOR. Covers two non-null VECTOR
+   * columns of different element types (FLOAT, DOUBLE) and dimensions, and exercises
+   * the upsert path (MOR log-merge on MOR, file rewrite on COW).
    *
-   * Nullable-vector coverage lives in {@code testNullableVectorRoundTrip} because
+   * <p>Nullable-vector coverage lives in {@code testNullableVectorRoundTrip} because
    * merging a null-valued vector through the upsert path currently errors out in
-   * the Lance reader; that is tracked as a separate follow-up.
+   * the Lance reader; tracked as a separate follow-up.
    */
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieTableType])

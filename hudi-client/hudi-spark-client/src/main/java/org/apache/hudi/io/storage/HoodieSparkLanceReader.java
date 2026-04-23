@@ -202,8 +202,11 @@ public class HoodieSparkLanceReader implements HoodieSparkFileReader {
   @Override
   public HoodieSchema getSchema() {
     try {
+      Map<String, String> customMetadata = arrowSchema.getCustomMetadata();
+      Set<String> vectorColumnNames = HoodieSchema.parseVectorColumnNames(
+          customMetadata == null ? null : customMetadata.get(HoodieSchema.VECTOR_COLUMNS_METADATA_KEY));
       StructType structType = VectorConversionUtils.restoreVectorMetadata(
-          LanceArrowUtils.fromArrowSchema(arrowSchema));
+          LanceArrowUtils.fromArrowSchema(arrowSchema), vectorColumnNames);
       return HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(structType, "record", "", false);
     } catch (Exception e) {
       throw new HoodieException("Failed to read schema from Lance file: " + path, e);

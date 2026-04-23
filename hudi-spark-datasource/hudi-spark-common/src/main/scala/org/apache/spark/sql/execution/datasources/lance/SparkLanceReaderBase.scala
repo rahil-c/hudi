@@ -20,6 +20,7 @@
 package org.apache.spark.sql.execution.datasources.lance
 
 import org.apache.hudi.SparkAdapterSupport.sparkAdapter
+import org.apache.hudi.common.schema.HoodieSchema
 import org.apache.hudi.common.util
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.memory.HoodieArrowAllocator
@@ -92,9 +93,14 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
 
         // Get schema from Lance file. lance-spark strips Hudi's VECTOR descriptor during
         // Arrow→Spark conversion but keeps the fixed-size-list dimension on the Spark
-        // field metadata; rebuild the descriptor from that.
+        // field metadata; rebuild the descriptor from that, cross-referenced with the
+        // `hoodie.vector.columns` footer entry so non-Hudi fixed-size-lists aren't mis-tagged.
+        val arrowSchema = lanceReader.schema()
+        val customMetadata = arrowSchema.getCustomMetadata
+        val vectorColumnNames = HoodieSchema.parseVectorColumnNames(
+          if (customMetadata == null) null else customMetadata.get(HoodieSchema.VECTOR_COLUMNS_METADATA_KEY))
         val fileSchema = VectorConversionUtils.restoreVectorMetadata(
-          LanceArrowUtils.fromArrowSchema(lanceReader.schema()))
+          LanceArrowUtils.fromArrowSchema(arrowSchema), vectorColumnNames)
 
         // Build type change info for schema evolution
         val (implicitTypeChangeInfo, sparkRequestSchema) =

@@ -43,6 +43,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -283,7 +284,7 @@ public class HoodieSchema implements Serializable {
     if (footerValue == null || footerValue.isEmpty()) {
       return Collections.emptySet();
     }
-    java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+    LinkedHashSet<String> names = new LinkedHashSet<>();
     int depth = 0;
     int start = 0;
     for (int i = 0; i < footerValue.length(); i++) {

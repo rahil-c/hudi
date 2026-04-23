@@ -127,8 +127,8 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
                                  Option<BloomFilter> bloomFilterOpt,
                                  long maxFileSize) {
     super(file, DEFAULT_BATCH_SIZE, bloomFilterOpt.map(HoodieBloomFilterRowWriteSupport::new));
-    this.sparkSchema = sparkSchema;
-    this.arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, DEFAULT_TIMEZONE, true);
+    this.sparkSchema = enrichSparkSchemaForLanceVectors(sparkSchema);
+    this.arrowSchema = LanceArrowUtils.toArrowSchema(this.sparkSchema, DEFAULT_TIMEZONE, true);
     this.fileName = UTF8String.fromString(file.getName());
     this.instantTime = UTF8String.fromString(instantTime);
     this.populateMetaFields = populateMetaFields;
@@ -147,9 +147,11 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
    * Arrow {@code FixedSizeList<elem, dim>} (Lance's vector column encoding) and
    * {@link LanceArrowWriter} selects its fixed-size-list field writer when serializing values.
    *
-   * <p>Lance-spark keys vector columns off the {@code <column>.arrow.fixed-size-list.size}
-   * property (see Lance Spark CREATE TABLE docs); we derive it from the VECTOR dimension so
-   * users don't have to set it alongside the Hudi descriptor.
+   * <p>Lance-spark keys vector columns off the per-field
+   * {@link LanceArrowUtils#ARROW_FIXED_SIZE_LIST_SIZE_KEY()} (literal:
+   * {@code arrow.fixed-size-list.size}) metadata entry (see Lance Spark CREATE TABLE docs);
+   * we derive it from the VECTOR dimension so users don't have to set it alongside the
+   * Hudi descriptor.
    *
    * <p>Currently only FLOAT and DOUBLE element vectors are supported on Lance, matching
    * lance-spark's {@code VectorUtils.shouldBeFixedSizeList}. Other element types would
