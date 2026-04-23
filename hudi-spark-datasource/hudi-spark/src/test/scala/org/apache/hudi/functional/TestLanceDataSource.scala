@@ -31,9 +31,9 @@ import org.apache.hudi.io.storage.HoodieSparkLanceReader
 import org.apache.hudi.storage.StoragePath
 import org.apache.hudi.testutils.HoodieSparkClientTestBase
 
-import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.types.pojo.ArrowType
+import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.types._
 import org.junit.jupiter.api.{AfterEach, BeforeEach}
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotNull, assertTrue}
