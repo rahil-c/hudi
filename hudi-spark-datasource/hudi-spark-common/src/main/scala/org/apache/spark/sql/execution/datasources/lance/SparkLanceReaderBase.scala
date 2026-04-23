@@ -118,9 +118,11 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           java.util.Collections.emptySet[String]()
         }
 
-        // Widen nullability: Lance can return non-null parent structs whose leaf children
-        // are null (e.g. a BLOB's `reference` struct is non-null with all-null members).
-        val iteratorSchema = forceAllFieldsNullable(requestSchema)
+        // Widen nullability only for BLOB subtrees: Lance can return non-null parent structs
+        // whose leaf children are null (e.g. a BLOB's `reference` struct is non-null with
+        // all-null members). Non-blob fields keep their original nullability so downstream
+        // contracts aren't silently loosened.
+        val iteratorSchema = widenBlobSubtreeNullability(requestSchema)
 
         val columnNames = if (iteratorSchema.nonEmpty) {
           iteratorSchema.fieldNames.toList.asJava
@@ -214,11 +216,18 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
   }
 
   /**
-   * Recursively widens nullability to true on every field of a Spark schema,
-   * including children of nested structs, arrays, and maps.
+   * Widens nullability to true only within BLOB subtrees: the BLOB field itself and all of its
+   * descendants. Non-blob fields keep their original nullability so downstream non-null
+   * contracts aren't silently loosened.
    */
-  private def forceAllFieldsNullable(schema: StructType): StructType = {
-    StructType(schema.fields.map(forceFieldNullable))
+  private def widenBlobSubtreeNullability(schema: StructType): StructType = {
+    StructType(schema.fields.map { f =>
+      if (BlobLanceSchemaSupport.isBlobField(f)) {
+        f.copy(nullable = true, dataType = forceTypeNullable(f.dataType))
+      } else {
+        f
+      }
+    })
   }
 
   private def forceFieldNullable(field: StructField): StructField =

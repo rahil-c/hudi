@@ -808,18 +808,16 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
   }
 
   /**
-   * Scope note: this test only verifies the INLINE→OUT_OF_LINE descriptor
-   * rewrite produces the right row shape (type=OUT_OF_LINE, data=null,
-   * reference points at a .lance file with length>0). It does NOT assert
-   * byte-level round-trip via read_blob() — Tim's original BLOB PR
-   * (#18098) also did not validate INLINE end-to-end through Parquet, so
-   * the Lance side mirrors that scope. Byte round-trip for INLINE would
-   * require verifying Lance's DESCRIPTOR position is pread-able, which is
-   * the responsibility of a separate INLINE-support PR.
+   * Scope-limited: verifies the INLINE→OUT_OF_LINE descriptor rewrite produces the right row
+   * shape only (type=OUT_OF_LINE, data=null, reference points at a .lance file with length>0).
+   * Does NOT assert byte-level round-trip via read_blob() — Tim's original BLOB PR (#18098) also
+   * did not validate INLINE end-to-end through Parquet, so the Lance side mirrors that scope.
+   * Byte round-trip for INLINE would require verifying Lance's DESCRIPTOR position is pread-able
+   * and is the responsibility of a separate INLINE-support PR.
    */
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieTableType])
-  def testBlobInline(tableType: HoodieTableType): Unit = {
+  def testBlobInlineDescriptorShape(tableType: HoodieTableType): Unit = {
     val tableName = s"test_lance_blob_inline_${tableType.name().toLowerCase}"
     val tablePath = s"$basePath/$tableName"
 
