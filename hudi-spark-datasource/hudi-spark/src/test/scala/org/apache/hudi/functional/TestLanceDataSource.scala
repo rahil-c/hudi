@@ -32,9 +32,9 @@ import org.apache.hudi.io.storage.HoodieSparkLanceReader
 import org.apache.hudi.storage.StoragePath
 import org.apache.hudi.testutils.HoodieSparkClientTestBase
 
-import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.types.pojo.ArrowType
+import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.types.{BlobType, IntegerType, StructField, StructType}
 import org.junit.jupiter.api.{AfterEach, BeforeEach}
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotNull, assertTrue}
@@ -43,8 +43,8 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 import org.lance.file.LanceFileReader
 
-import java.util.concurrent.atomic.AtomicInteger
 import java.nio.file.{Files, Paths}
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.stream.Collectors
 
 import scala.collection.JavaConverters._
