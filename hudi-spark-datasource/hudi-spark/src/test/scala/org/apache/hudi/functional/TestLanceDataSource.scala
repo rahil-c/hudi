@@ -37,7 +37,7 @@ import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.types.{BlobType, IntegerType, StructField, StructType}
 import org.junit.jupiter.api.{AfterEach, BeforeEach}
-import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotNull, assertTrue}
+import org.junit.jupiter.api.Assertions.{assertArrayEquals, assertEquals, assertFalse, assertNotNull, assertTrue}
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
@@ -808,25 +808,26 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
   }
 
   /**
-   * Scope-limited: verifies the INLINE→OUT_OF_LINE descriptor rewrite produces the right row
-   * shape only (type=OUT_OF_LINE, data=null, reference points at a .lance file with length>0).
-   * Does NOT assert byte-level round-trip via read_blob() — that belongs in a separate
-   * INLINE-support PR which verifies Lance's DESCRIPTOR position is pread-able.
+   * INLINE BLOB round-trip on Lance: writes rows with inline bytes, reads them back through
+   * Lance's CONTENT mode, and asserts the bytes survive both the raw `data` column and
+   * `read_blob(payload)`. Also verifies the Lance file activated blob encoding on write.
    */
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieTableType])
-  def testBlobInlineDescriptorShape(tableType: HoodieTableType): Unit = {
+  def testBlobInlineRoundTrip(tableType: HoodieTableType): Unit = {
     val tableName = s"test_lance_blob_inline_${tableType.name().toLowerCase}"
     val tablePath = s"$basePath/$tableName"
 
     // Deterministic payloads: row i -> bytes of length 2048 with pattern (i+j) % 256.
     val payloadLen = 2048
     val numRows = 5
+    val expectedPayloads: Seq[Array[Byte]] = (0 until numRows).map { i =>
+      (0 until payloadLen).map(j => ((i + j) % 256).toByte).toArray
+    }
     val sparkSess = spark
     import sparkSess.implicits._
-    val baseDf = (0 until numRows).map { i =>
-      (i, (0 until payloadLen).map(j => ((i + j) % 256).toByte).toArray)
-    }.toDF("id", "bytes")
+    val baseDf = expectedPayloads.zipWithIndex.map { case (bytes, i) => (i, bytes) }
+      .toDF("id", "bytes")
     val rawDf = baseDf.select($"id",
       BlobTestHelpers.inlineBlobStructCol("payload", $"bytes"))
     // Coerce the helper-built schema to the canonical BLOB schema so
@@ -842,12 +843,10 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
       operation = Some("bulk_insert"),
       extraOptions = Map(PRECOMBINE_FIELD.key() -> "id"))
 
-    // Verify Lance files actually tag the nested `data` field with blob encoding.
+    // Writer-side: prove the bytes actually routed through Lance's dedicated blob writer.
     assertLanceBlobEncoding(tablePath)
 
-    // Read back the BLOB column. Lance returns blob descriptors (position+size)
-    // which Hudi maps into OUT_OF_LINE reference structs. The actual bytes are
-    // NOT materialized here; they are deferred to read_blob() / BatchedBlobReader.
+    // Reader-side: in CONTENT mode the INLINE bytes come back directly in `data`.
     val readRows = spark.read.format("hudi").load(tablePath)
       .select($"id", $"payload")
       .orderBy($"id")
@@ -856,18 +855,32 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
     readRows.zipWithIndex.foreach { case (row, i) =>
       assertEquals(i, row.getInt(row.fieldIndex("id")))
       val payload = row.getStruct(row.fieldIndex("payload"))
-      assertEquals(HoodieSchema.Blob.OUT_OF_LINE,
+      assertEquals(HoodieSchema.Blob.INLINE,
         payload.getString(payload.fieldIndex(HoodieSchema.Blob.TYPE)))
-      // data should be null (not materialized)
-      assertTrue(payload.isNullAt(payload.fieldIndex(HoodieSchema.Blob.INLINE_DATA_FIELD)),
-        "data should be null for OUT_OF_LINE blob")
-      // reference should be populated with lance file path and offset/length
-      val ref = payload.getStruct(payload.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE))
-      assertNotNull(ref, "reference struct should be non-null")
-      val extPath = ref.getString(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
-      assertTrue(extPath.endsWith(".lance"), s"external_path should be a .lance file, got: $extPath")
-      assertTrue(ref.getLong(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH)) > 0,
-        "length should be > 0")
+      val data = payload.getAs[Array[Byte]](HoodieSchema.Blob.INLINE_DATA_FIELD)
+      assertArrayEquals(expectedPayloads(i), data,
+        s"Inline data bytes mismatch for id=$i")
+      // Lance materializes the `reference` struct as non-null with all-null leaves for INLINE
+      // rows (rather than a null struct). The canonical INLINE signal is `type`; downstream
+      // read_blob() dispatches on `type`, so the reference shape does not affect correctness.
+      val refIdx = payload.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE)
+      if (!payload.isNullAt(refIdx)) {
+        val ref = payload.getStruct(refIdx)
+        assertTrue(ref.isNullAt(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH)),
+          s"reference.external_path should be null for INLINE blob (id=$i)")
+      }
+    }
+
+    // read_blob() resolution path: INLINE payloads resolve to the same bytes.
+    val viewName = s"${tableName}_view"
+    spark.read.format("hudi").load(tablePath).createOrReplaceTempView(viewName)
+    val materialized = spark.sql(
+      s"SELECT id, read_blob(payload) AS bytes FROM $viewName ORDER BY id").collect()
+    assertEquals(numRows, materialized.length)
+    materialized.zipWithIndex.foreach { case (row, i) =>
+      val bytes = row.getAs[Array[Byte]]("bytes")
+      assertArrayEquals(expectedPayloads(i), bytes,
+        s"read_blob() bytes mismatch for id=$i")
     }
   }
 

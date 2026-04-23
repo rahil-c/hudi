@@ -20,6 +20,7 @@
 package org.apache.spark.sql.execution.datasources.lance
 
 import org.apache.hudi.SparkAdapterSupport.sparkAdapter
+import org.apache.hudi.common.config.HoodieReaderConfig
 import org.apache.hudi.common.util
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.memory.HoodieArrowAllocator
@@ -103,25 +104,11 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         val requestSchema =
           SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema)
 
-        // Identify blob column names. When present we open Lance in DESCRIPTOR mode and let
-        // LanceRecordIterator synthesize the Hudi OUT_OF_LINE reference rows directly from
-        // lance-spark's BlobStructAccessor (public API). No descriptor-shape schema is exposed
-        // to the projection.
-        val hasBlobColumns = requestSchema.fields.exists(BlobLanceSchemaSupport.isBlobField)
-        val blobFieldNameSet: java.util.Set[String] = if (hasBlobColumns) {
-          val names = new java.util.HashSet[String]()
-          requestSchema.fields.foreach { f =>
-            if (BlobLanceSchemaSupport.isBlobField(f)) names.add(f.name)
-          }
-          names
-        } else {
-          java.util.Collections.emptySet[String]()
-        }
-
-        // Widen nullability only for BLOB subtrees: Lance can return non-null parent structs
-        // whose leaf children are null (e.g. a BLOB's `reference` struct is non-null with
-        // all-null members). Non-blob fields keep their original nullability so downstream
-        // contracts aren't silently loosened.
+        // Widen nullability only inside BLOB subtrees: Lance materializes a nested `reference`
+        // struct as non-null with all-null children for INLINE rows (and symmetrically a
+        // non-null `data` placeholder for OUT_OF_LINE rows). The codegen UnsafeProjection would
+        // NPE writing those null leaves into slots declared non-nullable by the Hudi BLOB
+        // schema. Scoping the widening to BLOB subtrees keeps non-BLOB contracts intact.
         val iteratorSchema = widenBlobSubtreeNullability(requestSchema)
 
         val columnNames = if (iteratorSchema.nonEmpty) {
@@ -131,27 +118,19 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           null
         }
 
-        // Read data with column projection. Use DESCRIPTOR mode for blob columns so the
-        // iterator can read {position, size} via BlobStructAccessor without materializing
-        // the bytes; the iterator maps these into a Hudi OUT_OF_LINE reference row.
-        val readOpts = if (hasBlobColumns) {
-          FileReadOptions.builder().blobReadMode(BlobReadMode.DESCRIPTOR).build()
-        } else {
-          null
-        }
-        val arrowReader = if (readOpts != null) {
-          lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts)
-        } else {
-          lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE)
-        }
+        // INLINE BLOB read mode. Today only CONTENT is valid, so the `data` column materializes
+        // as raw Binary/LargeBinary bytes. Non-blob Lance columns ignore the option entirely.
+        val readOpts = FileReadOptions.builder()
+          .blobReadMode(resolveBlobReadMode(storageConf))
+          .build()
+        val arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts)
 
         lanceIterator = new LanceRecordIterator(
           allocator,
           lanceReader,
           arrowReader,
           iteratorSchema,
-          filePath,
-          blobFieldNameSet
+          filePath
         )
 
         // Register cleanup listener
@@ -159,19 +138,13 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           ctx.addTaskCompletionListener[Unit](_ => lanceIterator.close())
         }
 
-        // Iterator already emits rows in the Hudi OUT_OF_LINE shape; feed them straight into
-        // the padding + cast projections below.
         val baseIter: Iterator[InternalRow] = lanceIterator.asScala
-
-        // iteratorSchema already matches forceAllFieldsNullable(requestSchema); reuse it
-        // for the padding/cast projections.
-        val nullableRequestSchema = iteratorSchema
 
         // Create the following projections for schema evolution:
         // 1. Padding projection: add NULL for missing columns
         // 2. Casting projection: handle type conversions
         val schemaUtils = sparkAdapter.getSchemaUtils
-        val paddingProj = SparkSchemaTransformUtils.generateNullPaddingProjection(nullableRequestSchema, requiredSchema)
+        val paddingProj = SparkSchemaTransformUtils.generateNullPaddingProjection(iteratorSchema, requiredSchema)
         val castProj = SparkSchemaTransformUtils.generateUnsafeProjection(
           schemaUtils.toAttributes(requiredSchema),
           Some(SQLConf.get.sessionLocalTimeZone),
@@ -216,9 +189,29 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
   }
 
   /**
+   * Resolve the Lance blob read mode from {@code hoodie.read.blob.inline.mode}.
+   * Only CONTENT is valid today; unknown values fail fast so a future DESCRIPTOR rollout
+   * doesn't silently fall back to CONTENT on older readers.
+   */
+  private def resolveBlobReadMode(storageConf: StorageConfiguration[Configuration]): BlobReadMode = {
+    val configured = storageConf.unwrap()
+      .get(HoodieReaderConfig.BLOB_INLINE_READ_MODE.key(),
+        HoodieReaderConfig.BLOB_INLINE_READ_MODE.defaultValue())
+    configured.toUpperCase match {
+      case HoodieReaderConfig.BLOB_INLINE_READ_MODE_CONTENT => BlobReadMode.CONTENT
+      case other =>
+        throw new IllegalArgumentException(
+          s"Unsupported value '$other' for ${HoodieReaderConfig.BLOB_INLINE_READ_MODE.key()}; " +
+            s"expected ${HoodieReaderConfig.BLOB_INLINE_READ_MODE_CONTENT}")
+    }
+  }
+
+  /**
    * Widens nullability to true only within BLOB subtrees: the BLOB field itself and all of its
-   * descendants. Non-blob fields keep their original nullability so downstream non-null
-   * contracts aren't silently loosened.
+   * descendants. Lance can materialize a BLOB's nested struct (e.g. `reference` for an INLINE
+   * row) as non-null with all-null leaves, which the downstream codegen projection would NPE
+   * on if the Hudi schema declares those leaves non-nullable. Non-blob fields keep their
+   * original nullability so their contracts aren't silently loosened.
    */
   private def widenBlobSubtreeNullability(schema: StructType): StructType = {
     StructType(schema.fields.map { f =>

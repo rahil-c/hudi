@@ -103,4 +103,15 @@ public class HoodieReaderConfig extends HoodieConfig {
           + "from the cache after this duration to prevent memory leaks. "
           + "Only effective when hfile.block.cache.enabled is true.");
 
+  public static final String BLOB_INLINE_READ_MODE_CONTENT = "CONTENT";
+  public static final ConfigProperty<String> BLOB_INLINE_READ_MODE = ConfigProperty
+      .key("hoodie.read.blob.inline.mode")
+      .defaultValue(BLOB_INLINE_READ_MODE_CONTENT)
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withValidValues(BLOB_INLINE_READ_MODE_CONTENT)
+      .withDocumentation("How Hudi interprets INLINE BLOB values on read. "
+          + "CONTENT returns the raw inline bytes (default). "
+          + "A future DESCRIPTOR mode will return a {position, size} pointer instead of materializing "
+          + "the bytes, so callers can defer the byte read.");
 }
