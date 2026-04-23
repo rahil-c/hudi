@@ -42,6 +42,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -215,40 +217,98 @@ public class HoodieSchema implements Serializable {
   public static final String PARQUET_ARRAY_AVRO = "." + ARRAY_LIST_ELEMENT;
 
   /**
-   * Parquet file-footer metadata key under which VECTOR column names and type descriptors
+   * Base-file footer metadata key under which VECTOR column names and type descriptors
    * are recorded. The value is a comma-separated list of {@code colName:VECTOR(dim[,elemType])}
    * entries, e.g. {@code "embedding:VECTOR(128),tags:VECTOR(64,INT8)"}.
    *
-   * <p>Stored as file-level key-value metadata (Parquet footer) so that any reader can
-   * identify vector columns without needing the Hudi schema store.
+   * <p>Stored as file-level key-value metadata (Parquet footer, Lance schema metadata)
+   * so that any reader can identify vector columns without needing the Hudi schema store.
    */
-  public static final String PARQUET_VECTOR_COLUMNS_METADATA_KEY = "hoodie.vector.columns";
+  public static final String VECTOR_COLUMNS_METADATA_KEY = "hoodie.vector.columns";
 
   /**
-   * Builds the value string for {@link #PARQUET_VECTOR_COLUMNS_METADATA_KEY}.
+   * Serializes a name-to-Vector map into the comma-separated
+   * {@code colName:VECTOR(dim[,elemType])} format used for {@link #VECTOR_COLUMNS_METADATA_KEY}.
+   *
+   * <p>This is the single canonical serializer — all format-specific code (Parquet, Lance)
+   * should build the map from their respective schema representation and delegate here.
+   *
+   * @param vectorColumns ordered map of field name to Vector descriptor (iteration order is preserved)
+   * @return comma-separated descriptor list, or empty string if the map is null or empty
+   */
+  public static String serializeVectorColumnsMetadata(java.util.Map<String, Vector> vectorColumns) {
+    if (vectorColumns == null || vectorColumns.isEmpty()) {
+      return "";
+    }
+    StringBuilder sb = new StringBuilder();
+    for (java.util.Map.Entry<String, Vector> entry : vectorColumns.entrySet()) {
+      if (sb.length() > 0) {
+        sb.append(',');
+      }
+      sb.append(entry.getKey()).append(':').append(entry.getValue().toTypeDescriptor());
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Builds the value string for {@link #VECTOR_COLUMNS_METADATA_KEY} from a {@link HoodieSchema}.
    *
    * @param schema a HoodieSchema of type RECORD (or null)
    * @return comma-separated {@code colName:VECTOR(dim[,elemType])} entries, or empty string
    *         if the schema is null or has no VECTOR columns
+   * @see #serializeVectorColumnsMetadata(java.util.Map)
    */
   public static String buildVectorColumnsMetadataValue(HoodieSchema schema) {
     if (schema == null || schema.isSchemaNull()) {
       return "";
     }
-    List<HoodieSchemaField> fields = schema.getFields();
-    StringBuilder sb = new StringBuilder();
-    for (HoodieSchemaField field : fields) {
+    LinkedHashMap<String, Vector> vectorColumns = new LinkedHashMap<>();
+    for (HoodieSchemaField field : schema.getFields()) {
       HoodieSchema fieldSchema = field.schema().getNonNullType();
       if (fieldSchema.getType() == HoodieSchemaType.VECTOR) {
-        Vector vectorSchema = (Vector) fieldSchema;
-        if (sb.length() > 0) {
-          sb.append(',');
-        }
-        sb.append(field.name()).append(':').append(vectorSchema.toTypeDescriptor());
+        vectorColumns.put(field.name(), (Vector) fieldSchema);
       }
     }
-    return sb.toString();
+    return serializeVectorColumnsMetadata(vectorColumns);
   }
+
+  /**
+   * Parses the comma-separated {@link #VECTOR_COLUMNS_METADATA_KEY} footer value and
+   * returns the set of vector column field names. Commas inside parentheses (e.g. inside
+   * the VECTOR descriptor {@code VECTOR(128, DOUBLE)}) are not treated as separators.
+   *
+   * @param footerValue raw value from the file footer, or null / empty
+   * @return set of field names (preserves insertion order), or empty set if input is null / empty
+   */
+  public static Set<String> parseVectorColumnNames(String footerValue) {
+    if (footerValue == null || footerValue.isEmpty()) {
+      return Collections.emptySet();
+    }
+    LinkedHashSet<String> names = new LinkedHashSet<>();
+    int depth = 0;
+    int start = 0;
+    for (int i = 0; i < footerValue.length(); i++) {
+      char c = footerValue.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+      } else if (c == ',' && depth == 0) {
+        addVectorColumnName(footerValue, start, i, names);
+        start = i + 1;
+      }
+    }
+    addVectorColumnName(footerValue, start, footerValue.length(), names);
+    return names;
+  }
+
+  private static void addVectorColumnName(String s, int start, int end, Set<String> names) {
+    int colon = s.indexOf(':', start);
+    if (colon > start && colon < end) {
+      names.add(s.substring(start, colon).trim());
+    }
+  }
+
 
   private Schema avroSchema;
   private HoodieSchemaType type;

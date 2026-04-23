@@ -322,7 +322,7 @@ public class HoodieRowParquetWriteSupport extends WriteSupport<InternalRow> {
     }
     String vectorMeta = HoodieSchema.buildVectorColumnsMetadataValue(schema);
     if (!vectorMeta.isEmpty()) {
-      metadata.put(HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY, vectorMeta);
+      metadata.put(HoodieSchema.VECTOR_COLUMNS_METADATA_KEY, vectorMeta);
     }
     Configuration configurationCopy = new Configuration(configuration);
     configurationCopy.set(AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE, Boolean.toString(writeLegacyListFormat));

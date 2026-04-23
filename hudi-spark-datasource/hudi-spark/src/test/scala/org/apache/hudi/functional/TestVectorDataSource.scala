@@ -770,10 +770,10 @@ class TestVectorDataSource extends HoodieSparkClientTestBase {
     val reader = ParquetFileReader.open(HadoopInputFile.fromPath(parquetFiles.head.getPath, conf))
     try {
       val footerMeta = reader.getFileMetaData.getKeyValueMetaData.asScala
-      assertTrue(footerMeta.contains(HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY),
-        s"Footer should contain ${HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY}, got keys: ${footerMeta.keys.mkString(", ")}")
+      assertTrue(footerMeta.contains(HoodieSchema.VECTOR_COLUMNS_METADATA_KEY),
+        s"Footer should contain ${HoodieSchema.VECTOR_COLUMNS_METADATA_KEY}, got keys: ${footerMeta.keys.mkString(", ")}")
 
-      val value = footerMeta(HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY)
+      val value = footerMeta(HoodieSchema.VECTOR_COLUMNS_METADATA_KEY)
       assertTrue(value.contains("embedding"), s"Footer value should reference 'embedding' column, got: $value")
       assertTrue(value.contains("VECTOR"), s"Footer value should contain 'VECTOR' descriptor, got: $value")
     } finally {
