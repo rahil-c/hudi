@@ -191,9 +191,11 @@ public class HoodieSparkLanceReader implements HoodieSparkFileReader {
         columnNames.add(field.name());
       }
 
-      // CONTENT mode is the default INLINE BLOB read mode everywhere: blob-encoded columns
-      // materialize as raw bytes, so rows returned already match Hudi's BLOB shape
-      // ({type, data, reference}). Non-blob columns are unaffected by this option.
+      // Compaction/merge/log-replay paths go through this reader and require actual bytes
+      // to rewrite into merged output, so CONTENT is pinned here regardless of
+      // `hoodie.read.blob.inline.mode` — a future DESCRIPTOR value would return
+      // {position, size} pointers that these paths cannot rewrite. The datasource read
+      // path (SparkLanceReaderBase) is where the user-facing config is honored.
       FileReadOptions readOpts = FileReadOptions.builder().blobReadMode(BlobReadMode.CONTENT).build();
       ArrowReader arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts);
 
