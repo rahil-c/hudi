@@ -63,13 +63,10 @@ import java.util.Set;
  * <p>Records are converted to {@link UnsafeRow} using {@link UnsafeProjection} for efficient
  * serialization and memory management.
  *
- * <p><b>BLOB handling.</b> When {@code blobFieldNames} is non-empty, the iterator assumes Lance
- * was opened in {@code BlobReadMode.DESCRIPTOR} and performs the descriptor → Hudi OUT_OF_LINE
- * transformation in-line, so the {@link UnsafeProjection} only ever sees the final Hudi shape
- * (i.e. {@code data: Binary = null} + {@code reference: {external_path, offset, length, managed}}).
- * Reading the Lance {@code position}/{@code size} descriptor goes through lance-spark's public
- * {@link BlobStructAccessor#getPosition}/{@link BlobStructAccessor#getSize} API — no reflection
- * on Arrow internals is required.
+ * <p><b>BLOB handling.</b> When {@code blobFieldNames} is non-empty, Lance is assumed to be
+ * opened in {@code BlobReadMode.DESCRIPTOR}; the iterator rewrites each descriptor row into the
+ * Hudi OUT_OF_LINE shape ({@code data=null} + populated {@code reference}) using
+ * {@link BlobStructAccessor} before the projection runs.
  *
  * <p>{@code outputSchema} must be in the Hudi output shape, not the Lance descriptor shape.
  */
@@ -133,12 +130,10 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
    * @param arrowReader Arrow reader for batch reading
    * @param outputSchema Hudi-shape Spark schema for the output rows (e.g. blob {@code data} is
    *                     {@code Binary}, not {@code Struct<position,size>})
-   * @param path Lance file path (used for error messages and as the {@code external_path} of the
-   *             OUT_OF_LINE reference when remapping Lance-INLINE descriptor rows)
-   * @param blobFieldNames names of top-level {@link HoodieSchema.Blob} columns. The iterator reads
-   *                       these columns' underlying descriptor vectors directly and synthesizes
-   *                       Hudi OUT_OF_LINE reference rows so the projection never navigates into a
-   *                       blob descriptor struct.
+   * @param path Lance file path; also used as the {@code external_path} when remapping
+   *             Lance-INLINE descriptor rows to OUT_OF_LINE
+   * @param blobFieldNames top-level {@link HoodieSchema.Blob} column names whose descriptor
+   *                       rows should be rewritten into the Hudi OUT_OF_LINE shape
    */
   public LanceRecordIterator(BufferAllocator allocator,
                              LanceFileReader lanceReader,

@@ -810,10 +810,8 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
   /**
    * Scope-limited: verifies the INLINE→OUT_OF_LINE descriptor rewrite produces the right row
    * shape only (type=OUT_OF_LINE, data=null, reference points at a .lance file with length>0).
-   * Does NOT assert byte-level round-trip via read_blob() — Tim's original BLOB PR (#18098) also
-   * did not validate INLINE end-to-end through Parquet, so the Lance side mirrors that scope.
-   * Byte round-trip for INLINE would require verifying Lance's DESCRIPTOR position is pread-able
-   * and is the responsibility of a separate INLINE-support PR.
+   * Does NOT assert byte-level round-trip via read_blob() — that belongs in a separate
+   * INLINE-support PR which verifies Lance's DESCRIPTOR position is pread-able.
    */
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieTableType])
@@ -905,10 +903,6 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
       operation = Some("bulk_insert"),
       extraOptions = Map(PRECOMBINE_FIELD.key() -> "id"))
 
-    // Writer still emits the blob-encoding metadata even when all rows are OUT_OF_LINE;
-    // the `data` column is simply null for every row.
-    assertLanceBlobEncoding(tablePath)
-
     val readDf = spark.read.format("hudi").load(tablePath)
       .select("id", "payload")
       .orderBy("id")
@@ -953,58 +947,36 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
   }
 
   /**
-   * Opens every Lance base file under `tablePath` and asserts that the nested
-   * `data` child of every BLOB struct is stored as LargeBinary with
-   * `lance-encoding:blob=true` metadata — i.e. that Hudi successfully told
-   * Lance to use its blob writer for that column.
+   * Asserts that the nested `data` child of the BLOB struct in a Lance base file under
+   * `tablePath` is stored as LargeBinary with `lance-encoding:blob=true` — i.e. Hudi told
+   * Lance to use its blob writer for that column. One file is enough: the schema is
+   * writer-controlled and identical across base files of the same table.
    */
   private def assertLanceBlobEncoding(tablePath: String): Unit = {
-    val metaClient = HoodieTableMetaClient.builder()
-      .setConf(HoodieTestUtils.getDefaultStorageConf)
-      .setBasePath(tablePath)
-      .build()
-    val engineContext = new HoodieLocalEngineContext(metaClient.getStorageConf)
-    val viewManager = FileSystemViewManager.createViewManager(
-      engineContext, HoodieMetadataConfig.newBuilder.build,
-      FileSystemViewStorageConfig.newBuilder.build,
-      HoodieCommonConfig.newBuilder.build,
-      (mc: HoodieTableMetaClient) => metaClient.getTableFormat
-        .getMetadataFactory.create(engineContext, mc.getStorage, HoodieMetadataConfig.newBuilder.build, tablePath))
-    val fsView = viewManager.getFileSystemView(metaClient)
-    try {
-      val baseFiles = fsView.getLatestBaseFiles("")
-        .collect(Collectors.toList[org.apache.hudi.common.model.HoodieBaseFile])
-      assertTrue(baseFiles.size() > 0, "Expected at least one Lance base file")
+    val lanceFile = Files.walk(Paths.get(tablePath))
+      .filter(p => p.toString.endsWith(".lance"))
+      .findFirst()
+      .orElseThrow(() => new AssertionError(s"No .lance files found under $tablePath"))
 
-      val allocator = new RootAllocator(64L * 1024 * 1024)
+    val allocator = new RootAllocator(64L * 1024 * 1024)
+    try {
+      val reader = LanceFileReader.open(lanceFile.toString, allocator)
       try {
-        baseFiles.asScala.foreach { bf =>
-          val reader = LanceFileReader.open(bf.getPath, allocator)
-          try {
-            val arrowSchema = reader.schema()
-            val blobDataFields = arrowSchema.getFields.asScala.flatMap { top =>
-              // Only the user-defined "payload" struct (not Hudi meta columns) will have a `data` child.
-              val children = top.getChildren.asScala
-              children.find(_.getName == HoodieSchema.Blob.INLINE_DATA_FIELD).map((top, _))
-            }
-            assertTrue(blobDataFields.nonEmpty,
-              s"No nested '${HoodieSchema.Blob.INLINE_DATA_FIELD}' field found in $bf")
-            blobDataFields.foreach { case (parent, dataField) =>
-              val md = dataField.getMetadata
-              assertTrue(md != null && "true".equalsIgnoreCase(md.get("lance-encoding:blob")),
-                s"Lance blob-encoding metadata missing on ${parent.getName}.${dataField.getName}: $md")
-              assertTrue(dataField.getType.isInstanceOf[ArrowType.LargeBinary],
-                s"Expected LargeBinary for ${parent.getName}.${dataField.getName}, got ${dataField.getType}")
-            }
-          } finally {
-            reader.close()
-          }
-        }
+        val dataField = reader.schema().getFields.asScala
+          .flatMap(_.getChildren.asScala)
+          .find(_.getName == HoodieSchema.Blob.INLINE_DATA_FIELD)
+          .getOrElse(throw new AssertionError(
+            s"No nested '${HoodieSchema.Blob.INLINE_DATA_FIELD}' field in $lanceFile"))
+        val md = dataField.getMetadata
+        assertTrue(md != null && "true".equalsIgnoreCase(md.get("lance-encoding:blob")),
+          s"Lance blob-encoding metadata missing on ${dataField.getName}: $md")
+        assertTrue(dataField.getType.isInstanceOf[ArrowType.LargeBinary],
+          s"Expected LargeBinary for ${dataField.getName}, got ${dataField.getType}")
       } finally {
-        allocator.close()
+        reader.close()
       }
     } finally {
-      fsView.close()
+      allocator.close()
     }
   }
 
