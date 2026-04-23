@@ -34,6 +34,13 @@ import java.io.IOException;
 
 /**
  * HoodieInputFormat for HUDI datasets which store data in Lance base file format.
+ * <p>
+ * This class is required for catalog/metastore registration during CREATE TABLE operations.
+ * <p>
+ * TODO: Lance reading through Hive InputFormat is not yet supported. When support is added,
+ * this should route through {@link HoodieFileGroupReaderBasedRecordReader} (like
+ * {@link HoodieParquetInputFormat} does) instead of a standalone record reader,
+ * to get MOR log merging, schema evolution, and bootstrap support for free.
  */
 @UseFileSplitsFromInputFormat
 public class HoodieLanceInputFormat extends HoodieCopyOnWriteTableInputFormat {
@@ -45,12 +52,14 @@ public class HoodieLanceInputFormat extends HoodieCopyOnWriteTableInputFormat {
   @Override
   public RecordReader<NullWritable, ArrayWritable> getRecordReader(final InputSplit split, final JobConf job,
       final Reporter reporter) throws IOException {
-    return new HoodieLanceRecordReader(conf, split, job);
+    throw new UnsupportedOperationException(
+        "Lance reading through Hive InputFormat is not yet supported. "
+            + "Use the Spark datasource path (spark.read.format(\"hudi\")) to read Lance tables.");
   }
 
   @Override
   protected boolean isSplitable(FileSystem fs, Path filename) {
-    // This file isn't splittable.
+    // Lance files are not splittable.
     return false;
   }
 }

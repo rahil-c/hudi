@@ -18,70 +18,42 @@
 
 package org.apache.hudi.hadoop;
 
-import org.apache.hudi.common.config.HoodieConfig;
-import org.apache.hudi.common.model.HoodieFileFormat;
-import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.schema.HoodieSchema;
-import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.collection.ClosableIterator;
-import org.apache.hudi.hadoop.fs.HadoopFSUtils;
-import org.apache.hudi.hadoop.utils.HoodieRealtimeRecordReaderUtils;
-import org.apache.hudi.io.storage.HoodieFileReader;
-import org.apache.hudi.io.storage.HoodieIOFactory;
-import org.apache.hudi.storage.HoodieStorageUtils;
-import org.apache.hudi.storage.StorageConfiguration;
-import org.apache.hudi.storage.StoragePath;
-
-import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.ArrayWritable;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.Writable;
-import org.apache.hadoop.mapred.FileSplit;
 import org.apache.hadoop.mapred.InputSplit;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.RecordReader;
 
 import java.io.IOException;
 
-import static org.apache.hudi.common.util.ConfigUtils.getReaderConfigs;
-import static org.apache.hudi.hadoop.fs.HadoopFSUtils.convertToStoragePath;
-
+/**
+ * Record reader for Lance base files in Hive.
+ * <p>
+ * TODO: Lance reading in Hive is not yet supported. The Spark datasource path
+ * reads Lance files through {@code HoodieFileGroupReader} via
+ * {@code SparkFileFormatInternalRowReaderContext}, which handles both COW and MOR.
+ * To support Lance in Hive, a non-Spark Lance file reader needs to be implemented
+ * (e.g., in {@code HoodieAvroFileReaderFactory}) and wired into
+ * {@code HiveHoodieReaderContext.getFileRecordIterator()}.
+ * <p>
+ * This class is retained because {@code HoodieLanceInputFormat} is required for
+ * catalog/metastore registration during CREATE TABLE operations.
+ */
 public class HoodieLanceRecordReader implements RecordReader<NullWritable, ArrayWritable> {
 
-  private long count = 0;
-  private final ArrayWritable valueObj;
-  private HoodieFileReader reader;
-  private ClosableIterator<HoodieRecord<IndexedRecord>> recordIterator;
-  private final HoodieSchema schema;
+  private static final String UNSUPPORTED_MSG =
+      "Lance reading through Hive InputFormat is not yet supported. "
+          + "Use the Spark datasource path (spark.read.format(\"hudi\")) to read Lance tables.";
 
-  public HoodieLanceRecordReader(Configuration conf, InputSplit split, JobConf job) throws IOException {
-    FileSplit fileSplit = (FileSplit) split;
-    StoragePath path = convertToStoragePath(fileSplit.getPath());
-    StorageConfiguration<?> storageConf = HadoopFSUtils.getStorageConf(conf);
-    HoodieConfig hoodieConfig = getReaderConfigs(storageConf);
-    reader = HoodieIOFactory.getIOFactory(HoodieStorageUtils.getStorage(path, storageConf)).getReaderFactory(HoodieRecord.HoodieRecordType.AVRO)
-        .getFileReader(hoodieConfig, path, HoodieFileFormat.LANCE, Option.empty());
-
-    schema = reader.getSchema();
-    valueObj = new ArrayWritable(Writable.class, new Writable[schema.getFields().size()]);
+  public HoodieLanceRecordReader(Configuration conf, InputSplit split, JobConf job) {
+    // no-op: constructor kept for HoodieLanceInputFormat instantiation during catalog registration
   }
 
   @Override
   public boolean next(NullWritable key, ArrayWritable value) throws IOException {
-    if (recordIterator == null) {
-      recordIterator = reader.getRecordIterator(schema);
-    }
-
-    if (!recordIterator.hasNext()) {
-      return false;
-    }
-
-    IndexedRecord record = recordIterator.next().getData();
-    ArrayWritable aWritable = (ArrayWritable) HoodieRealtimeRecordReaderUtils.avroToArrayWritable(record, schema.toAvroSchema());
-    value.set(aWritable.get());
-    count++;
-    return true;
+    throw new UnsupportedOperationException(UNSUPPORTED_MSG);
   }
 
   @Override
@@ -91,29 +63,21 @@ public class HoodieLanceRecordReader implements RecordReader<NullWritable, Array
 
   @Override
   public ArrayWritable createValue() {
-    return valueObj;
+    return new ArrayWritable(Writable.class, new Writable[0]);
   }
 
   @Override
   public long getPos() throws IOException {
-    // TODO Auto-generated method stub
     return 0;
   }
 
   @Override
   public void close() throws IOException {
-    if (reader != null) {
-      reader.close();
-      reader = null;
-    }
-    if (recordIterator != null) {
-      recordIterator.close();
-      recordIterator = null;
-    }
+    // no-op
   }
 
   @Override
   public float getProgress() throws IOException {
-    return 1.0f * count / reader.getTotalRecords();
+    return 0;
   }
 }
