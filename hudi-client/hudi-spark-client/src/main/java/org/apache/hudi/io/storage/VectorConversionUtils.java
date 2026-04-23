@@ -274,9 +274,9 @@ public final class VectorConversionUtils {
    *
    * <p>A FixedSizeList alone does not prove the column is a Hudi VECTOR — a
    * non-Hudi Lance file could contain one. Callers must pass {@code vectorColumnNames}
-   * (the set parsed from the {@link HoodieSchema#VECTOR_COLUMNS_METADATA_KEY} footer
-   * entry) so that only fields known to be Hudi VECTORs are restored. Pass an empty
-   * set to skip the restore entirely.
+   * (derived from the Hudi schema's VECTOR-tagged fields, e.g. via
+   * {@link #detectVectorColumnsFromMetadata(StructType)}) so that only fields known to
+   * be Hudi VECTORs are restored. Pass an empty set to skip the restore entirely.
    *
    * <p>Nested structs are not recursed.
    */
