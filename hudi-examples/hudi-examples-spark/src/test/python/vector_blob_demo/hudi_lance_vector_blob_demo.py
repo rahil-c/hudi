@@ -59,16 +59,23 @@ from pyspark.sql.types import (
 # CONFIGURATION
 # ======================================================
 
+# Switch the Hudi base file format with HUDI_BASE_FILE_FORMAT=parquet|lance (default lance).
+_file_format = os.getenv("HUDI_BASE_FILE_FORMAT", "lance").lower()
+if _file_format not in ("lance", "parquet"):
+    sys.exit(f"ERROR: HUDI_BASE_FILE_FORMAT must be 'lance' or 'parquet', got '{_file_format}'")
+
 CONFIG = {
     "dataset": "OxfordIIITPet",
-    "table_path": "/tmp/hudi_lance_pets",
-    "table_name": "pets_lance",
+    # Separate table paths per format so you can run both back-to-back without collision.
+    "table_path": f"/tmp/hudi_{_file_format}_pets",
+    "table_name": f"pets_{_file_format}",
+    "base_file_format": _file_format,
     # Override via env var for quick dry-runs, e.g. HUDI_LANCE_DEMO_N=200
     "n_samples": int(os.getenv("HUDI_LANCE_DEMO_N", "1000")),
     "top_k": 5,
     "embedding_model": "mobilenetv3_small_100",
     "output_dir": os.getenv("HUDI_LANCE_DEMO_OUTDIR", "./outputs"),
-    "panel_filename": "hudi_lance_results.png",
+    "panel_filename": f"hudi_{_file_format}_results.png",
     "log_level": "ERROR",
     "hide_progress": True,
 }
@@ -336,7 +343,7 @@ def write_to_hudi(spark, data, embedding_dim: int):
         "hoodie.datasource.write.partitionpath.field": "category_sanitized",
         "hoodie.datasource.write.table.type": "COPY_ON_WRITE",
         "hoodie.datasource.write.operation": "upsert",
-        "hoodie.table.base.file.format": "lance",
+        "hoodie.table.base.file.format": CONFIG["base_file_format"],
         "hoodie.write.record.merge.custom.implementation.classes": (
             "org.apache.hudi.DefaultSparkRecordMerger"
         ),
@@ -506,7 +513,7 @@ def main():
     print("=" * 80)
     print(f"✓ Dataset:   {CONFIG['dataset']} ({CONFIG['n_samples']} images)")
     print(f"✓ Model:     {CONFIG['embedding_model']} (dim={embedding_dim})")
-    print("✓ Storage:   Hudi table, Lance base file format")
+    print(f"✓ Storage:   Hudi table, {CONFIG['base_file_format']} base file format")
     print("✓ Types:     embedding = VECTOR(%d), image_bytes = BLOB (INLINE)" % embedding_dim)
     print("✓ Search:    hudi_vector_search, cosine distance, L2-normalized")
     print(f"✓ Table:     {CONFIG['table_path']}")
