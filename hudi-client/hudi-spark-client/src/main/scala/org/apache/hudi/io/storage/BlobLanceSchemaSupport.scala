@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.avro
+package org.apache.hudi.io.storage
 
 import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType}
 
@@ -28,23 +28,21 @@ import java.util.Collections
 import scala.collection.JavaConverters._
 
 /**
- * Post-processes an Arrow schema produced from a Spark schema so that every
- * Hudi BLOB field has its nested `data` child rebuilt as
- * [[ArrowType.LargeBinary]] with the `lance-encoding:blob=true` metadata.
+ * Write-path Arrow schema rewriter that makes Hudi BLOB columns use Lance's dedicated blob writer.
  *
- * This is required because lance-spark's `LanceArrowUtils.toArrowField` only
- * propagates Spark field metadata for top-level struct fields; the raw bytes
- * of a Hudi BLOB live on a nested child and would otherwise remain plain
- * [[ArrowType.Binary]] without the blob-encoding hint — meaning Lance would
- * store INLINE payloads through its default column path rather than the
- * dedicated blob writer.
+ * For every Hudi BLOB column in the input Spark schema, the matching Arrow subtree is rewritten:
+ *  - the nested `data` child becomes `LargeBinary` carrying `lance-encoding:blob = true` — the
+ *    exact combination Lance requires to route INLINE bytes through its blob stream instead of
+ *    the default column path.
+ *  - every descendant field is forced nullable, because Hudi BLOB rows legitimately hold null
+ *    `data` (OUT_OF_LINE rows) or null `reference` (INLINE rows), and Lance otherwise rejects
+ *    them at its child-nullability check.
  *
- * The transformation is a structural no-op for schemas that contain no BLOB
- * fields.
+ * Non-BLOB fields are left untouched, and a schema with no BLOB columns round-trips unchanged.
  *
- * See lance-format/lance PR #5193 for the reader-side companion and
- * `org.apache.spark.sql.util.LanceArrowUtils` in lance-spark for the
- * writer-side handling of the `lance-encoding:blob` metadata key.
+ * This helper exists because lance-spark's `LanceArrowUtils.toArrowField` only propagates Spark
+ * field metadata for top-level fields; the Hudi BLOB `data` lives on a nested child and would
+ * otherwise never carry the blob-encoding hint into the written Lance file.
  */
 object BlobLanceSchemaSupport {
 

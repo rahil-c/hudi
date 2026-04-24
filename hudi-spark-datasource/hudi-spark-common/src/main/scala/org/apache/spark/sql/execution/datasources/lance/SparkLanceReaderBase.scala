@@ -24,13 +24,12 @@ import org.apache.hudi.common.config.HoodieReaderConfig
 import org.apache.hudi.common.util
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.memory.HoodieArrowAllocator
-import org.apache.hudi.io.storage.{HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
+import org.apache.hudi.io.storage.{BlobLanceSchemaSupport, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
 import org.apache.hudi.storage.StorageConfiguration
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.parquet.schema.MessageType
 import org.apache.spark.TaskContext
-import org.apache.spark.sql.avro.BlobLanceSchemaSupport
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, JoinedRow, UnsafeProjection, UnsafeRow}
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
@@ -115,11 +114,8 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         val requestSchema =
           SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema)
 
-        // Widen nullability only inside BLOB subtrees: Lance materializes a nested `reference`
-        // struct as non-null with all-null children for INLINE rows (and symmetrically a
-        // non-null `data` placeholder for OUT_OF_LINE rows). The codegen UnsafeProjection would
-        // NPE writing those null leaves into slots declared non-nullable by the Hudi BLOB
-        // schema. Scoping the widening to BLOB subtrees keeps non-BLOB contracts intact.
+        // Lance returns null BLOB sub-structs as non-null parents with null children; widen
+        // nullability inside BLOB subtrees so the codegen projection doesn't NPE on them.
         val iteratorSchema = widenBlobSubtreeNullability(requestSchema)
 
         val columnNames = if (iteratorSchema.nonEmpty) {

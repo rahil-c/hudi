@@ -191,11 +191,8 @@ public class HoodieSparkLanceReader implements HoodieSparkFileReader {
         columnNames.add(field.name());
       }
 
-      // Compaction/merge/log-replay paths go through this reader and require actual bytes
-      // to rewrite into merged output, so CONTENT is pinned here regardless of
-      // `hoodie.read.blob.inline.mode` — a future DESCRIPTOR value would return
-      // {position, size} pointers that these paths cannot rewrite. The datasource read
-      // path (SparkLanceReaderBase) is where the user-facing config is honored.
+      // Pinned to CONTENT: compaction/merge/log-replay need actual bytes to rewrite.
+      // The user-facing `hoodie.read.blob.inline.mode` is honored by SparkLanceReaderBase.
       FileReadOptions readOpts = FileReadOptions.builder().blobReadMode(BlobReadMode.CONTENT).build();
       ArrowReader arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts);
 

@@ -37,7 +37,6 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.apache.spark.sql.avro.BlobLanceSchemaSupport;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
