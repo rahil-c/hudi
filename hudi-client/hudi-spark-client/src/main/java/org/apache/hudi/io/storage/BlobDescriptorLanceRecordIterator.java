@@ -21,7 +21,6 @@ package org.apache.hudi.io.storage;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.exception.HoodieException;
-import org.apache.hudi.exception.HoodieIOException;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
@@ -56,27 +55,31 @@ import java.util.Set;
  * bytes. For each row we:
  * <ul>
  *   <li>Read the BLOB row's {@code type}.</li>
- *   <li>If {@code type == OUT_OF_LINE} (source row was written with an external reference),
- *       copy the existing {@code reference} struct through unchanged.</li>
- *   <li>Otherwise (source row was INLINE), read {@code {position, size}} via
- *       {@link BlobStructAccessor} and synthesize an OUT_OF_LINE reference whose
- *       {@code external_path} points at the current {@code .lance} file. {@code read_blob()}
- *       then resolves the bytes via a regular pread on that file, same as any other
- *       OUT_OF_LINE BLOB.</li>
+ *   <li>If {@code type == OUT_OF_LINE}, copy the existing {@code reference} struct through.</li>
+ *   <li>Otherwise (INLINE), read {@code {position, size}} via {@link BlobStructAccessor} and
+ *       synthesize an OUT_OF_LINE reference whose {@code external_path} points at the current
+ *       {@code .lance} file. {@code read_blob()} then resolves the bytes via a regular pread
+ *       on that file.</li>
  * </ul>
  *
- * <p>The {@code outputSchema} passed in is the Hudi BLOB shape ({@code data: Binary},
- * {@code reference: Struct<...>}), not the Lance descriptor shape — Lance's per-row
- * {@code Struct<position, size>} is contained entirely inside this iterator.
+ * <p>{@code outputSchema} is the Hudi BLOB shape ({@code data: Binary},
+ * {@code reference: Struct<...>}), not Lance's descriptor shape.
  */
 public class BlobDescriptorLanceRecordIterator implements ClosableIterator<UnsafeRow> {
 
-  // HoodieSchema.Blob struct children ordering: {type, data, reference}.
-  private static final int BLOB_TYPE_IDX = 0;
-  private static final int BLOB_DATA_IDX = 1;
-  private static final int BLOB_REF_IDX = 2;
-  // EXTERNAL_REFERENCE has 4 children: external_path, offset, length, managed.
-  private static final int REF_CHILD_COUNT = 4;
+  /** Cached child vectors of a BLOB column; only populated for blob indices. */
+  private static final class BlobColInfo {
+    final ColumnVector typeVec;
+    final ColumnVector dataVec;
+    final ColumnVector refVec;
+
+    BlobColInfo(ColumnVector parent) {
+      // HoodieSchema.Blob child ordering: {type, data, reference}.
+      this.typeVec = parent.getChild(0);
+      this.dataVec = parent.getChild(1);
+      this.refVec = parent.getChild(2);
+    }
+  }
 
   private final BufferAllocator allocator;
   private final LanceFileReader lanceReader;
@@ -90,15 +93,8 @@ public class BlobDescriptorLanceRecordIterator implements ClosableIterator<Unsaf
 
   private ColumnarBatch currentBatch;
   private ColumnVector[] columnVectors;
-  // Per-batch cached child vectors for blob columns so per-row access is an array lookup
-  // instead of three getChild() calls.
-  private ColumnVector[] blobTypeVecs;
-  private ColumnVector[] blobDataVecs;
-  private ColumnVector[] blobRefVecs;
-  // Reusable row buffer plus one reusable reference buffer per blob column. Safe to reuse
-  // because projection.apply(...).copy() detaches the UnsafeRow before next() is called again.
-  private Object[] rowBuffer;
-  private Object[][] refBuffers;
+  /** {@code blobCols[i]} is non-null iff output field {@code i} is a BLOB column. */
+  private BlobColInfo[] blobCols;
   private int rowIdInBatch;
   private int batchRowCount;
   private boolean closed = false;
@@ -107,11 +103,9 @@ public class BlobDescriptorLanceRecordIterator implements ClosableIterator<Unsaf
    * @param allocator       Arrow buffer allocator for memory management
    * @param lanceReader     Lance file reader
    * @param arrowReader     Arrow reader already opened in DESCRIPTOR mode
-   * @param outputSchema    Hudi-shape Spark schema for the emitted rows (BLOB {@code data} is
-   *                        {@code Binary}, not the Lance descriptor struct)
+   * @param outputSchema    Hudi-shape Spark schema for the emitted rows
    * @param lanceFilePath   Lance file path; used for error messages and as the
-   *                        {@code external_path} of OUT_OF_LINE references synthesized from
-   *                        INLINE source rows
+   *                        {@code external_path} of synthesized OUT_OF_LINE references
    * @param blobFieldNames  top-level BLOB column names whose per-row values should be rewritten
    */
   public BlobDescriptorLanceRecordIterator(BufferAllocator allocator,
@@ -143,9 +137,9 @@ public class BlobDescriptorLanceRecordIterator implements ClosableIterator<Unsaf
     }
 
     try {
-      // Skip empty batches: loadNextBatch() can legitimately return a zero-row batch (e.g.
-      // after filter pushdown); terminating on the first empty batch would silently drop
-      // subsequent non-empty batches.
+      // Skip empty batches: loadNextBatch() can legitimately return zero rows (e.g. after
+      // filter pushdown); terminating on the first empty batch would silently drop subsequent
+      // non-empty ones.
       while (arrowReader.loadNextBatch()) {
         VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
         if (columnVectors == null) {
@@ -175,8 +169,9 @@ public class BlobDescriptorLanceRecordIterator implements ClosableIterator<Unsaf
     int rowId = rowIdInBatch++;
     InternalRow batchRow = currentBatch.getRow(rowId);
     StructField[] fields = outputSchema.fields();
+    Object[] rowBuffer = new Object[fields.length];
     for (int i = 0; i < fields.length; i++) {
-      if (blobFieldNames.contains(fields[i].name())) {
+      if (blobCols[i] != null) {
         rowBuffer[i] = buildBlobOutputRow(i, rowId);
       } else {
         rowBuffer[i] = batchRow.isNullAt(i) ? null : batchRow.get(i, fields[i].dataType());
@@ -186,64 +181,36 @@ public class BlobDescriptorLanceRecordIterator implements ClosableIterator<Unsaf
   }
 
   /**
-   * Build one BLOB row in Hudi OUT_OF_LINE shape.
-   * <ul>
-   *   <li>Source row was OUT_OF_LINE: copy the existing {@code reference} through unchanged.</li>
-   *   <li>Source row was INLINE: read {@code {position, size}} from the descriptor struct and
-   *       synthesize a reference pointing at the current {@code .lance} file.</li>
-   * </ul>
+   * Build one BLOB row in Hudi OUT_OF_LINE shape. OUT_OF_LINE source rows pass the existing
+   * {@code reference} through; INLINE source rows get a synthesized reference pointing at the
+   * current {@code .lance} file with {@code {position, size}} from the descriptor.
    */
   private InternalRow buildBlobOutputRow(int columnIdx, int rowId) {
     if (columnVectors[columnIdx].isNullAt(rowId)) {
       return null;
     }
 
-    ColumnVector typeVec = blobTypeVecs[columnIdx];
-    if (typeVec.isNullAt(rowId)) {
+    BlobColInfo col = blobCols[columnIdx];
+    if (col.typeVec.isNullAt(rowId)) {
       throw new HoodieException("Malformed Lance BLOB row at rowId=" + rowId
           + " (file: " + lanceFilePath + "): payload struct is non-null but type is null");
     }
-    UTF8String type = typeVec.getUTF8String(rowId);
+    UTF8String type = col.typeVec.getUTF8String(rowId);
 
     if (type.equals(outOfLineUtf8)) {
-      // Source row was OUT_OF_LINE — reference was populated on write, pass it through.
-      ColumnVector refVec = blobRefVecs[columnIdx];
-      InternalRow refRow = refVec.isNullAt(rowId) ? null : new ColumnarRow(refVec, rowId);
+      InternalRow refRow = col.refVec.isNullAt(rowId) ? null : new ColumnarRow(col.refVec, rowId);
       return new GenericInternalRow(new Object[] { outOfLineUtf8, null, refRow });
     }
 
-    // Source row was INLINE — Lance returned the {position, size} descriptor. Synthesize an
-    // OUT_OF_LINE reference whose external_path is the Lance file itself, so read_blob()
-    // can pread the bytes out of the blob stream.
-    long position = 0L;
-    long size = 0L;
-    ColumnVector dataVec = blobDataVecs[columnIdx];
-    if (dataVec instanceof LanceArrowColumnVector) {
-      BlobStructAccessor bsa = ((LanceArrowColumnVector) dataVec).getBlobStructAccessor();
-      if (bsa != null && !bsa.isNullAt(rowId)) {
-        Long p = bsa.getPosition(rowId);
-        Long s = bsa.getSize(rowId);
-        if (p != null) {
-          position = p;
-        }
-        if (s != null) {
-          size = s;
-        }
-      }
-    }
-    Object[] refBuf = refBuffers[columnIdx];
-    refBuf[0] = lanceFilePathUtf8;
-    refBuf[1] = position;
-    refBuf[2] = size;
-    refBuf[3] = Boolean.TRUE;
-    return new GenericInternalRow(new Object[] { outOfLineUtf8, null, new GenericInternalRow(refBuf) });
+    // INLINE source row — rewrite Lance's descriptor into a Hudi OUT_OF_LINE reference.
+    BlobStructAccessor bsa = ((LanceArrowColumnVector) col.dataVec).getBlobStructAccessor();
+    long position = bsa.getPosition(rowId);
+    long size = bsa.getSize(rowId);
+    InternalRow refRow = new GenericInternalRow(
+        new Object[] { lanceFilePathUtf8, position, size, Boolean.TRUE });
+    return new GenericInternalRow(new Object[] { outOfLineUtf8, null, refRow });
   }
 
-  /**
-   * Build a {@link ColumnVector} for each top-level column in {@code outputSchema}, looking up
-   * Arrow vectors by name. Also cache the per-column blob child vectors so per-row access is an
-   * array lookup instead of a {@code getChild} walk.
-   */
   private void buildColumnVectors(VectorSchemaRoot root) {
     List<FieldVector> fieldVectors = root.getFieldVectors();
     Map<String, FieldVector> byName = new HashMap<>(fieldVectors.size() * 2);
@@ -257,11 +224,7 @@ public class BlobDescriptorLanceRecordIterator implements ClosableIterator<Unsaf
           + " for file: " + lanceFilePath);
     }
     columnVectors = new ColumnVector[sparkFields.length];
-    blobTypeVecs = new ColumnVector[sparkFields.length];
-    blobDataVecs = new ColumnVector[sparkFields.length];
-    blobRefVecs = new ColumnVector[sparkFields.length];
-    refBuffers = new Object[sparkFields.length][];
-    rowBuffer = new Object[sparkFields.length];
+    blobCols = new BlobColInfo[sparkFields.length];
     for (int i = 0; i < sparkFields.length; i++) {
       String name = sparkFields[i].name();
       FieldVector fv = byName.get(name);
@@ -271,10 +234,7 @@ public class BlobDescriptorLanceRecordIterator implements ClosableIterator<Unsaf
       }
       columnVectors[i] = new LanceArrowColumnVector(fv);
       if (blobFieldNames.contains(name)) {
-        blobTypeVecs[i] = columnVectors[i].getChild(BLOB_TYPE_IDX);
-        blobDataVecs[i] = columnVectors[i].getChild(BLOB_DATA_IDX);
-        blobRefVecs[i] = columnVectors[i].getChild(BLOB_REF_IDX);
-        refBuffers[i] = new Object[REF_CHILD_COUNT];
+        blobCols[i] = new BlobColInfo(columnVectors[i]);
       }
     }
   }
@@ -285,40 +245,8 @@ public class BlobDescriptorLanceRecordIterator implements ClosableIterator<Unsaf
       return;
     }
     closed = true;
-
-    IOException arrowException = null;
-    Exception lanceException = null;
-
-    if (currentBatch != null) {
-      currentBatch.close();
-      currentBatch = null;
-    }
-
-    if (arrowReader != null) {
-      try {
-        arrowReader.close();
-      } catch (IOException e) {
-        arrowException = e;
-      }
-    }
-
-    if (lanceReader != null) {
-      try {
-        lanceReader.close();
-      } catch (Exception e) {
-        lanceException = e;
-      }
-    }
-
-    if (allocator != null) {
-      allocator.close();
-    }
-
-    if (arrowException != null) {
-      throw new HoodieIOException("Failed to close Arrow reader", arrowException);
-    }
-    if (lanceException != null) {
-      throw new HoodieException("Failed to close Lance reader", lanceException);
-    }
+    ColumnarBatch batch = currentBatch;
+    currentBatch = null;
+    LanceCloseables.closeAll(batch, arrowReader, lanceReader, allocator);
   }
 }
