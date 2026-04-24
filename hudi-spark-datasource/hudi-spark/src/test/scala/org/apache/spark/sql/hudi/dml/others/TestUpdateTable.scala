@@ -525,4 +525,54 @@ class TestUpdateTable extends HoodieSparkSqlTestBase {
            """.stripMargin)
     }
   }
+
+  test("Test UPDATE on BLOB column preserves custom-type metadata") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |create table $tableName (
+           |  id bigint,
+           |  payload BLOB
+           |) using hudi
+           | location '${tmp.getCanonicalPath}/$tableName'
+           | tblproperties (
+           |  type = 'cow',
+           |  primaryKey = 'id'
+           | )
+         """.stripMargin)
+
+      // Use OUT_OF_LINE with a concrete reference: per RFC-100 the BLOB struct's
+      // inner reference fields (external_path, managed) are non-null, and the
+      // source literal must conform to that contract.
+      spark.sql(
+        s"""
+           |insert into $tableName values
+           |  (1, named_struct(
+           |        'type', 'OUT_OF_LINE',
+           |        'data', cast(null as binary),
+           |        'reference', named_struct(
+           |          'external_path', 'blobs/seed',
+           |          'offset', 0L,
+           |          'length', 3L,
+           |          'managed', false)))
+           """.stripMargin)
+
+      // Assigning a BLOB column goes through castIfNeeded; without the metadata
+      // re-attach it would fail schema compat with MISSING_UNION_BRANCH.
+      spark.sql(
+        s"""
+           |update $tableName
+           |set payload = named_struct(
+           |  'type', 'OUT_OF_LINE',
+           |  'data', cast(null as binary),
+           |  'reference', named_struct(
+           |    'external_path', 'blobs/updated',
+           |    'offset', 10L,
+           |    'length', 100L,
+           |    'managed', true))
+           |where id = 1
+           """.stripMargin)
+    }
+  }
 }
