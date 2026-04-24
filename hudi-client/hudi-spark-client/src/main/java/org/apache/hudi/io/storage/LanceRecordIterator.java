@@ -20,7 +20,6 @@ package org.apache.hudi.io.storage;
 
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.exception.HoodieException;
-import org.apache.hudi.exception.HoodieIOException;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
@@ -105,9 +104,10 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
       currentBatch = null;
     }
 
-    // Try to load next batch
+    // Try to load next batch. Loop so zero-row batches (legitimately returned e.g. after
+    // filter pushdown) don't silently terminate iteration and drop subsequent non-empty batches.
     try {
-      if (arrowReader.loadNextBatch()) {
+      while (arrowReader.loadNextBatch()) {
         VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
 
         // Build ColumnVector[] in Spark-schema order by looking each field up by name;
@@ -140,7 +140,12 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
         // Create ColumnarBatch and keep it alive while iterating
         currentBatch = new ColumnarBatch(columnVectors, root.getRowCount());
         rowIterator = currentBatch.rowIterator();
-        return rowIterator.hasNext();
+        if (rowIterator.hasNext()) {
+          return true;
+        }
+        // Empty batch - close and continue to the next one.
+        currentBatch.close();
+        currentBatch = null;
       }
     } catch (IOException e) {
       throw new HoodieException("Failed to read next batch from Lance file: " + path, e);
@@ -161,50 +166,12 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
 
   @Override
   public void close() {
-    // Make close() idempotent - safe to call multiple times
     if (closed) {
       return;
     }
     closed = true;
-
-    IOException arrowException = null;
-    Exception lanceException = null;
-
-    // Close current batch if exists
-    if (currentBatch != null) {
-      currentBatch.close();
-      currentBatch = null;
-    }
-
-    // Close Arrow reader
-    if (arrowReader != null) {
-      try {
-        arrowReader.close();
-      } catch (IOException e) {
-        arrowException = e;
-      }
-    }
-
-    // Close Lance reader
-    if (lanceReader != null) {
-      try {
-        lanceReader.close();
-      } catch (Exception e) {
-        lanceException = e;
-      }
-    }
-
-    // Always close allocator
-    if (allocator != null) {
-      allocator.close();
-    }
-
-    // Throw any exceptions that occurred
-    if (arrowException != null) {
-      throw new HoodieIOException("Failed to close Arrow reader", arrowException);
-    }
-    if (lanceException != null) {
-      throw new HoodieException("Failed to close Lance reader", lanceException);
-    }
+    ColumnarBatch batch = currentBatch;
+    currentBatch = null;
+    LanceCloseables.closeAll(batch, arrowReader, lanceReader, allocator);
   }
 }

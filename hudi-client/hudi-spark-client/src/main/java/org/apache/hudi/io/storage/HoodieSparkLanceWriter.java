@@ -128,7 +128,10 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
                                  long maxFileSize) {
     super(file, DEFAULT_BATCH_SIZE, bloomFilterOpt.map(HoodieBloomFilterRowWriteSupport::new));
     this.sparkSchema = enrichSparkSchemaForLanceVectors(sparkSchema);
-    this.arrowSchema = LanceArrowUtils.toArrowSchema(this.sparkSchema, DEFAULT_TIMEZONE, true);
+    Schema baseArrow = LanceArrowUtils.toArrowSchema(this.sparkSchema, DEFAULT_TIMEZONE, true);
+    // annotate Hudi BLOB fields so the nested `data` bytes column uses Lance's blob writer (the
+    // metadata key `lance-encoding:blob=true` on a LargeBinary column).
+    this.arrowSchema = BlobLanceSchemaSupport.annotateBlobFieldsForLance(sparkSchema, baseArrow);
     this.fileName = UTF8String.fromString(file.getName());
     this.instantTime = UTF8String.fromString(instantTime);
     this.populateMetaFields = populateMetaFields;
