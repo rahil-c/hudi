@@ -10,6 +10,21 @@ the Oxford-IIIT Pet dataset:
 3. **Vector search** — cosine similarity top-K via the
    `hudi_vector_search` SQL table-valued function, backed by Lance files.
 
+## Two variants
+
+The folder ships two scripts that produce the **same output** but expose the
+Hudi surface differently. Pick whichever fits the audience:
+
+| File | Hudi surface | Best for |
+|---|---|---|
+| [`hudi_lance_vector_blob_demo.py`](hudi_lance_vector_blob_demo.py) | DataFrame API — `StructField(..., metadata={"hudi_type": "VECTOR(N)"})`, `stamp_blob_metadata`, `struct(lit(...), ...)` | Library-style integration; seeing how the Python DataFrame API composes the VECTOR/BLOB logical types under the hood |
+| [`hudi_sql_vector_blob_demo.py`](hudi_sql_vector_blob_demo.py) | Spark SQL — `CREATE TABLE ... (embedding VECTOR(1024), image_bytes BLOB, ...) USING hudi`, `INSERT INTO ... SELECT ... named_struct('type','INLINE', ...)`, `SELECT ... FROM hudi_vector_search(...)` | Live demos; SQL-first users; showing the Hudi 1.2.0 DDL/DML surface the way it's documented |
+
+Both share the same venv, jars, env vars, and output panel style. They write
+to different table paths (`/tmp/hudi_{format}_pets` vs
+`/tmp/hudi_sql_{format}_pets`) so you can run them back-to-back without
+collision.
+
 ## Prereqs
 
 - Java 11
@@ -65,14 +80,18 @@ export LANCE_BUNDLE_JAR=~/Downloads/lance-spark-bundle-3.5_2.12-0.4.0.jar
 # Start small to verify correctness — 100 images runs in under a minute
 export HUDI_LANCE_DEMO_N=100
 
+# DataFrame variant
 python hudi_lance_vector_blob_demo.py
+
+# ...or the SQL variant (same deps, different surface)
+python hudi_sql_vector_blob_demo.py
 ```
 
 Once it works, crank it up:
 
 ```bash
 export HUDI_LANCE_DEMO_N=1000
-python hudi_lance_vector_blob_demo.py
+python hudi_lance_vector_blob_demo.py        # or hudi_sql_vector_blob_demo.py
 ```
 
 ### Run the same demo against Parquet base files
@@ -82,11 +101,12 @@ base file format with one env var:
 
 ```bash
 export HUDI_BASE_FILE_FORMAT=parquet
-python hudi_lance_vector_blob_demo.py
+python hudi_lance_vector_blob_demo.py        # or hudi_sql_vector_blob_demo.py
 ```
 
-Table path and panel filename auto-rename to `/tmp/hudi_parquet_pets` and
-`outputs/hudi_parquet_results.png` so you can diff the two runs side by side.
+Table path and panel filename auto-rename to `/tmp/hudi_parquet_pets` (or
+`/tmp/hudi_sql_parquet_pets` for the SQL script) and the corresponding
+`outputs/hudi_{...}_parquet_results.png` so you can diff runs side by side.
 `LANCE_BUNDLE_JAR` is still required on the classpath (the Hudi spark bundle
 has compile-time references to Lance classes) — nothing actually writes Lance
 files in this mode.
@@ -271,6 +291,124 @@ create_spark()
   → visualize_and_save()
   → spark.stop()
 ```
+
+## How the SQL script works
+
+[`hudi_sql_vector_blob_demo.py`](hudi_sql_vector_blob_demo.py) reaches the
+same end state — a partitioned Hudi table with a VECTOR embedding column, a
+BLOB image column, and a vector similarity query — but every Hudi-touching
+line is a SQL string rather than a DataFrame transform. The Python↔SQL
+bridge is a Spark **temp view**.
+
+### Steps 1–3 — identical to the DataFrame variant
+
+Pre-JVM env setup, `create_spark()`, dataset loading, and embedding
+generation are copied verbatim. The interesting divergence starts at step 4.
+
+### Step 4 — register the Python data as a Spark temp view
+
+```python
+spark.createDataFrame(data, schema=staging_schema) \
+     .createOrReplaceTempView("staging_pets")
+```
+
+No Hudi metadata is attached here — `image_bytes_raw` stays plain
+`BinaryType`, `embedding` stays plain `ArrayType(FloatType)`. The Hudi
+logical types come from the **target table's DDL**, not the source.
+
+### Step 5 — `CREATE TABLE ... USING hudi` (SQL)
+
+```sql
+CREATE TABLE pets_sql_lance (
+    image_id            STRING,
+    category            STRING,
+    category_sanitized  STRING,
+    label               INT,
+    description         STRING,
+    image_bytes         BLOB           COMMENT 'Pet image bytes (INLINE)',
+    width               INT,
+    height              INT,
+    embedding           VECTOR(1024)   COMMENT 'Image embedding for ANN search'
+) USING hudi
+PARTITIONED BY (category_sanitized)
+LOCATION '/tmp/hudi_sql_lance_pets'
+TBLPROPERTIES (
+    primaryKey = 'image_id',
+    preCombineField = 'image_id',
+    type = 'cow',
+    'hoodie.table.base.file.format' = 'lance'
+)
+```
+
+`VECTOR(1024)` and `BLOB` are first-class Hudi-extended SQL types. The
+parser at
+[`HoodieSpark3_5ExtendedSqlAstBuilder.scala:2612-2626`](../../../../../../hudi-spark-datasource/hudi-spark3.5.x/src/main/scala/org/apache/spark/sql/parser/HoodieSpark3_5ExtendedSqlAstBuilder.scala)
+rewrites them into the right Spark types **and** stamps `hudi_type` metadata
+automatically — so the DataFrame demo's `stamp_blob_metadata()` /
+`StructField(metadata=...)` gymnastics simply aren't needed here.
+
+### Step 6 — `INSERT INTO ... SELECT` with `named_struct` (SQL)
+
+```sql
+INSERT INTO pets_sql_lance
+SELECT
+    image_id, category, category_sanitized, label, description,
+    named_struct(
+        'type',      'INLINE',
+        'data',      image_bytes_raw,
+        'reference', cast(null as struct<external_path:string,
+                                         offset:bigint,
+                                         length:bigint,
+                                         managed:boolean>)
+    ) AS image_bytes,
+    width, height,
+    embedding
+FROM staging_pets
+```
+
+`named_struct` constructs the BLOB INLINE value in SQL — same shape the
+DataFrame demo builds with `struct(lit("INLINE").as("type"), ...)`. The
+`embedding` column passes through as-is because Hudi accepts `ARRAY<FLOAT>`
+for a `VECTOR(N)` column.
+
+### Step 7 — `hudi_vector_search` (SQL)
+
+Exactly the same TVF as in the DataFrame demo:
+
+```sql
+SELECT image_id, category, image_bytes, _hudi_distance
+FROM hudi_vector_search(
+    '/tmp/hudi_sql_lance_pets',
+    'embedding',
+    ARRAY(0.0123, 0.4567, ...),   -- 1024 floats inlined from the query embedding
+    6,                             -- k + 1 (the query image itself is also in the corpus)
+    'cosine'
+)
+ORDER BY _hudi_distance
+```
+
+### Step 8 — visualization
+
+Reused verbatim from the DataFrame variant.
+
+### `main()` flow
+
+```
+create_spark()
+  → load_dataset()
+  → create_embedding_model() + generate_embeddings()
+  → register_staging_view()              # Python → Spark temp view
+  → create_hudi_table_sql()              # CREATE TABLE ... VECTOR/BLOB
+  → insert_into_hudi_sql()               # INSERT INTO ... SELECT named_struct(...)
+  → spark.sql("SELECT ... LIMIT 5")      # preview
+  → find_similar_sql()                   # hudi_vector_search TVF
+  → visualize_and_save()
+  → spark.stop()
+```
+
+All five Hudi-facing steps (CREATE, INSERT, preview SELECT, vector search,
+and the COUNT validation inside the INSERT helper) are raw SQL strings the
+viewer can read top-to-bottom.
 
 ## Troubleshooting
 
