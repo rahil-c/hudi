@@ -26,6 +26,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static org.apache.hudi.integ2.testcontainers.TestcontainersConfig.Paths;
+
 /**
  * End-to-end Hive sync coverage for Hudi's custom logical types (VECTOR, BLOB) and the
  * Spark 4.0 VARIANT type, running against a real Hive metastore via the Testcontainers
@@ -37,27 +39,23 @@ import java.util.List;
  */
 public class ITTestCustomTypeHiveSync extends ITTestBaseTestcontainers {
 
-  private static final String HOODIE_WS_ROOT = "/var/hoodie/ws";
-
   // BLOB
   private static final String BLOB_SQL_TEST_BASE_PATH = "/user/hive/warehouse/blob_test";
   private static final String BLOB_DF_TEST_BASE_PATH = "/user/hive/warehouse/blob_test_df";
-  private static final String SPARKSQL_BLOB_TYPE_SQL_COMMANDS = HOODIE_WS_ROOT + "/docker/demo/sparksql-blob-type-sql.commands";
-  private static final String SPARKSQL_BLOB_TYPE_DF_COMMANDS = HOODIE_WS_ROOT + "/docker/demo/sparksql-blob-type-df.commands";
+  private static final String SPARKSQL_BLOB_TYPE_SQL_COMMANDS = Paths.DEMO_DIR + "/sparksql-blob-type-sql.commands";
+  private static final String SPARKSQL_BLOB_TYPE_DF_COMMANDS = Paths.DEMO_DIR + "/sparksql-blob-type-df.commands";
 
   // VARIANT
   private static final String VARIANT_SQL_TEST_BASE_PATH = "/user/hive/warehouse/variant_test";
   private static final String VARIANT_DF_TEST_BASE_PATH = "/user/hive/warehouse/variant_test_df";
-  private static final String SPARKSQL_VARIANT_TYPE_SQL_COMMANDS = HOODIE_WS_ROOT + "/docker/demo/sparksql-variant-type-sql.commands";
-  private static final String SPARKSQL_VARIANT_TYPE_DF_COMMANDS = HOODIE_WS_ROOT + "/docker/demo/sparksql-variant-type-df.commands";
+  private static final String SPARKSQL_VARIANT_TYPE_SQL_COMMANDS = Paths.DEMO_DIR + "/sparksql-variant-type-sql.commands";
+  private static final String SPARKSQL_VARIANT_TYPE_DF_COMMANDS = Paths.DEMO_DIR + "/sparksql-variant-type-df.commands";
 
   // VECTOR
   private static final String VECTOR_SQL_TEST_BASE_PATH = "/user/hive/warehouse/vector_test";
   private static final String VECTOR_DF_TEST_BASE_PATH = "/user/hive/warehouse/vector_test_df";
-  private static final String SPARKSQL_VECTOR_TYPE_SQL_COMMANDS = HOODIE_WS_ROOT + "/docker/demo/sparksql-vector-type-sql.commands";
-  private static final String SPARKSQL_VECTOR_TYPE_DF_COMMANDS = HOODIE_WS_ROOT + "/docker/demo/sparksql-vector-type-df.commands";
-
-  private static final String DEMO_CONTAINER_SCRIPT = HOODIE_WS_ROOT + "/docker/demo/setup_demo_container.sh";
+  private static final String SPARKSQL_VECTOR_TYPE_SQL_COMMANDS = Paths.DEMO_DIR + "/sparksql-vector-type-sql.commands";
+  private static final String SPARKSQL_VECTOR_TYPE_DF_COMMANDS = Paths.DEMO_DIR + "/sparksql-vector-type-df.commands";
 
   @BeforeEach
   public void setup() {
@@ -83,7 +81,7 @@ public class ITTestCustomTypeHiveSync extends ITTestBaseTestcontainers {
   @Test
   public void testBlobTypeWithHiveSyncSQL() throws Exception {
     waitForHdfs();
-    sparkAdhoc1.executeShellCommand("/bin/bash " + DEMO_CONTAINER_SCRIPT).expectToSucceed();
+    sparkAdhoc1.executeShellCommand("/bin/bash " + Paths.DEMO_SETUP).expectToSucceed();
 
     sparkAdhoc1.executeSQLFile(SPARKSQL_BLOB_TYPE_SQL_COMMANDS)
         .expectToSucceed()
@@ -119,7 +117,7 @@ public class ITTestCustomTypeHiveSync extends ITTestBaseTestcontainers {
   @Test
   public void testBlobTypeWithHiveSyncDataFrameAPI() throws Exception {
     waitForHdfs();
-    sparkAdhoc1.executeShellCommand("/bin/bash " + DEMO_CONTAINER_SCRIPT).expectToSucceed();
+    sparkAdhoc1.executeShellCommand("/bin/bash " + Paths.DEMO_SETUP).expectToSucceed();
 
     sparkAdhoc1.executeSQLFile(SPARKSQL_BLOB_TYPE_DF_COMMANDS)
         .expectToSucceed()
@@ -155,7 +153,7 @@ public class ITTestCustomTypeHiveSync extends ITTestBaseTestcontainers {
   public void testVariantTypeWithHiveSyncSQL() throws Exception {
     assumeSpark4Compose();
     waitForHdfs();
-    sparkAdhoc1.executeShellCommand("/bin/bash " + DEMO_CONTAINER_SCRIPT).expectToSucceed();
+    sparkAdhoc1.executeShellCommand("/bin/bash " + Paths.DEMO_SETUP).expectToSucceed();
 
     sparkAdhoc1.executeSQLFile(SPARKSQL_VARIANT_TYPE_SQL_COMMANDS)
         .expectToSucceed()
@@ -185,7 +183,7 @@ public class ITTestCustomTypeHiveSync extends ITTestBaseTestcontainers {
   public void testVariantTypeWithHiveSyncDataFrameAPI() throws Exception {
     assumeSpark4Compose();
     waitForHdfs();
-    sparkAdhoc1.executeShellCommand("/bin/bash " + DEMO_CONTAINER_SCRIPT).expectToSucceed();
+    sparkAdhoc1.executeShellCommand("/bin/bash " + Paths.DEMO_SETUP).expectToSucceed();
 
     sparkAdhoc1.executeSQLFile(SPARKSQL_VARIANT_TYPE_DF_COMMANDS)
         .expectToSucceed()
@@ -213,7 +211,7 @@ public class ITTestCustomTypeHiveSync extends ITTestBaseTestcontainers {
   @Test
   public void testVectorTypeWithHiveSyncSQL() throws Exception {
     waitForHdfs();
-    sparkAdhoc1.executeShellCommand("/bin/bash " + DEMO_CONTAINER_SCRIPT).expectToSucceed();
+    sparkAdhoc1.executeShellCommand("/bin/bash " + Paths.DEMO_SETUP).expectToSucceed();
 
     sparkAdhoc1.executeSQLFile(SPARKSQL_VECTOR_TYPE_SQL_COMMANDS)
         .expectToSucceed()
@@ -250,7 +248,7 @@ public class ITTestCustomTypeHiveSync extends ITTestBaseTestcontainers {
   @Test
   public void testVectorTypeWithHiveSyncDataFrameAPI() throws Exception {
     waitForHdfs();
-    sparkAdhoc1.executeShellCommand("/bin/bash " + DEMO_CONTAINER_SCRIPT).expectToSucceed();
+    sparkAdhoc1.executeShellCommand("/bin/bash " + Paths.DEMO_SETUP).expectToSucceed();
 
     sparkAdhoc1.executeSQLFile(SPARKSQL_VECTOR_TYPE_DF_COMMANDS)
         .expectToSucceed()
