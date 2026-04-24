@@ -23,9 +23,10 @@ import org.apache.hudi.SparkAdapterSupport.sparkAdapter
 import org.apache.hudi.common.config.HoodieReaderConfig
 import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType}
 import org.apache.hudi.common.util
+import org.apache.hudi.common.util.collection.ClosableIterator
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.memory.HoodieArrowAllocator
-import org.apache.hudi.io.storage.{BlobLanceSchemaSupport, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
+import org.apache.hudi.io.storage.{BlobDescriptorLanceRecordIterator, BlobLanceSchemaSupport, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
 import org.apache.hudi.storage.StorageConfiguration
 
 import org.apache.hadoop.conf.Configuration
@@ -81,8 +82,9 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
       // No columns requested - return empty iterator
       Iterator.empty
     } else {
-      // Track iterator for cleanup
-      var lanceIterator: LanceRecordIterator = null
+      // Track iterator for cleanup. Typed as ClosableIterator so we can swap in the
+      // DESCRIPTOR-mode iterator when the user opts into that blob read mode.
+      var lanceIterator: ClosableIterator[UnsafeRow] = null
 
       // Create child allocator for reading
       val allocator = HoodieArrowAllocator.newChildAllocator(getClass.getSimpleName + "-data-" + filePath,
@@ -141,20 +143,29 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           null
         }
 
-        // INLINE BLOB read mode. Today only CONTENT is valid, so the `data` column materializes
-        // as raw Binary/LargeBinary bytes. Non-blob Lance columns ignore the option entirely.
-        val readOpts = FileReadOptions.builder()
-          .blobReadMode(resolveBlobReadMode(storageConf))
-          .build()
+        // Honor `hoodie.read.blob.inline.mode`. CONTENT (default) materializes INLINE bytes in
+        // the `data` column; DESCRIPTOR surfaces per-row {position, size} which the descriptor
+        // iterator rewrites into Hudi OUT_OF_LINE references. Non-blob Lance columns ignore
+        // the option regardless.
+        val blobMode = resolveBlobReadMode(storageConf)
+        val readOpts = FileReadOptions.builder().blobReadMode(blobMode).build()
         val arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts)
 
-        lanceIterator = new LanceRecordIterator(
-          allocator,
-          lanceReader,
-          arrowReader,
-          iteratorSchema,
-          filePath
-        )
+        // Dispatch: use the DESCRIPTOR-aware iterator only when the user opted into that mode
+        // AND the request actually has BLOB columns (otherwise the rewrite has nothing to do).
+        val blobFieldNames: java.util.Set[String] = {
+          val names = new java.util.HashSet[String]()
+          iteratorSchema.fields.foreach { f =>
+            if (BlobLanceSchemaSupport.isBlobField(f)) names.add(f.name)
+          }
+          names
+        }
+        lanceIterator = if (blobMode == BlobReadMode.DESCRIPTOR && !blobFieldNames.isEmpty) {
+          new BlobDescriptorLanceRecordIterator(
+            allocator, lanceReader, arrowReader, iteratorSchema, filePath, blobFieldNames)
+        } else {
+          new LanceRecordIterator(allocator, lanceReader, arrowReader, iteratorSchema, filePath)
+        }
 
         // Register cleanup listener
         Option(TaskContext.get()).foreach { ctx =>
@@ -212,9 +223,8 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
   }
 
   /**
-   * Resolve the Lance blob read mode from {@code hoodie.read.blob.inline.mode}.
-   * Only CONTENT is valid today; unknown values fail fast so a future DESCRIPTOR rollout
-   * doesn't silently fall back to CONTENT on older readers.
+   * Resolve the Lance blob read mode from {@code hoodie.read.blob.inline.mode}. Unknown values
+   * fail fast so typos don't silently fall back to the default.
    */
   private def resolveBlobReadMode(storageConf: StorageConfiguration[Configuration]): BlobReadMode = {
     val configured = storageConf.unwrap()
@@ -222,10 +232,12 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         HoodieReaderConfig.BLOB_INLINE_READ_MODE.defaultValue())
     configured.toUpperCase match {
       case HoodieReaderConfig.BLOB_INLINE_READ_MODE_CONTENT => BlobReadMode.CONTENT
+      case HoodieReaderConfig.BLOB_INLINE_READ_MODE_DESCRIPTOR => BlobReadMode.DESCRIPTOR
       case other =>
         throw new IllegalArgumentException(
           s"Unsupported value '$other' for ${HoodieReaderConfig.BLOB_INLINE_READ_MODE.key()}; " +
-            s"expected ${HoodieReaderConfig.BLOB_INLINE_READ_MODE_CONTENT}")
+            s"expected one of [${HoodieReaderConfig.BLOB_INLINE_READ_MODE_CONTENT}, " +
+            s"${HoodieReaderConfig.BLOB_INLINE_READ_MODE_DESCRIPTOR}]")
     }
   }
 
