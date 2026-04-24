@@ -75,6 +75,22 @@ export HUDI_LANCE_DEMO_N=1000
 python hudi_lance_vector_blob_demo.py
 ```
 
+### Run the same demo against Parquet base files
+
+The Hudi VECTOR + BLOB + vector search path is format-agnostic — flip the
+base file format with one env var:
+
+```bash
+export HUDI_BASE_FILE_FORMAT=parquet
+python hudi_lance_vector_blob_demo.py
+```
+
+Table path and panel filename auto-rename to `/tmp/hudi_parquet_pets` and
+`outputs/hudi_parquet_results.png` so you can diff the two runs side by side.
+`LANCE_BUNDLE_JAR` is still required on the classpath (the Hudi spark bundle
+has compile-time references to Lance classes) — nothing actually writes Lance
+files in this mode.
+
 ### Open the result panel
 
 ```bash
@@ -91,7 +107,8 @@ etc.) with similarity scores in the 0.3–0.5 range at N=100, tighter at N=1000.
 | Var | Default | Purpose |
 |---|---|---|
 | `HUDI_BUNDLE_JAR` | `<repo>/packaging/hudi-spark-bundle/target/hudi-spark3.5-bundle_2.12-1.2.0-SNAPSHOT.jar` | Hudi spark bundle |
-| `LANCE_BUNDLE_JAR` | **required** | Lance spark bundle |
+| `LANCE_BUNDLE_JAR` | **required even for Parquet runs** | Lance spark bundle (shipped on classpath regardless of base file format) |
+| `HUDI_BASE_FILE_FORMAT` | `lance` | Set to `parquet` to write Parquet base files instead |
 | `HUDI_LANCE_DEMO_N` | `1000` | Number of images to sample |
 | `PYSPARK_DRIVER_MEMORY` | `4g` | Driver JVM heap — bump to `8g`+ for N≥2000 |
 | `HUDI_LANCE_DEMO_OUTDIR` | `./outputs` | Where query/top-K PNGs land |
