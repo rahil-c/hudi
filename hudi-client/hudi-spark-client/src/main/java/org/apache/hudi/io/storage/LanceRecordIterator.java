@@ -20,7 +20,6 @@ package org.apache.hudi.io.storage;
 
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.exception.HoodieException;
-import org.apache.hudi.exception.HoodieIOException;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
@@ -167,50 +166,12 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
 
   @Override
   public void close() {
-    // Make close() idempotent - safe to call multiple times
     if (closed) {
       return;
     }
     closed = true;
-
-    IOException arrowException = null;
-    Exception lanceException = null;
-
-    // Close current batch if exists
-    if (currentBatch != null) {
-      currentBatch.close();
-      currentBatch = null;
-    }
-
-    // Close Arrow reader
-    if (arrowReader != null) {
-      try {
-        arrowReader.close();
-      } catch (IOException e) {
-        arrowException = e;
-      }
-    }
-
-    // Close Lance reader
-    if (lanceReader != null) {
-      try {
-        lanceReader.close();
-      } catch (Exception e) {
-        lanceException = e;
-      }
-    }
-
-    // Always close allocator
-    if (allocator != null) {
-      allocator.close();
-    }
-
-    // Throw any exceptions that occurred
-    if (arrowException != null) {
-      throw new HoodieIOException("Failed to close Arrow reader", arrowException);
-    }
-    if (lanceException != null) {
-      throw new HoodieException("Failed to close Lance reader", lanceException);
-    }
+    ColumnarBatch batch = currentBatch;
+    currentBatch = null;
+    LanceCloseables.closeAll(batch, arrowReader, lanceReader, allocator);
   }
 }
