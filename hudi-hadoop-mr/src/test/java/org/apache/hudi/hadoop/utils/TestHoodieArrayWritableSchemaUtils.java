@@ -316,6 +316,24 @@ public class TestHoodieArrayWritableSchemaUtils {
     validateRewriteWithAvro(oldWritable, oldSchema, result, decimalSchema);
   }
 
+  @Test
+  void testRewriteBlobWithPrunedArrayWritableFillsMissingFieldsWithNull() {
+    HoodieSchema oldSchema = HoodieSchemaTestUtils.createPlainBlobRecord("blob_data");
+    HoodieSchema newSchema = HoodieSchema.createBlob();
+    ArrayWritable prunedRecord = new ArrayWritable(Writable.class, new Writable[] {
+        new Text("INLINE")
+    });
+
+    ArrayWritable rewritten = HoodieArrayWritableSchemaUtils.rewriteRecordWithNewSchema(
+        prunedRecord, oldSchema, newSchema, Collections.emptyMap());
+
+    assertEquals(3, rewritten.get().length);
+    assertInstanceOf(BytesWritable.class, rewritten.get()[0]);
+    assertEquals("INLINE", new String(((BytesWritable) rewritten.get()[0]).copyBytes()));
+    assertEquals(NullWritable.get(), rewritten.get()[1]);
+    assertEquals(NullWritable.get(), rewritten.get()[2]);
+  }
+
   private void validateRewriteWithAvro(
       Writable oldWritable,
       HoodieSchema oldSchema,

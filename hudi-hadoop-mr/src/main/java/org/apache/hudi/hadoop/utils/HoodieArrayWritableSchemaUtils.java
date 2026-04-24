@@ -102,7 +102,8 @@ public class HoodieArrayWritableSchemaUtils {
           Option<HoodieSchemaField> oldFieldOpt = noFieldsRenaming
               ? oldSchema.getField(newFieldName)
               : oldSchema.getField(getOldFieldNameWithRenaming(namePrefix, newFieldName, renameCols));
-          if (oldFieldOpt.isPresent()) {
+          // Hive nested projection can hand us an ArrayWritable shorter than oldSchema.
+          if (oldFieldOpt.isPresent() && oldFieldOpt.get().pos() < arrayWritable.get().length) {
             HoodieSchemaField oldField = oldFieldOpt.get();
             values[i] = rewriteRecordWithNewSchema(arrayWritable.get()[oldField.pos()], oldField.schema(), newField.schema(), renameCols, fieldNames);
           } else if (newField.defaultVal().isPresent() && newField.defaultVal().get().equals(HoodieSchema.NULL_VALUE)) {
