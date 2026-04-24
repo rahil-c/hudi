@@ -30,6 +30,8 @@ os.environ.setdefault(
 )
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 import timm
 from sklearn.preprocessing import normalize
@@ -44,15 +46,6 @@ from torchvision.datasets import OxfordIIITPet  # noqa: E402
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, lit, struct
-from pyspark.sql.types import (
-    ArrayType,
-    BinaryType,
-    FloatType,
-    IntegerType,
-    StringType,
-    StructField,
-    StructType,
-)
 
 
 # ======================================================
@@ -270,35 +263,6 @@ def generate_embeddings(data, model, transform):
 # 4. WRITE TO HUDI TABLE WITH LANCE FORMAT
 # ======================================================
 
-def build_staging_schema(embedding_dim: int) -> StructType:
-    """Schema for createDataFrame — no Hudi logical-type annotations yet.
-
-    `image_bytes_raw` is a flat binary column; we project it to a BLOB struct
-    after createDataFrame. `embedding` carries VECTOR(N) metadata here because
-    StructField metadata survives createDataFrame untouched.
-    """
-    vector_meta = {HUDI_TYPE_METADATA_KEY: f"VECTOR({embedding_dim})"}
-
-    return StructType(
-        [
-            StructField("image_id", StringType(), False),
-            StructField("category", StringType(), False),
-            StructField("category_sanitized", StringType(), False),
-            StructField("label", IntegerType(), False),
-            StructField("description", StringType(), True),
-            StructField("image_bytes_raw", BinaryType(), False),
-            StructField("width", IntegerType(), False),
-            StructField("height", IntegerType(), False),
-            StructField(
-                "embedding",
-                ArrayType(FloatType(), containsNull=False),
-                nullable=False,
-                metadata=vector_meta,
-            ),
-        ]
-    )
-
-
 def inline_blob_struct(bytes_col):
     """Mirror of BlobTestHelpers.inlineBlobStructCol in PySpark."""
     return struct(
@@ -325,11 +289,77 @@ def stamp_blob_metadata(df, column_name: str):
     return df.select(*projections)
 
 
+def stage_to_parquet_with_pyarrow(data, embedding_dim: int, staging_path: str) -> None:
+    """
+    Write the Python data to a Parquet file **directly via PyArrow**, bypassing
+    Spark entirely for the staging step.
+
+    Why not `spark.createDataFrame(data).write.parquet(...)`? Because that still
+    builds a `PythonRDD` internally — its tasks stream pickled rows to Python
+    workers through localhost sockets during the write. On macOS the kernel
+    socket-buffer (mbuf) pool is small; at ~1000 binary rows it saturates and
+    the write fails with `No buffer space available (Write failed)`.
+
+    PyArrow writes the Parquet file in-process from Python, then
+    `spark.read.parquet(...)` loads it JVM-natively. There is no `PythonRDD`
+    in the lineage at any point, so no localhost socket traffic ever happens
+    and the macOS mbuf issue simply can't occur.
+    """
+    arrow_schema = pa.schema(
+        [
+            pa.field("image_id", pa.string(), nullable=False),
+            pa.field("category", pa.string(), nullable=False),
+            pa.field("category_sanitized", pa.string(), nullable=False),
+            pa.field("label", pa.int32(), nullable=False),
+            pa.field("description", pa.string(), nullable=True),
+            pa.field("image_bytes_raw", pa.binary(), nullable=False),
+            pa.field("width", pa.int32(), nullable=False),
+            pa.field("height", pa.int32(), nullable=False),
+            pa.field(
+                "embedding",
+                pa.list_(pa.float32(), list_size=embedding_dim),
+                nullable=False,
+            ),
+        ]
+    )
+
+    columns = {
+        "image_id": [d["image_id"] for d in data],
+        "category": [d["category"] for d in data],
+        "category_sanitized": [d["category_sanitized"] for d in data],
+        "label": [int(d["label"]) for d in data],
+        "description": [d.get("description") for d in data],
+        "image_bytes_raw": [d["image_bytes_raw"] for d in data],
+        "width": [int(d["width"]) for d in data],
+        "height": [int(d["height"]) for d in data],
+        "embedding": [d["embedding"] for d in data],
+    }
+    table = pa.table(columns, schema=arrow_schema)
+    pq.write_table(table, staging_path)
+
+
 def write_to_hudi(spark, data, embedding_dim: int):
     print("\nWriting to Hudi table (Lance base file format, VECTOR + BLOB)...")
 
-    schema = build_staging_schema(embedding_dim)
-    df = spark.createDataFrame(data, schema=schema)
+    # Stage through local Parquet written by PyArrow to break the PythonRDD
+    # lineage entirely. See stage_to_parquet_with_pyarrow() for why.
+    staging_parquet_path = f"/tmp/staging_{CONFIG['table_name']}_parquet.parquet"
+    print(f"Staging Python data → Parquet at {staging_parquet_path} (PyArrow, no Spark)...")
+    stage_to_parquet_with_pyarrow(data, embedding_dim, staging_parquet_path)
+    df = spark.read.parquet(staging_parquet_path)
+
+    # PyArrow doesn't write Spark's schema JSON footer, so StructField metadata
+    # didn't survive. Re-stamp the `embedding` column with VECTOR(N) metadata
+    # so Hudi recognizes it at write time.
+    vector_meta = {HUDI_TYPE_METADATA_KEY: f"VECTOR({embedding_dim})"}
+    df = df.select(
+        *[
+            col(f.name).alias(f.name, metadata=vector_meta)
+            if f.name == "embedding"
+            else col(f.name)
+            for f in df.schema.fields
+        ]
+    )
 
     # Project `image_bytes_raw` into the BLOB INLINE struct shape, then drop the raw column.
     df = df.withColumn("image_bytes", inline_blob_struct(col("image_bytes_raw")))

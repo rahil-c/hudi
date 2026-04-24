@@ -1,6 +1,11 @@
 # PySpark — match local Spark install (3.5.x).
 pyspark==3.5.*
 
+# PyArrow — write staging Parquet directly from Python to avoid PythonRDD
+# socket traffic on the macOS loopback. pyspark depends on a compatible
+# pyarrow already; pinning it explicitly keeps this script reproducible.
+pyarrow>=14.0.0
+
 # ML / DL stack (Apple Silicon-friendly).
 torch>=2.3.0
 torchvision>=0.18.0

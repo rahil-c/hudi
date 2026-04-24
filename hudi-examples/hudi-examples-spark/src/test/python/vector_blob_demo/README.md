@@ -204,7 +204,7 @@ Every Spark config line has a purpose:
 | `spark.sql.catalog.spark_catalog = HoodieCatalog` | Makes `CREATE TABLE` aware of Hudi |
 | `spark.sql.session.timeZone = UTC` | Determinism |
 | `hoodie.read.blob.inline.mode = CONTENT` | Explicit default — flip to `DESCRIPTOR` to exercise the new descriptor read path |
-| `spark.default.parallelism = 2`, `spark.sql.shuffle.partitions = 2` | On macOS, too many Python workers streaming BLOB bytes saturates localhost socket buffers; 2 workers is plenty for a demo |
+| `spark.default.parallelism = 2`, `spark.sql.shuffle.partitions = 2` | Defense-in-depth against macOS socket-buffer saturation. The primary fix is PyArrow staging (see below); low parallelism keeps any incidental Python UDF path well under mbuf pressure |
 
 ### Section 2 — `load_dataset()`
 
@@ -224,12 +224,12 @@ becomes the `N` in `VECTOR(N)`.
 
 ### Section 4 — Writing to Hudi
 
-Three functions work together:
+Four functions work together:
 
-**`build_staging_schema(embedding_dim)`** builds the `StructType`.  The
-`embedding` field carries `metadata={"hudi_type": f"VECTOR({N})"}` directly —
-`StructField.metadata` survives `createDataFrame` untouched, so this is how
-the VECTOR tag reaches the write path.
+**`stage_to_parquet_with_pyarrow(data, embedding_dim, path)`** writes the
+Python list of dicts to a Parquet file **directly from Python via PyArrow**,
+bypassing Spark entirely for the initial Python→disk hop. Critical for
+macOS — see "Why we stage through Parquet" below.
 
 **`inline_blob_struct(bytes_col)`** constructs a `struct<type, data, reference>`
 column expression. Mirrors `BlobTestHelpers.inlineBlobStructCol` in the Scala
@@ -243,10 +243,14 @@ PySpark gives you no other way to attach `Metadata` to an existing struct
 column.
 
 **`write_to_hudi(spark, data, embedding_dim)`** ties them together:
-1. `createDataFrame(data, schema)` — flat `image_bytes_raw`, VECTOR-tagged `embedding`
-2. `withColumn("image_bytes", inline_blob_struct(...))` + `drop("image_bytes_raw")`
-3. `stamp_blob_metadata(..., "image_bytes")`
-4. `.write.format("hudi")` with these options (the interesting ones):
+1. `stage_to_parquet_with_pyarrow(...)` — Python→disk via PyArrow, no Spark.
+2. `spark.read.parquet(staging_path)` — JVM-native DataFrame, no `PythonRDD`.
+3. Re-stamp `embedding` with `hudi_type = "VECTOR(N)"` metadata (PyArrow
+   doesn't write Spark's schema JSON footer, so `StructField.metadata` is
+   lost on the Parquet round-trip).
+4. `withColumn("image_bytes", inline_blob_struct(...))` + `drop("image_bytes_raw")`
+5. `stamp_blob_metadata(..., "image_bytes")`
+6. `.write.format("hudi")` with these options (the interesting ones):
    - `hoodie.table.base.file.format = lance` — the switch from Parquet to Lance
    - `hoodie.datasource.write.partitionpath.field = category_sanitized` — 37 breed partitions
    - `hoodie.write.record.merge.custom.implementation.classes = DefaultSparkRecordMerger` — required to merge Spark rows with Hudi's logical types
@@ -305,16 +309,18 @@ bridge is a Spark **temp view**.
 Pre-JVM env setup, `create_spark()`, dataset loading, and embedding
 generation are copied verbatim. The interesting divergence starts at step 4.
 
-### Step 4 — register the Python data as a Spark temp view
+### Step 4 — stage via PyArrow, register the Parquet as a Spark temp view
 
 ```python
-spark.createDataFrame(data, schema=staging_schema) \
-     .createOrReplaceTempView("staging_pets")
+stage_to_parquet_with_pyarrow(data, embedding_dim, staging_path)   # Python → Parquet, no Spark
+spark.read.parquet(staging_path).createOrReplaceTempView("staging_pets")
 ```
 
-No Hudi metadata is attached here — `image_bytes_raw` stays plain
-`BinaryType`, `embedding` stays plain `ArrayType(FloatType)`. The Hudi
-logical types come from the **target table's DDL**, not the source.
+Why PyArrow instead of `spark.createDataFrame(...)`? Because the latter
+builds a `PythonRDD` which blows macOS kernel socket buffers at 1000+ rows
+— see "Why we stage through Parquet" below. No Hudi metadata is attached
+on the view; the Hudi logical types come from the **target table's DDL**,
+not the source.
 
 ### Step 5 — `CREATE TABLE ... USING hudi` (SQL)
 
@@ -410,12 +416,56 @@ All five Hudi-facing steps (CREATE, INSERT, preview SELECT, vector search,
 and the COUNT validation inside the INSERT helper) are raw SQL strings the
 viewer can read top-to-bottom.
 
+## Why we stage through Parquet (written directly by PyArrow)
+
+Both scripts write the generated images + embeddings to a local Parquet file
+(`/tmp/staging_<table>_parquet.parquet`) via **PyArrow**, then read that back
+with `spark.read.parquet(...)` as the input to the Hudi write. It looks
+redundant — why not just pass a DataFrame to Hudi directly?
+
+**Short answer**: anything built with `spark.createDataFrame(python_list, ...)`
+is a `PythonRDD`. Its rows are pickled Python bytes that require a Python
+worker to materialize. Any downstream operation on that DataFrame —
+`.write.parquet(...)` included — spawns Python workers and streams rows
+through a localhost socket from the JVM. On macOS, kernel network buffers
+(`mbufs`) are small, and sustained multi-hundred-MB loopback traffic drains
+the pool:
+
+```
+java.net.SocketException: No buffer space available (Write failed)
+  at org.apache.spark.api.python.PythonRDD$.writeIteratorToStream(...)
+```
+
+This fires even on the **first** pass — so naive Spark-side Parquet staging
+(`createDataFrame(...).write.parquet(...)`) doesn't actually fix it, because
+that IS a PythonRDD write.
+
+**The real workaround**: skip Spark for the staging step. PyArrow can write
+a proper Parquet file directly from Python, in-process, no Spark involved.
+After `pq.write_table(table, path)`, we do `spark.read.parquet(path)` and
+get a JVM-native DataFrame. No `PythonRDD` ever exists in the lineage, so no
+localhost socket traffic happens anywhere, and the macOS mbuf issue simply
+can't occur.
+
+This is the canonical real-world pattern for Python-generated data that
+needs to flow into Spark on a single machine: generate Parquet with PyArrow,
+read with Spark. Each stays in its own process.
+
+**One extra step for the DataFrame demo**: PyArrow doesn't write Spark's
+schema JSON footer, so `StructField.metadata` (our
+`hudi_type = "VECTOR(N)"` annotation on the embedding column) doesn't
+survive the round-trip. The DataFrame script re-applies the metadata with
+`col("embedding").alias("embedding", metadata={"hudi_type": f"VECTOR({N})"})`
+after `spark.read.parquet`. The SQL script doesn't need this — the
+`CREATE TABLE … embedding VECTOR(N)` DDL carries the logical-type annotation.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `RecursionError: Stack overflow` during `createDataFrame` | Python 3.13+ | Use Python 3.12 — PySpark 3.5 doesn't support 3.13+ |
 | `java.lang.OutOfMemoryError: Java heap space` during write | Default driver heap too small for N>~300 | `export PYSPARK_DRIVER_MEMORY=8g` |
-| `java.net.SocketException: No buffer space available` | macOS socket buffer saturated by parallel Python workers streaming BLOB bytes | Script sets `spark.default.parallelism=2` — if it still fires, drop to 1 or `sudo sysctl -w kern.ipc.maxsockbuf=16777216` |
+| `java.net.SocketException: No buffer space available` | PythonRDD → Python workers streaming rows through localhost sockets exhausts macOS kernel mbuf pool | Both scripts already stage Python data via **PyArrow** directly to Parquet (bypassing Spark for the initial hop) so no `PythonRDD` ever exists — see "Why we stage through Parquet" below. If it still fires (e.g. with a Python UDF you added), drop `spark.default.parallelism` to `1` or raise kernel buffers: `sudo sysctl -w kern.ipc.maxsockbuf=16777216` |
+| `ModuleNotFoundError: No module named 'pyarrow'` | Venv missing pyarrow | `pip install -r requirements.txt` — pyarrow is now an explicit dependency used for staging |
 | `query vector must be a constant expression` | Query vector passed as subquery | Use `ARRAY(f1, f2, …)` literal — script does this |
 | Demo starts but hangs on `OxfordIIITPet` download | First-run 800 MB dataset download | Wait; lands in `~/.cache/torchvision/` and is cached for subsequent runs |

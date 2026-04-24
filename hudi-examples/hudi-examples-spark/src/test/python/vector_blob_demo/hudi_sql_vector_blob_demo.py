@@ -34,6 +34,8 @@ os.environ.setdefault(
 )
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 import timm
 from sklearn.preprocessing import normalize
@@ -47,15 +49,6 @@ import matplotlib.pyplot as plt  # noqa: E402
 from torchvision.datasets import OxfordIIITPet  # noqa: E402
 
 from pyspark.sql import SparkSession
-from pyspark.sql.types import (
-    ArrayType,
-    BinaryType,
-    FloatType,
-    IntegerType,
-    StringType,
-    StructField,
-    StructType,
-)
 
 
 # ======================================================
@@ -253,33 +246,66 @@ def generate_embeddings(data, model, transform):
 STAGING_VIEW = "staging_pets"
 
 
-def register_staging_view(spark: SparkSession, data):
+def stage_to_parquet_with_pyarrow(data, embedding_dim: int, staging_path: str) -> None:
     """
-    Push the Python list of dicts into a Spark temp view so the rest of the
-    demo can SELECT from it. No Hudi metadata is needed here — the target
-    Hudi table's DDL carries the VECTOR/BLOB types, and INSERT INTO will
-    type-check/shape the values against that schema.
+    Write the Python data to a Parquet file **directly via PyArrow**, bypassing
+    Spark for the staging step.
+
+    Why not `spark.createDataFrame(data).write.parquet(...)`? Because that
+    internally builds a `PythonRDD` — its tasks stream pickled rows to Python
+    workers through localhost sockets during the write. On macOS the kernel
+    socket-buffer (mbuf) pool is small; at ~1000 binary rows it saturates and
+    the write fails with `No buffer space available (Write failed)`.
+
+    PyArrow writes the Parquet file in-process from Python, then
+    `spark.read.parquet(...)` loads it JVM-natively. No `PythonRDD` ever
+    exists in the lineage, so no localhost socket traffic occurs.
     """
-    schema = StructType(
+    arrow_schema = pa.schema(
         [
-            StructField("image_id", StringType(), False),
-            StructField("category", StringType(), False),
-            StructField("category_sanitized", StringType(), False),
-            StructField("label", IntegerType(), False),
-            StructField("description", StringType(), True),
-            StructField("image_bytes_raw", BinaryType(), False),
-            StructField("width", IntegerType(), False),
-            StructField("height", IntegerType(), False),
-            StructField(
+            pa.field("image_id", pa.string(), nullable=False),
+            pa.field("category", pa.string(), nullable=False),
+            pa.field("category_sanitized", pa.string(), nullable=False),
+            pa.field("label", pa.int32(), nullable=False),
+            pa.field("description", pa.string(), nullable=True),
+            pa.field("image_bytes_raw", pa.binary(), nullable=False),
+            pa.field("width", pa.int32(), nullable=False),
+            pa.field("height", pa.int32(), nullable=False),
+            pa.field(
                 "embedding",
-                ArrayType(FloatType(), containsNull=False),
+                pa.list_(pa.float32(), list_size=embedding_dim),
                 nullable=False,
             ),
         ]
     )
 
-    spark.createDataFrame(data, schema=schema).createOrReplaceTempView(STAGING_VIEW)
-    print(f"✓ Registered Spark temp view: {STAGING_VIEW}")
+    columns = {
+        "image_id": [d["image_id"] for d in data],
+        "category": [d["category"] for d in data],
+        "category_sanitized": [d["category_sanitized"] for d in data],
+        "label": [int(d["label"]) for d in data],
+        "description": [d.get("description") for d in data],
+        "image_bytes_raw": [d["image_bytes_raw"] for d in data],
+        "width": [int(d["width"]) for d in data],
+        "height": [int(d["height"]) for d in data],
+        "embedding": [d["embedding"] for d in data],
+    }
+    table = pa.table(columns, schema=arrow_schema)
+    pq.write_table(table, staging_path)
+
+
+def register_staging_view(spark: SparkSession, data, embedding_dim: int):
+    """
+    Stage the Python data to a Parquet file via PyArrow, then register it as
+    a Spark temp view for the INSERT INTO SELECT below. No Hudi metadata is
+    needed here — the Hudi table's DDL carries the VECTOR/BLOB types, and
+    INSERT INTO type-checks/shapes the SELECT expressions against that schema.
+    """
+    staging_parquet_path = f"/tmp/staging_{CONFIG['table_name']}_parquet.parquet"
+    print(f"Staging Python data → Parquet at {staging_parquet_path} (PyArrow, no Spark)...")
+    stage_to_parquet_with_pyarrow(data, embedding_dim, staging_parquet_path)
+    spark.read.parquet(staging_parquet_path).createOrReplaceTempView(STAGING_VIEW)
+    print(f"✓ Registered Spark temp view: {STAGING_VIEW} (JVM-native)")
 
 
 # ======================================================
@@ -467,7 +493,7 @@ def main():
     model, transform = create_embedding_model()
     data, embedding_dim = generate_embeddings(data, model, transform)
 
-    register_staging_view(spark, data)
+    register_staging_view(spark, data, embedding_dim)
     create_hudi_table_sql(spark, embedding_dim)
     insert_into_hudi_sql(spark)
 
