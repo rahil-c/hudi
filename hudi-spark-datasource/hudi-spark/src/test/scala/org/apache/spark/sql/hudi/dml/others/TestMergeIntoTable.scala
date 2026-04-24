@@ -1845,4 +1845,72 @@ class TestMergeIntoTable extends HoodieSparkSqlTestBase with ScalaAssertionSuppo
            """.stripMargin)
     }
   }
+
+  test("Test MergeInto preserves BLOB custom-type metadata") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |create table $tableName (
+           |  id bigint,
+           |  payload BLOB
+           |) using hudi
+           | location '${tmp.getCanonicalPath}/$tableName'
+           | tblproperties (
+           |  type = 'cow',
+           |  primaryKey = 'id'
+           | )
+         """.stripMargin)
+
+      // Use OUT_OF_LINE with a concrete reference: per RFC-100 the BLOB struct's
+      // inner reference fields (external_path, managed) are non-null. A
+      // cast(null as struct<...>) inner would type all fields nullable and
+      // Spark's MERGE analyzer rejects narrowing nullable -> non-null at
+      // assignment resolution time (INSERT tolerates it via TableOutputResolver,
+      // MERGE does not).
+      spark.sql(
+        s"""
+           |insert into $tableName values
+           |  (1, named_struct(
+           |        'type', 'OUT_OF_LINE',
+           |        'data', cast(null as binary),
+           |        'reference', named_struct(
+           |          'external_path', 'blobs/seed',
+           |          'offset', 0L,
+           |          'length', 3L,
+           |          'managed', false)))
+           """.stripMargin)
+
+      // MERGE exercises both NOT MATCHED (new row with BLOB literal) and MATCHED
+      // (UPDATE SET on the BLOB column). Without the metadata re-attach in
+      // MergeIntoHoodieTableCommand, the Avro schema-compat check throws
+      // MISSING_UNION_BRANCH.
+      spark.sql(
+        s"""
+           |merge into $tableName t
+           |using (
+           |  select 1L as id, named_struct(
+           |    'type', 'OUT_OF_LINE',
+           |    'data', cast(null as binary),
+           |    'reference', named_struct(
+           |      'external_path', 'blobs/updated',
+           |      'offset', 10L,
+           |      'length', 100L,
+           |      'managed', true)) as payload
+           |  union all
+           |  select 2L as id, named_struct(
+           |    'type', 'OUT_OF_LINE',
+           |    'data', cast(null as binary),
+           |    'reference', named_struct(
+           |      'external_path', 'blobs/inserted',
+           |      'offset', 200L,
+           |      'length', 50L,
+           |      'managed', false)) as payload
+           |) s
+           |on t.id = s.id
+           |when matched then update set t.payload = s.payload
+           |when not matched then insert (id, payload) values (s.id, s.payload)
+           """.stripMargin)
+    }
+  }
 }
