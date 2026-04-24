@@ -1877,6 +1877,10 @@ public class HoodieWriteConfig extends HoodieConfig {
     return getBoolean(HoodieCleanConfig.AUTO_CLEAN);
   }
 
+  public long maxIntervalToCreateEmptyCleanHours() {
+    return getLong(HoodieCleanConfig.MAX_INTERVAL_TO_CREATE_EMPTY_CLEAN_HOURS);
+  }
+
   public boolean shouldArchiveBeyondSavepoint() {
     return getBooleanOrDefault(HoodieArchivalConfig.ARCHIVE_BEYOND_SAVEPOINT);
   }

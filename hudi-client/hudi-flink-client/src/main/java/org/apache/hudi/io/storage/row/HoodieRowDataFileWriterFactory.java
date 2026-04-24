@@ -26,10 +26,13 @@ import org.apache.hudi.common.engine.TaskContextSupplier;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.util.ReflectionUtils;
+import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.io.HoodieParquetConfigInjector;
 import org.apache.hudi.io.storage.HoodieFileWriter;
 import org.apache.hudi.io.storage.HoodieFileWriterFactory;
 import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration;
 import org.apache.hudi.util.RowDataQueryContexts;
@@ -115,17 +118,21 @@ public class HoodieRowDataFileWriterFactory extends HoodieFileWriterFactory {
       HoodieConfig config,
       RowType rowType,
       TaskContextSupplier taskContextSupplier) throws IOException {
-    Configuration conf = storage.getConf().unwrapAs(Configuration.class);
     boolean populateMetaFields = config.getBooleanOrDefault(HoodieTableConfig.POPULATE_META_FIELDS);
     boolean withOperation = config.getBooleanOrDefault(HoodieWriteConfig.ALLOW_OPERATION_METADATA_FIELD);
 
-    BloomFilter filter = createBloomFilter(config);
+    Pair<StorageConfiguration, HoodieConfig> injectedConfigs = HoodieParquetConfigInjector.applyConfigInjector(storagePath, storage.getConf(), config);
+    StorageConfiguration storageConfiguration = injectedConfigs.getLeft();
+    HoodieConfig hoodieConfig = injectedConfigs.getRight();
+
+    Configuration conf = (Configuration) storageConfiguration.unwrapAs(Configuration.class);
+    BloomFilter filter = createBloomFilter(hoodieConfig);
     HoodieRowDataParquetWriteSupport writeSupport = (HoodieRowDataParquetWriteSupport) ReflectionUtils.loadClass(
-        config.getStringOrDefault(HoodieStorageConfig.HOODIE_PARQUET_FLINK_ROW_DATA_WRITE_SUPPORT_CLASS),
+        hoodieConfig.getStringOrDefault(HoodieStorageConfig.HOODIE_PARQUET_FLINK_ROW_DATA_WRITE_SUPPORT_CLASS),
         new Class<?>[] {Configuration.class, RowType.class, BloomFilter.class},
         conf, rowType, filter);
 
-    return new HoodieRowDataParquetWriter(storagePath, getParquetConfig(config, writeSupport),
+    return new HoodieRowDataParquetWriter(storagePath, getParquetConfig(hoodieConfig, writeSupport),
         instantTime, taskContextSupplier, populateMetaFields, withOperation);
   }
 

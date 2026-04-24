@@ -18,8 +18,10 @@
 
 package org.apache.hudi.table.functional;
 
+import org.apache.hudi.avro.model.HoodieCleanMetadata;
 import org.apache.hudi.avro.model.HoodieFileStatus;
 import org.apache.hudi.client.WriteClientTestUtils;
+import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.common.HoodieCleanStat;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.model.BootstrapFileMapping;
@@ -30,11 +32,13 @@ import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.testutils.HoodieMetadataTestTable;
 import org.apache.hudi.common.testutils.HoodieTestTable;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
+import org.apache.hudi.common.util.CleanerUtils;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
@@ -48,12 +52,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
@@ -63,6 +69,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Stream;
 
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_COMPARATOR;
 import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -812,5 +819,209 @@ public class TestCleanPlanExecutor extends HoodieCleanerTestBase {
     } finally {
       testTable.close();
     }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void testEmptyCleansAddedAfterThreshold(boolean secondCommitAfterThreshold) throws Exception {
+    boolean enableIncrementalClean = true;
+    boolean enableBootstrapSourceClean = false;
+    HoodieWriteConfig config = HoodieWriteConfig.newBuilder().withPath(basePath)
+        .withMetadataConfig(HoodieMetadataConfig.newBuilder().enable(false).build())
+        .withCleanConfig(HoodieCleanConfig.newBuilder()
+            .withIncrementalCleaningMode(enableIncrementalClean)
+            .withFailedWritesCleaningPolicy(HoodieFailedWritesCleaningPolicy.EAGER)
+            .withCleanBootstrapBaseFileEnabled(enableBootstrapSourceClean)
+            .withCleanerPolicy(HoodieCleaningPolicy.KEEP_LATEST_BY_HOURS).cleanerNumHoursRetained(2)
+            .withMaxIntervalToCreateEmptyCleanHours(1)
+            .build())
+        .build();
+
+    HoodieTestTable testTable = HoodieTestTable.of(metaClient);
+    try  {
+      String p0 = "2020/01/01";
+
+      String file1P0C0 = UUID.randomUUID().toString();
+      Instant instant = Instant.now();
+      ZonedDateTime commitDateTime = ZonedDateTime.ofInstant(instant, metaClient.getTableConfig().getTimelineTimezone().getZoneId());
+      int minutesForFirstCommit = 180;
+      String firstCommitTs = HoodieInstantTimeGenerator.formatDate(Date.from(commitDateTime.minusMinutes(minutesForFirstCommit).toInstant()));
+
+      commitToTestTable(testTable, firstCommitTs, p0, file1P0C0);
+      testTable = tearDownTestTableAndReinit(testTable, config);
+
+      // make next commit, with 1 insert & 1 update per partition
+      String file2P0C1 = UUID.randomUUID().toString();
+      int minutesForSecondCommit = 150;
+      String secondCommitTs = HoodieInstantTimeGenerator.formatDate(Date.from(commitDateTime.minusMinutes(minutesForSecondCommit).toInstant()));
+      testTable = tearDownTestTableAndReinit(testTable, config);
+
+      commitToTestTable(testTable, secondCommitTs, p0, file2P0C1);
+      testTable = tearDownTestTableAndReinit(testTable, config);
+      metaClient = HoodieTableMetaClient.reload(metaClient);
+
+      // make next commit, with 1 insert per partition
+      int minutesForThirdCommit = 90;
+      String thirdCommitTs = HoodieInstantTimeGenerator.formatDate(Date.from(commitDateTime.minusMinutes(minutesForThirdCommit).toInstant()));
+      String file3P0C2 = UUID.randomUUID().toString();
+
+      testTable = tearDownTestTableAndReinit(testTable, config);
+
+      commitToTestTable(testTable, thirdCommitTs, p0, file3P0C2);
+      testTable = tearDownTestTableAndReinit(testTable, config);
+      metaClient = HoodieTableMetaClient.reload(metaClient);
+
+      // first empty clean can be generated since earliest instant to retain will be the first commit (always keep last two instants at a minimum)
+      String firstCleanInstant = HoodieInstantTimeGenerator.formatDate(Date.from(commitDateTime.minus(secondCommitAfterThreshold ? 70 : 30, ChronoUnit.MINUTES).toInstant()));
+
+      SparkRDDWriteClient<?> writeClient = getHoodieWriteClient(config);
+      List<HoodieCleanStat> hoodieCleanStatsThree = runCleaner(config, false, false, writeClient, firstCleanInstant);
+      assertEquals(0, hoodieCleanStatsThree.size(), "Must not scan any partitions and clean any files");
+      assertEquals(1, metaClient.reloadActiveTimeline().getCleanerTimeline().filterCompletedInstants().countInstants());
+      String actualFirst = metaClient.getActiveTimeline().getCleanerTimeline().lastInstant().get().requestedTime();
+      writeClient.close();
+
+      String file4P0C1 = UUID.randomUUID().toString();
+      int minutesForFourthCommit = 10;
+      String fourthCommitTs = HoodieInstantTimeGenerator.formatDate(Date.from(commitDateTime.minusMinutes(minutesForFourthCommit).toInstant()));
+      testTable = tearDownTestTableAndReinit(testTable, config);
+
+      commitToTestTable(testTable, fourthCommitTs, p0, file4P0C1);
+      testTable = tearDownTestTableAndReinit(testTable, config);
+
+      // add a savepoint
+      SparkRDDWriteClient writeClient1 = null;
+      try {
+        writeClient1 = getHoodieWriteClient(config);
+        writeClient1.savepoint(fourthCommitTs, "user", "comment");
+      } finally {
+        writeClient1.close();
+      }
+
+      Date firstCleanDate = HoodieInstantTimeGenerator.parseDateFromInstantTime(firstCleanInstant);
+      int minutesBetweenCleans = secondCommitAfterThreshold ? 70 : 30;
+      String secondCleanInstant = HoodieInstantTimeGenerator.formatDate(Date.from(firstCleanDate.toInstant().plus(minutesBetweenCleans, ChronoUnit.MINUTES)));
+
+      writeClient = getHoodieWriteClient(config);
+      List<HoodieCleanStat> hoodieCleanStatsFour = runCleaner(config, false, false, writeClient, secondCleanInstant);
+      HoodieTimeline finalCompletedCleanInstants = metaClient.reloadActiveTimeline().getCleanerTimeline().filterCompletedInstants();
+      if (secondCommitAfterThreshold) {
+        // second empty clean is added
+        assertEquals(0, hoodieCleanStatsFour.size(), "Must not scan any partitions and clean any files");
+        assertEquals(2, finalCompletedCleanInstants.countInstants());
+        // Ensure that extra metadata is properly set for empty clean commits
+        HoodieCleanMetadata secondCleanMetadata = CleanerUtils.getCleanerMetadata(HoodieTableMetaClient.reload(metaClient), finalCompletedCleanInstants.lastInstant().get());
+        // new clean should have the savepoint created
+        assertEquals(fourthCommitTs, secondCleanMetadata.getExtraMetadata().get(CleanerUtils.SAVEPOINTED_TIMESTAMPS));
+        // assertEquals(thirdCommitTs, secondCleanMetadata.getExtraMetadata().get(CleanPlanner.EARLIEST_COMMIT_TO_NOT_ARCHIVE));
+      } else {
+        // no cleaner commit should be added because the time since last clean threshold has not been met
+        assertEquals(1, finalCompletedCleanInstants.countInstants());
+        // Ensure that extra metadata is properly set for empty clean commits
+        HoodieCleanMetadata firstCleanMetadata = CleanerUtils.getCleanerMetadata(HoodieTableMetaClient.reload(metaClient), finalCompletedCleanInstants.lastInstant().get());
+        //assertEquals(thirdCommitTs, firstCleanMetadata.getExtraMetadata().get(CleanPlanner.EARLIEST_COMMIT_TO_NOT_ARCHIVE));
+        // first clean commit happened before the savepoint so this field is expected to not be present in the map
+        assertFalse(firstCleanMetadata.getExtraMetadata().containsKey(CleanerUtils.SAVEPOINTED_TIMESTAMPS));
+      }
+      writeClient.close();
+    } finally {
+      testTable.close();
+    }
+  }
+
+  @Test
+  void testEmptyCleanDoesNotGoBackwardsOnConfigChange() throws Exception {
+    // Test that earliestCommitToRetain never goes backwards when user changes cleaner config
+    HoodieWriteConfig config = HoodieWriteConfig.newBuilder().withPath(basePath)
+        .withMetadataConfig(HoodieMetadataConfig.newBuilder().enable(false).build())
+        .withCleanConfig(HoodieCleanConfig.newBuilder()
+            .withIncrementalCleaningMode(true)
+            .withFailedWritesCleaningPolicy(HoodieFailedWritesCleaningPolicy.EAGER)
+            .withCleanBootstrapBaseFileEnabled(false)
+            .withCleanerPolicy(HoodieCleaningPolicy.KEEP_LATEST_BY_HOURS).cleanerNumHoursRetained(24)
+            .withMaxIntervalToCreateEmptyCleanHours(1)
+            .build())
+        .build();
+
+    HoodieTestTable testTable = HoodieTestTable.of(metaClient);
+    try {
+      String p0 = "2020/01/01";
+      Instant instant = Instant.now();
+      ZonedDateTime commitDateTime = ZonedDateTime.ofInstant(instant, metaClient.getTableConfig().getTimelineTimezone().getZoneId());
+
+      // Create first commit 48 hours ago
+      String file1P0C0 = UUID.randomUUID().toString();
+      String firstCommitTs = HoodieInstantTimeGenerator.formatDate(Date.from(commitDateTime.minusHours(48).toInstant()));
+      commitToTestTable(testTable, firstCommitTs, p0, file1P0C0);
+      testTable = tearDownTestTableAndReinit(testTable, config);
+
+      // Create second commit 36 hours ago
+      String file2P0C1 = UUID.randomUUID().toString();
+      String secondCommitTs = HoodieInstantTimeGenerator.formatDate(Date.from(commitDateTime.minusHours(36).toInstant()));
+      commitToTestTable(testTable, secondCommitTs, p0, file2P0C1);
+      testTable = tearDownTestTableAndReinit(testTable, config);
+      metaClient = HoodieTableMetaClient.reload(metaClient);
+
+      // Create third commit 12 hours ago
+      String file3P0C2 = UUID.randomUUID().toString();
+      String thirdCommitTs = HoodieInstantTimeGenerator.formatDate(Date.from(commitDateTime.minusHours(12).toInstant()));
+      commitToTestTable(testTable, thirdCommitTs, p0, file3P0C2);
+      testTable = tearDownTestTableAndReinit(testTable, config);
+      metaClient = HoodieTableMetaClient.reload(metaClient);
+
+      // Run first empty clean 2 hours ago - should retain commits from 26 hours ago (24h retention + 2h safety)
+      String firstCleanInstant = HoodieInstantTimeGenerator.formatDate(Date.from(commitDateTime.minusHours(2).toInstant()));
+      SparkRDDWriteClient<?> writeClient = getHoodieWriteClient(config);
+      List<HoodieCleanStat> hoodieCleanStatsOne = runCleaner(config, false, false, writeClient, firstCleanInstant);
+      assertEquals(0, hoodieCleanStatsOne.size(), "Must not clean any files");
+      assertEquals(1, metaClient.reloadActiveTimeline().getCleanerTimeline().filterCompletedInstants().countInstants());
+
+      // Get the earliestCommitToRetain from first clean
+      HoodieInstant firstCleanCompleted = metaClient.getActiveTimeline().getCleanerTimeline().filterCompletedInstants().lastInstant().get();
+      HoodieCleanMetadata firstCleanMetadata = CleanerUtils.getCleanerMetadata(metaClient, firstCleanCompleted);
+      String firstEarliestCommitToRetain = firstCleanMetadata.getEarliestCommitToRetain();
+      writeClient.close();
+
+      // Now change config to retain only 12 hours (which would normally make earliestCommitToRetain go backwards)
+      HoodieWriteConfig newConfig = HoodieWriteConfig.newBuilder().withPath(basePath)
+          .withMetadataConfig(HoodieMetadataConfig.newBuilder().enable(false).build())
+          .withCleanConfig(HoodieCleanConfig.newBuilder()
+              .withIncrementalCleaningMode(true)
+              .withFailedWritesCleaningPolicy(HoodieFailedWritesCleaningPolicy.EAGER)
+              .withCleanBootstrapBaseFileEnabled(false)
+              .withCleanerPolicy(HoodieCleaningPolicy.KEEP_LATEST_BY_HOURS).cleanerNumHoursRetained(12)
+              .withMaxIntervalToCreateEmptyCleanHours(1)
+              .build())
+          .build();
+
+      // Try to create another empty clean with the new config 61 minutes after first clean
+      String secondCleanInstant = HoodieInstantTimeGenerator.formatDate(Date.from(
+          HoodieInstantTimeGenerator.parseDateFromInstantTime(firstCleanInstant).toInstant().plus(61, ChronoUnit.MINUTES)));
+
+      writeClient = getHoodieWriteClient(newConfig);
+      List<HoodieCleanStat> hoodieCleanStatsTwo = runCleaner(newConfig, false, false, writeClient, secondCleanInstant);
+
+      // The clean should be skipped because earliestCommitToRetain would go backwards
+      metaClient = HoodieTableMetaClient.reload(metaClient);
+      HoodieTimeline cleanTimeline = metaClient.getActiveTimeline().getCleanerTimeline().filterCompletedInstants();
+      assertEquals(1, cleanTimeline.countInstants(), "Second clean should be skipped to prevent earliestCommitToRetain from going backwards");
+
+      // Verify earliestCommitToRetain did not change
+      HoodieCleanMetadata latestCleanMetadata = CleanerUtils.getCleanerMetadata(metaClient, cleanTimeline.lastInstant().get());
+      assertEquals(firstEarliestCommitToRetain, latestCleanMetadata.getEarliestCommitToRetain(),
+          "earliestCommitToRetain should not go backwards");
+      writeClient.close();
+    } finally {
+      testTable.close();
+    }
+  }
+
+  private void commitToTestTable(HoodieTestTable testTable, String commitTimeTs, String partition, String fileId) throws Exception {
+    testTable.addInflightCommit(commitTimeTs);
+    testTable.withBaseFilesInPartition(partition, fileId);
+    HoodieCommitMetadata commitMeta = generateCommitMetadata(commitTimeTs, Collections.singletonMap(partition, Collections.singletonList(fileId)));
+    metaClient.getActiveTimeline().saveAsComplete(
+        new HoodieInstant(HoodieInstant.State.INFLIGHT, HoodieTimeline.COMMIT_ACTION, commitTimeTs, INSTANT_COMPARATOR.completionTimeOrderedComparator()),
+        Option.of(commitMeta));
   }
 }
