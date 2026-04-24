@@ -342,9 +342,17 @@ TBLPROPERTIES (
     primaryKey = 'image_id',
     preCombineField = 'image_id',
     type = 'cow',
-    'hoodie.table.base.file.format' = 'lance'
+    'hoodie.table.base.file.format' = 'lance',
+    'hoodie.write.record.merge.custom.implementation.classes' = 'org.apache.hudi.DefaultSparkRecordMerger'
 )
 ```
+
+The `DefaultSparkRecordMerger` TBLPROPERTY is mandatory for Lance: it flips
+Hudi's writer factory from AVRO to SPARK, which is what
+`HoodieSparkFileWriterFactory` → `HoodieSparkLanceWriter` dispatches on.
+Without it, the write fails mid-commit with "Lance base file format is
+currently only supported with the Spark engine". Harmless for Parquet base
+files — safe to leave on always.
 
 `VECTOR(1024)` and `BLOB` are first-class Hudi-extended SQL types. The
 parser at
@@ -467,5 +475,7 @@ after `spark.read.parquet`. The SQL script doesn't need this — the
 | `java.lang.OutOfMemoryError: Java heap space` during write | Default driver heap too small for N>~300 | `export PYSPARK_DRIVER_MEMORY=8g` |
 | `java.net.SocketException: No buffer space available` | PythonRDD → Python workers streaming rows through localhost sockets exhausts macOS kernel mbuf pool | Both scripts already stage Python data via **PyArrow** directly to Parquet (bypassing Spark for the initial hop) so no `PythonRDD` ever exists — see "Why we stage through Parquet" below. If it still fires (e.g. with a Python UDF you added), drop `spark.default.parallelism` to `1` or raise kernel buffers: `sudo sysctl -w kern.ipc.maxsockbuf=16777216` |
 | `ModuleNotFoundError: No module named 'pyarrow'` | Venv missing pyarrow | `pip install -r requirements.txt` — pyarrow is now an explicit dependency used for staging |
+| `Lance base file format is currently only supported with the Spark engine` during INSERT | Hudi fell back to AVRO record type; its Lance writer is a stub that throws | SQL path: add `'hoodie.write.record.merge.custom.implementation.classes' = 'org.apache.hudi.DefaultSparkRecordMerger'` to the table's `TBLPROPERTIES` (already in the script). DataFrame path: pass the same key as a write option (already in the script) |
+| `Lance batch column count N does not match expected Spark schema size 0` during read | `SELECT COUNT(*)` prunes to zero columns; Hudi's `LanceRecordIterator` has a strict column-count check that rejects the empty projection | Use `COUNT(<named_col>)` instead of `COUNT(*)` — script does this. Tracked as a Hudi-side bug in [findings.md](findings.md) |
 | `query vector must be a constant expression` | Query vector passed as subquery | Use `ARRAY(f1, f2, …)` literal — script does this |
 | Demo starts but hangs on `OxfordIIITPet` download | First-run 800 MB dataset download | Wait; lands in `~/.cache/torchvision/` and is cached for subsequent runs |

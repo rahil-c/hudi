@@ -1,4 +1,13 @@
-# Findings — BLOB write UX gap (SQL + DataFrame)
+# Findings — Hudi 1.2.0 VECTOR + BLOB + Lance demo issues
+
+Tracking UX papercuts and latent bugs surfaced while building the
+[`vector_blob_demo/`](.) scripts. Each section is a candidate patch to flag
+with the Hudi team — none block the demo today (workarounds are in the
+scripts) but each would make the real surface cleaner.
+
+---
+
+## 1. BLOB write UX gap (SQL + DataFrame)
 
 ## TL;DR
 
@@ -178,3 +187,71 @@ change).
 - [`InsertIntoHoodieTableCommand.scala` — alignQueryOutput / coerceQueryOutputColumns](../../../../../../hudi-spark-datasource/hudi-spark/src/main/scala/org/apache/spark/sql/hudi/command/InsertIntoHoodieTableCommand.scala)
 - [`BlobTestHelpers.scala` — canonical DataFrame-side BLOB struct builder](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/hudi/blob/BlobTestHelpers.scala)
 - [`TestCreateTable.scala:2368-2427` — current BLOB INSERT tests](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/spark/sql/hudi/ddl/TestCreateTable.scala:2368)
+
+---
+
+## 2. `LanceRecordIterator` throws on empty projection (COUNT(*), EXISTS, etc.)
+
+### TL;DR
+
+`SELECT COUNT(*) FROM <lance-backed hudi table>` fails with:
+
+```
+Lance batch column count 14 does not match expected Spark schema size 0
+  for file: .../category=Abyssinian/....lance
+  at org.apache.hudi.io.storage.LanceRecordIterator.hasNext(LanceRecordIterator.java:124)
+```
+
+Any query shape that triggers Spark's "no columns needed, just count rows"
+optimization (COUNT(*), EXISTS, `CREATE TABLE AS SELECT 1 FROM ...`) blows
+up on a Lance-backed Hudi table. Parquet-backed tables work fine.
+
+### Why it happens
+
+[`LanceRecordIterator.java:122-127`](../../../../../../hudi-client/hudi-spark-client/src/main/java/org/apache/hudi/io/storage/LanceRecordIterator.java:122)
+has a strict equality check when building `ColumnVector[]`:
+
+```java
+StructField[] sparkFields = sparkSchema.fields();
+if (sparkFields.length != fieldVectors.size()) {
+  throw new HoodieException("Lance batch column count " + fieldVectors.size()
+      + " does not match expected Spark schema size " + sparkFields.length + ...);
+}
+```
+
+When Spark's optimizer prunes all columns for an aggregate-only read (COUNT,
+EXISTS), the request arrives with `sparkSchema.fields().length == 0`, but
+the Lance file's batch always has the full column set. The reader sees
+`0 != 14` and throws.
+
+The Parquet reader handles this naturally — `ParquetFileFormat` has a
+zero-column fast path where it just yields N empty rows (where N is the
+row count) so the aggregate can count them without reading any data. Lance
+needs the equivalent.
+
+### Workaround in the demo
+
+Use `COUNT(<named_col>)` instead of `COUNT(*)`. On a non-null primary key
+the two are semantically equivalent, but the former forces Spark to
+request one column, satisfying the check.
+
+[`hudi_sql_vector_blob_demo.py`](hudi_sql_vector_blob_demo.py) uses
+`COUNT(image_id)` with an inline comment explaining why.
+
+### Proposed fix
+
+In `LanceRecordIterator.hasNext()`:
+- If `sparkSchema.fields().length == 0`, skip the `ColumnVector[]` build entirely.
+- Still call `arrowReader.loadNextBatch()` to advance, and yield empty rows
+  matching the Arrow `VectorSchemaRoot.getRowCount()` so downstream count
+  aggregators work.
+- Add a test in
+  [`TestLanceDataSource.scala`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/hudi/functional/TestLanceDataSource.scala)
+  exercising `spark.sql("SELECT COUNT(*) FROM …")` over a Lance-backed table
+  and `df.count()` on the same.
+
+### Related code paths
+
+- [`LanceRecordIterator.java`](../../../../../../hudi-client/hudi-spark-client/src/main/java/org/apache/hudi/io/storage/LanceRecordIterator.java)
+- [`HoodieSparkLanceReader.java`](../../../../../../hudi-client/hudi-spark-client/src/main/java/org/apache/hudi/io/storage/HoodieSparkLanceReader.java)
+- [`TestLanceDataSource.scala`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/hudi/functional/TestLanceDataSource.scala)

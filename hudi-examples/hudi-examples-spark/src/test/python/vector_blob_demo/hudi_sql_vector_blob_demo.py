@@ -339,7 +339,15 @@ def create_hudi_table_sql(spark: SparkSession, embedding_dim: int):
             primaryKey = 'image_id',
             preCombineField = 'image_id',
             type = 'cow',
-            'hoodie.table.base.file.format' = '{CONFIG['base_file_format']}'
+            'hoodie.table.base.file.format' = '{CONFIG['base_file_format']}',
+            -- Required when writing Lance base files. Without this, Hudi's
+            -- writer factory defaults to the AVRO record type, whose Lance
+            -- writer is a stub that throws:
+            --   "Lance base file format is currently only supported with the Spark engine"
+            -- Setting this merger class flips the record type to SPARK, which
+            -- routes through HoodieSparkFileWriterFactory → HoodieSparkLanceWriter.
+            -- Harmless for Parquet base files; safe to leave on always.
+            'hoodie.write.record.merge.custom.implementation.classes' = 'org.apache.hudi.DefaultSparkRecordMerger'
         )
     """
     print(ddl.strip())
@@ -379,7 +387,13 @@ def insert_into_hudi_sql(spark: SparkSession):
     print(insert.strip())
     spark.sql(insert)
 
-    count = spark.sql(f"SELECT COUNT(*) AS c FROM {table}").collect()[0]["c"]
+    # COUNT(image_id), not COUNT(*): the Spark planner strips all columns from a
+    # COUNT(*) read (it only needs row counts, not column values), but Hudi's
+    # Lance reader at LanceRecordIterator.java:123 has a strict equality check
+    # `sparkFields.length == fieldVectors.size()` and throws when asked for zero
+    # columns. Naming `image_id` forces a 1-column projection that the reader
+    # handles correctly. Tracked as a Hudi-side bug in findings.md.
+    count = spark.sql(f"SELECT COUNT(image_id) AS c FROM {table}").collect()[0]["c"]
     print(f"✓ Inserted {count} records into {table}")
 
 
