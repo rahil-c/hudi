@@ -122,6 +122,139 @@ change the `.config(...)` line in `create_spark()` to `DESCRIPTOR` — results
 will come back as `OUT_OF_LINE`-shaped references you then resolve via
 `read_blob()`.
 
+## How the script works
+
+The script is a single file —
+[`hudi_lance_vector_blob_demo.py`](hudi_lance_vector_blob_demo.py) — organized
+into numbered sections. Here's what each one does and why.
+
+### Pre-JVM env setup (top of file, before any `pyspark` import)
+
+```python
+_driver_mem = os.getenv("PYSPARK_DRIVER_MEMORY", "4g")
+os.environ.setdefault("PYSPARK_SUBMIT_ARGS",
+    f"--driver-memory {_driver_mem} --conf spark.driver.maxResultSize=2g pyspark-shell",
+)
+```
+
+In `local[*]` mode the driver JVM IS the executor. Driver heap is set **when
+the JVM launches**, not via `SparkSession.config()` later — so
+`PYSPARK_SUBMIT_ARGS` must be in `os.environ` before `import pyspark` triggers
+JVM launch. 4 GB handles ~1000 rows with room to spare; bump to 8g for larger.
+
+### `CONFIG` + Hudi schema constants
+
+Knobs grouped at the top. The constants under `HUDI_TYPE_METADATA_KEY` and
+`BLOB_*` mirror values from `HoodieSchema.java` in `hudi-common`:
+
+| Python constant | Hudi source |
+|---|---|
+| `HUDI_TYPE_METADATA_KEY = "hudi_type"` | `HoodieSchema.TYPE_METADATA_FIELD` |
+| `BLOB_TYPE_INLINE = "INLINE"` | `HoodieSchema.Blob.INLINE` |
+| `BLOB_FIELD_TYPE/DATA/REFERENCE` | `HoodieSchema.Blob.TYPE/INLINE_DATA_FIELD/EXTERNAL_REFERENCE` |
+
+If those change in Hudi, update these four constants.
+
+### Section 1 — `create_spark()`
+
+Every Spark config line has a purpose:
+
+| Config | Why |
+|---|---|
+| `spark.jars` | Ships the Hudi + Lance bundles to the classpath |
+| `spark.serializer = KryoSerializer` | Required by Hudi — bombs with default Java serializer |
+| `spark.sql.extensions = HoodieSparkSessionExtension` | Registers Hudi's SQL rules, including the vector search TVF |
+| `spark.sql.catalog.spark_catalog = HoodieCatalog` | Makes `CREATE TABLE` aware of Hudi |
+| `spark.sql.session.timeZone = UTC` | Determinism |
+| `hoodie.read.blob.inline.mode = CONTENT` | Explicit default — flip to `DESCRIPTOR` to exercise the new descriptor read path |
+| `spark.default.parallelism = 2`, `spark.sql.shuffle.partitions = 2` | On macOS, too many Python workers streaming BLOB bytes saturates localhost socket buffers; 2 workers is plenty for a demo |
+
+### Section 2 — `load_dataset()`
+
+Pulls N random images from torchvision's Oxford-IIIT Pet (37 dog/cat breeds).
+Each row becomes a Python dict with the PNG bytes in a *staging* column called
+`image_bytes_raw`. The BLOB struct shape is applied later — simpler to write
+the dict with a flat binary field than to hand-build nested dicts.
+
+### Section 3 — Embedding model
+
+Uses `timm.create_model("mobilenetv3_small_100", pretrained=True, num_classes=0)`.
+`num_classes=0` strips the classifier head so `model(x)` returns feature
+vectors, not predictions. `sklearn.preprocessing.normalize` L2-normalizes the
+embeddings so cosine distance = `1 - dot_product`. Returns
+`(data, embedding_dim)` — the dim (1024 for this backbone) is data-driven and
+becomes the `N` in `VECTOR(N)`.
+
+### Section 4 — Writing to Hudi
+
+Three functions work together:
+
+**`build_staging_schema(embedding_dim)`** builds the `StructType`.  The
+`embedding` field carries `metadata={"hudi_type": f"VECTOR({N})"}` directly —
+`StructField.metadata` survives `createDataFrame` untouched, so this is how
+the VECTOR tag reaches the write path.
+
+**`inline_blob_struct(bytes_col)`** constructs a `struct<type, data, reference>`
+column expression. Mirrors `BlobTestHelpers.inlineBlobStructCol` in the Scala
+test code. The `reference` field is a null cast to the full
+`struct<external_path, offset, length, managed>` shape so Spark's schema
+inference doesn't produce a `struct<>` mismatch.
+
+**`stamp_blob_metadata(df, "image_bytes")`** re-selects every column and
+stamps `hudi_type=BLOB` on the target via `col(name).alias(name, metadata={...})`.
+PySpark gives you no other way to attach `Metadata` to an existing struct
+column.
+
+**`write_to_hudi(spark, data, embedding_dim)`** ties them together:
+1. `createDataFrame(data, schema)` — flat `image_bytes_raw`, VECTOR-tagged `embedding`
+2. `withColumn("image_bytes", inline_blob_struct(...))` + `drop("image_bytes_raw")`
+3. `stamp_blob_metadata(..., "image_bytes")`
+4. `.write.format("hudi")` with these options (the interesting ones):
+   - `hoodie.table.base.file.format = lance` — the switch from Parquet to Lance
+   - `hoodie.datasource.write.partitionpath.field = category_sanitized` — 37 breed partitions
+   - `hoodie.write.record.merge.custom.implementation.classes = DefaultSparkRecordMerger` — required to merge Spark rows with Hudi's logical types
+
+### Section 5 — `find_similar()`
+
+Builds a literal SQL string: `ARRAY(f1, f2, ...)` (1024 floats inlined into
+the query). The `hudi_vector_search` TVF requires the query vector to be a
+constant expression, so a scalar subquery won't work — the literal is the
+documented pattern, matching `TestHoodieVectorSearchFunction.scala`.
+
+Calls:
+```sql
+SELECT image_id, category, image_bytes, _hudi_distance
+FROM hudi_vector_search('<path>', 'embedding', ARRAY(...), k+1, 'cosine')
+ORDER BY _hudi_distance
+```
+
+Notes:
+- Asks for `top_k + 1` because the query image is itself in the corpus
+  (distance ≈ 0) and gets skipped in the result loop.
+- Reads the image bytes out of the struct with `row["image_bytes"]["data"]`
+  — in CONTENT mode the BLOB comes back as the full struct, and the inline
+  bytes live in the `data` field.
+
+### Section 6 — `visualize_and_save()`
+
+Pure matplotlib. Saves `query.png`, `top1.png` … `top5.png`, and a combined
+panel at `hudi_lance_results.png`. Uses the `Agg` backend so it runs headless.
+
+### `main()`
+
+Linear flow — no branches:
+
+```
+create_spark()
+  → load_dataset()
+  → create_embedding_model() + generate_embeddings()
+  → write_to_hudi()
+  → (pick random row as query)
+  → find_similar()
+  → visualize_and_save()
+  → spark.stop()
+```
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
