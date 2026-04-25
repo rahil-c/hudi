@@ -71,6 +71,10 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
 
   private val tableId = new AtomicInteger(0)
 
+  // Mirrors the Lance metadata key on the BLOB `data` Arrow field; kept here so the test asserts
+  // the on-disk invariant against a constant rather than a literal.
+  private val LANCE_BLOB_ENCODING_KEY = "lance-encoding:blob"
+
   private def generateTableName: String = {
     s"lance_sql_${tableId.incrementAndGet()}"
   }
@@ -981,7 +985,7 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
           .getOrElse(throw new AssertionError(
             s"No nested '${HoodieSchema.Blob.INLINE_DATA_FIELD}' field in $lanceFile"))
         val md = dataField.getMetadata
-        assertTrue(md != null && "true".equalsIgnoreCase(md.get("lance-encoding:blob")),
+        assertTrue(md != null && "true".equalsIgnoreCase(md.get(LANCE_BLOB_ENCODING_KEY)),
           s"Lance blob-encoding metadata missing on ${dataField.getName}: $md")
         assertTrue(dataField.getType.isInstanceOf[ArrowType.LargeBinary],
           s"Expected LargeBinary for ${dataField.getName}, got ${dataField.getType}")

@@ -21,10 +21,11 @@ package org.apache.spark.sql.execution.datasources.lance
 
 import org.apache.hudi.SparkAdapterSupport.sparkAdapter
 import org.apache.hudi.common.config.HoodieReaderConfig
+import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType}
 import org.apache.hudi.common.util
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.memory.HoodieArrowAllocator
-import org.apache.hudi.io.storage.{BlobLanceSchemaSupport, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
+import org.apache.hudi.io.storage.{HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
 import org.apache.hudi.storage.StorageConfiguration
 
 import org.apache.hadoop.conf.Configuration
@@ -222,12 +223,20 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
    */
   private def widenBlobSubtreeNullability(schema: StructType): StructType = {
     StructType(schema.fields.map { f =>
-      if (BlobLanceSchemaSupport.isBlobField(f)) {
+      if (isBlobField(f)) {
         f.copy(nullable = true, dataType = forceTypeNullable(f.dataType))
       } else {
         f
       }
     })
+  }
+
+  private def isBlobField(field: StructField): Boolean = {
+    val md = field.metadata
+    md != null &&
+      md.contains(HoodieSchema.TYPE_METADATA_FIELD) &&
+      HoodieSchema.parseTypeDescriptor(md.getString(HoodieSchema.TYPE_METADATA_FIELD))
+        .getType == HoodieSchemaType.BLOB
   }
 
   private def forceFieldNullable(field: StructField): StructField =
