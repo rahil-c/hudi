@@ -26,7 +26,7 @@ import org.apache.hudi.common.util
 import org.apache.hudi.common.util.collection.ClosableIterator
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.memory.HoodieArrowAllocator
-import org.apache.hudi.io.storage.{BlobDescriptorLanceRecordIterator, BlobLanceSchemaSupport, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
+import org.apache.hudi.io.storage.{BlobDescriptorLanceRecordIterator, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
 import org.apache.hudi.storage.StorageConfiguration
 
 import org.apache.hadoop.conf.Configuration
@@ -116,21 +116,6 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         // Filter schema to only fields that exist in file (Lance can only read columns present in file).
         val requestSchema =
           SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema)
-
-        // Identify blob column names. When present we open Lance in DESCRIPTOR mode and let
-        // LanceRecordIterator synthesize the Hudi OUT_OF_LINE reference rows directly from
-        // lance-spark's BlobStructAccessor (public API). No descriptor-shape schema is exposed
-        // to the projection.
-        val hasBlobColumns = requestSchema.fields.exists(BlobLanceSchemaSupport.isBlobField)
-        val blobFieldNameSet: java.util.Set[String] = if (hasBlobColumns) {
-          val names = new java.util.HashSet[String]()
-          requestSchema.fields.foreach { f =>
-            if (BlobLanceSchemaSupport.isBlobField(f)) names.add(f.name)
-          }
-          names
-        } else {
-          java.util.Collections.emptySet[String]()
-        }
 
         // Lance returns null BLOB sub-structs as non-null parents with null children; widen
         // nullability inside BLOB subtrees so the codegen projection doesn't NPE on them.
