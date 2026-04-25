@@ -2590,7 +2590,7 @@ class HoodieSpark3_4ExtendedSqlAstBuilder(conf: SQLConf, delegate: ParserInterfa
    * Resolve/create a primitive type.
    */
   override def visitPrimitiveDataType(ctx: PrimitiveDataTypeContext): DataType = withOrigin(ctx) {
-    val dataType = ctx.identifier.getText.toLowerCase(Locale.ROOT)
+    val dataType = ctx.typeName.getText.toLowerCase(Locale.ROOT)
     (dataType, ctx.INTEGER_VALUE().asScala.toList) match {
       case ("boolean", Nil) => BooleanType
       case ("tinyint" | "byte", Nil) => ByteType
@@ -2609,6 +2609,21 @@ class HoodieSpark3_4ExtendedSqlAstBuilder(conf: SQLConf, delegate: ParserInterfa
       case ("varchar", length :: Nil) => VarcharType(length.getText.toInt)
       case ("binary", Nil) => BinaryType
       case ("blob", Nil) => BlobType()
+      case ("vector", _ :: _) =>
+        // Delegate validation to HoodieSchema.parseTypeDescriptor which handles dimension
+        // range checks, element type validation, and canonical normalization.
+        val vectorSchema = try {
+          HoodieSchema.parseTypeDescriptor(ctx.getText).asInstanceOf[HoodieSchema.Vector]
+        } catch {
+          case e: IllegalArgumentException =>
+            throw new ParseException(s"Invalid VECTOR type: ${e.getMessage}", ctx)
+        }
+        val sparkElemType = vectorSchema.getVectorElementType match {
+          case HoodieSchema.Vector.VectorElementType.FLOAT => FloatType
+          case HoodieSchema.Vector.VectorElementType.DOUBLE => DoubleType
+          case HoodieSchema.Vector.VectorElementType.INT8 => ByteType
+        }
+        ArrayType(sparkElemType, containsNull = false)
       case ("decimal" | "dec" | "numeric", Nil) => DecimalType.USER_DEFAULT
       case ("decimal" | "dec" | "numeric", precision :: Nil) =>
         DecimalType(precision.getText.toInt, 0)
@@ -2705,8 +2720,13 @@ class HoodieSpark3_4ExtendedSqlAstBuilder(conf: SQLConf, delegate: ParserInterfa
 
   private def addMetadataForType(dataType: HoodieSqlBaseParser.DataTypeContext, builder: MetadataBuilder): Unit = {
     val typeText = dataType.getText
-    if (typeText.equalsIgnoreCase(HoodieSchemaType.BLOB.name())) {
+    val upperTypeText = typeText.toUpperCase(Locale.ROOT)
+    if (upperTypeText == HoodieSchemaType.BLOB.name()) {
       builder.putString(HoodieSchema.TYPE_METADATA_FIELD, HoodieSchemaType.BLOB.name())
+    } else if (upperTypeText.startsWith("VECTOR(")) {
+      // Normalize to canonical form (e.g. "VECTOR(128,FLOAT)" -> "VECTOR(128)")
+      val vectorSchema = HoodieSchema.parseTypeDescriptor(typeText).asInstanceOf[HoodieSchema.Vector]
+      builder.putString(HoodieSchema.TYPE_METADATA_FIELD, vectorSchema.toTypeDescriptor)
     }
   }
 
@@ -3404,14 +3424,14 @@ class HoodieSpark3_4ExtendedSqlAstBuilder(conf: SQLConf, delegate: ParserInterfa
   }
 
   /**
-   * Show indexes, returning a [[ShowIndexes]] logical plan.
+   * Show indexes, returning a [[HoodieShowIndexes]] logical plan.
    * For example:
    * {{{
    *   SHOW INDEXES (FROM | IN) [TABLE] table_name
    * }}}
    */
   override def visitShowIndexes(ctx: ShowIndexesContext): LogicalPlan = withOrigin(ctx) {
-    ShowIndexes(UnresolvedRelation(visitTableIdentifier(ctx.tableIdentifier())))
+    HoodieShowIndexes(UnresolvedRelation(visitTableIdentifier(ctx.tableIdentifier())))
   }
 
   /**

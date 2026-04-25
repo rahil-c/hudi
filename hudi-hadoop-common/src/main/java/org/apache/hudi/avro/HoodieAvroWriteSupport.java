@@ -50,7 +50,7 @@ public class HoodieAvroWriteSupport<T> extends AvroWriteSupport<T> {
     this.properties = properties;
     String vectorMeta = HoodieSchema.buildVectorColumnsMetadataValue(hoodieSchema);
     if (!vectorMeta.isEmpty()) {
-      footerMetadata.put(HoodieSchema.PARQUET_VECTOR_COLUMNS_METADATA_KEY, vectorMeta);
+      footerMetadata.put(HoodieSchema.VECTOR_COLUMNS_METADATA_KEY, vectorMeta);
     }
   }
 

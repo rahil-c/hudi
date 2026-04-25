@@ -25,17 +25,23 @@ import org.apache.hudi.common.schema.HoodieSchemaType;
 import org.apache.spark.sql.catalyst.expressions.UnsafeArrayData;
 import org.apache.spark.sql.catalyst.util.ArrayData;
 import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.BinaryType$;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 
 import java.nio.ByteBuffer;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
@@ -61,7 +67,7 @@ public final class VectorConversionUtils {
    * @return map from field index to Vector schema; empty map if schema is null or has no vectors
    */
   public static Map<Integer, HoodieSchema.Vector> detectVectorColumns(HoodieSchema schema) {
-    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new HashMap<>();
+    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new LinkedHashMap<>();
     if (schema == null) {
       return vectorColumnInfo;
     }
@@ -76,6 +82,28 @@ public final class VectorConversionUtils {
   }
 
   /**
+   * Builds the {@link HoodieSchema#VECTOR_COLUMNS_METADATA_KEY} footer value
+   * from a Spark {@link StructType} by detecting VECTOR metadata annotations and
+   * delegating to {@link HoodieSchema#serializeVectorColumnsMetadata}.
+   *
+   * @param schema Spark StructType (may be null)
+   * @return comma-separated descriptor list, or empty string if no VECTOR columns
+   * @see HoodieSchema#serializeVectorColumnsMetadata(java.util.Map)
+   */
+  public static String buildVectorColumnsFooterValue(StructType schema) {
+    if (schema == null) {
+      return "";
+    }
+    Map<Integer, HoodieSchema.Vector> detected = detectVectorColumnsFromMetadata(schema);
+    StructField[] fields = schema.fields();
+    LinkedHashMap<String, HoodieSchema.Vector> named = new LinkedHashMap<>();
+    for (Map.Entry<Integer, HoodieSchema.Vector> entry : detected.entrySet()) {
+      named.put(fields[entry.getKey()].name(), entry.getValue());
+    }
+    return HoodieSchema.serializeVectorColumnsMetadata(named);
+  }
+
+  /**
    * Detects VECTOR columns from Spark StructType metadata annotations.
    * Fields with metadata key {@link HoodieSchema#TYPE_METADATA_FIELD} starting with "VECTOR"
    * are parsed and included.
@@ -84,7 +112,8 @@ public final class VectorConversionUtils {
    * @return map from field index to Vector schema; empty map if no vectors found
    */
   public static Map<Integer, HoodieSchema.Vector> detectVectorColumnsFromMetadata(StructType schema) {
-    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new HashMap<>();
+    // Use LinkedHashMap so callers iterate in field-ordinal order (stable across JDKs).
+    Map<Integer, HoodieSchema.Vector> vectorColumnInfo = new LinkedHashMap<>();
     if (schema == null) {
       return vectorColumnInfo;
     }
@@ -234,5 +263,81 @@ public final class VectorConversionUtils {
         result.update(i, row.get(i, readSchema.apply(i).dataType()));
       }
     }
+  }
+
+  /**
+   * Re-attaches {@link HoodieSchema#TYPE_METADATA_FIELD} to Spark fields that are
+   * Arrow {@code FixedSizeList<Float32|Float64, dim>} in the Lance file.
+   * {@code LanceArrowUtils.fromArrowSchema} strips Hudi's VECTOR descriptor during
+   * Arrow→Spark conversion but preserves the fixed-size-list dimension under the
+   * lance-spark metadata key {@link LanceArrowUtils#ARROW_FIXED_SIZE_LIST_SIZE_KEY()}.
+   *
+   * <p>A FixedSizeList alone does not prove the column is a Hudi VECTOR — a
+   * non-Hudi Lance file could contain one. Callers must pass {@code vectorColumnNames}
+   * (derived from the Hudi schema's VECTOR-tagged fields, e.g. via
+   * {@link #detectVectorColumnsFromMetadata(StructType)}) so that only fields known to
+   * be Hudi VECTORs are restored. Pass an empty set to skip the restore entirely.
+   *
+   * <p>Nested structs are not recursed.
+   */
+  public static StructType restoreVectorMetadata(StructType convertedSpark, Set<String> vectorColumnNames) {
+    if (convertedSpark == null) {
+      return null;
+    }
+    if (vectorColumnNames == null || vectorColumnNames.isEmpty()) {
+      return convertedSpark;
+    }
+    StructField[] sparkFields = convertedSpark.fields();
+    StructField[] newFields = new StructField[sparkFields.length];
+    boolean changed = false;
+    for (int i = 0; i < sparkFields.length; i++) {
+      StructField sf = sparkFields[i];
+      String descriptor = vectorColumnNames.contains(sf.name()) ? deriveVectorDescriptor(sf) : null;
+      if (descriptor == null) {
+        newFields[i] = sf;
+      } else {
+        // VECTOR contract: elements are non-nullable. lance-spark's Arrow→Spark
+        // conversion produces ArrayType(containsNull=true); force containsNull=false
+        // so the field round-trips through HoodieSchema conversion.
+        DataType arrayType = DataTypes.createArrayType(
+            ((ArrayType) sf.dataType()).elementType(), false);
+        newFields[i] = new StructField(
+            sf.name(),
+            arrayType,
+            sf.nullable(),
+            new MetadataBuilder()
+                .withMetadata(sf.metadata())
+                .putString(HoodieSchema.TYPE_METADATA_FIELD, descriptor)
+                .build());
+        changed = true;
+      }
+    }
+    return changed ? new StructType(newFields) : convertedSpark;
+  }
+
+  /**
+   * Derives Hudi's VECTOR type descriptor for a Spark field if lance-spark tagged it
+   * with {@link LanceArrowUtils#ARROW_FIXED_SIZE_LIST_SIZE_KEY()} and its data type is
+   * {@code ArrayType(Float|Double, containsNull=false)}; otherwise returns null.
+   */
+  private static String deriveVectorDescriptor(StructField sf) {
+    String sizeKey = LanceArrowUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY();
+    if (!sf.metadata().contains(sizeKey)) {
+      return null;
+    }
+    if (!(sf.dataType() instanceof ArrayType)) {
+      return null;
+    }
+    DataType elemType = ((ArrayType) sf.dataType()).elementType();
+    HoodieSchema.Vector.VectorElementType elementType;
+    if (DataTypes.FloatType.equals(elemType)) {
+      elementType = HoodieSchema.Vector.VectorElementType.FLOAT;
+    } else if (DataTypes.DoubleType.equals(elemType)) {
+      elementType = HoodieSchema.Vector.VectorElementType.DOUBLE;
+    } else {
+      return null;
+    }
+    int dim = (int) sf.metadata().getLong(sizeKey);
+    return HoodieSchema.createVector(dim, elementType).toTypeDescriptor();
   }
 }

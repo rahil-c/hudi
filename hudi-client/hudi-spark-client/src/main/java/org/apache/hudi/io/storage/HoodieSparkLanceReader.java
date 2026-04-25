@@ -43,6 +43,8 @@ import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
+import org.lance.file.BlobReadMode;
+import org.lance.file.FileReadOptions;
 import org.lance.file.LanceFileReader;
 
 import java.io.IOException;
@@ -189,8 +191,10 @@ public class HoodieSparkLanceReader implements HoodieSparkFileReader {
         columnNames.add(field.name());
       }
 
-      // Read only the requested columns from Lance file for efficiency
-      ArrowReader arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE);
+      // Pinned to CONTENT: compaction/merge/log-replay need actual bytes to rewrite.
+      // The user-facing `hoodie.read.blob.inline.mode` is honored by SparkLanceReaderBase.
+      FileReadOptions readOpts = FileReadOptions.builder().blobReadMode(BlobReadMode.CONTENT).build();
+      ArrowReader arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts);
 
       return new LanceRecordIterator(allocator, lanceReader, arrowReader, requestedSparkSchema, path.toString());
     } catch (Exception e) {
@@ -202,7 +206,11 @@ public class HoodieSparkLanceReader implements HoodieSparkFileReader {
   @Override
   public HoodieSchema getSchema() {
     try {
-      StructType structType = LanceArrowUtils.fromArrowSchema(arrowSchema);
+      Map<String, String> customMetadata = arrowSchema.getCustomMetadata();
+      Set<String> vectorColumnNames = HoodieSchema.parseVectorColumnNames(
+          customMetadata == null ? null : customMetadata.get(HoodieSchema.VECTOR_COLUMNS_METADATA_KEY));
+      StructType structType = VectorConversionUtils.restoreVectorMetadata(
+          LanceArrowUtils.fromArrowSchema(arrowSchema), vectorColumnNames);
       return HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(structType, "record", "", false);
     } catch (Exception e) {
       throw new HoodieException("Failed to read schema from Lance file: " + path, e);

@@ -23,7 +23,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hudi.SparkFileFormatInternalRowReaderContext.{filterIsSafeForBootstrap, filterIsSafeForPrimaryKey, getAppliedRequiredSchema}
 import org.apache.hudi.common.engine.HoodieReaderContext
 import org.apache.hudi.common.fs.FSUtils
-import org.apache.hudi.common.model.HoodieRecord
+import org.apache.hudi.common.model.{HoodieFileFormat, HoodieRecord}
 import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaUtils}
 import org.apache.hudi.common.table.HoodieTableConfig
 import org.apache.hudi.common.table.read.buffer.PositionBasedFileGroupRecordBuffer.ROW_INDEX_TEMPORARY_COLUMN_NAME
@@ -81,9 +81,16 @@ class SparkFileFormatInternalRowReaderContext(baseFileReader: SparkColumnarFileR
     }
     val structType = HoodieInternalRowUtils.getCachedSchema(requiredSchema)
 
-    // Detect VECTOR columns and replace with BinaryType for the Parquet reader
-    // (Parquet stores VECTOR as FIXED_LEN_BYTE_ARRAY which Spark maps to BinaryType)
-    val vectorColumnInfo = SparkFileFormatInternalRowReaderContext.detectVectorColumns(requiredSchema)
+    // Parquet stores VECTOR as FIXED_LEN_BYTE_ARRAY, so the reader needs BinaryType
+    // and we decode back to ArrayType below. Lance returns ArrayType natively, so skip
+    // the rewrite only for Lance base files; log files always go through the rewrite path.
+    val isLanceBaseFile = FSUtils.isBaseFile(filePath) &&
+      tableConfig.getBaseFileFormat == HoodieFileFormat.LANCE
+    val vectorColumnInfo: Map[Int, HoodieSchema.Vector] = if (isLanceBaseFile) {
+      Map.empty
+    } else {
+      SparkFileFormatInternalRowReaderContext.detectVectorColumns(requiredSchema)
+    }
     val parquetReadStructType = if (vectorColumnInfo.nonEmpty) {
       SparkFileFormatInternalRowReaderContext.replaceVectorColumnsWithBinary(structType, vectorColumnInfo)
     } else {

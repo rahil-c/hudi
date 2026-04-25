@@ -20,10 +20,12 @@
 package org.apache.spark.sql.execution.datasources.lance
 
 import org.apache.hudi.SparkAdapterSupport.sparkAdapter
+import org.apache.hudi.common.config.HoodieReaderConfig
 import org.apache.hudi.common.util
+import org.apache.hudi.common.util.collection.ClosableIterator
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.memory.HoodieArrowAllocator
-import org.apache.hudi.io.storage.{HoodieSparkLanceReader, LanceRecordIterator}
+import org.apache.hudi.io.storage.{BlobDescriptorLanceRecordIterator, BlobLanceSchemaSupport, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
 import org.apache.hudi.storage.StorageConfiguration
 
 import org.apache.hadoop.conf.Configuration
@@ -35,9 +37,9 @@ import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjectio
 import org.apache.spark.sql.execution.datasources.{PartitionedFile, SparkColumnarFileReader, SparkSchemaTransformUtils}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructField, StructType}
 import org.apache.spark.sql.util.LanceArrowUtils
-import org.lance.file.LanceFileReader
+import org.lance.file.{BlobReadMode, FileReadOptions, LanceFileReader}
 
 import java.io.IOException
 
@@ -79,8 +81,9 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
       // No columns requested - return empty iterator
       Iterator.empty
     } else {
-      // Track iterator for cleanup
-      var lanceIterator: LanceRecordIterator = null
+      // Track iterator for cleanup. Typed as ClosableIterator so we can swap in the
+      // DESCRIPTOR-mode iterator when the user opts into that blob read mode.
+      var lanceIterator: ClosableIterator[UnsafeRow] = null
 
       // Create child allocator for reading
       val allocator = HoodieArrowAllocator.newChildAllocator(getClass.getSimpleName + "-data-" + filePath,
@@ -90,46 +93,76 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         // Open Lance file reader
         val lanceReader = LanceFileReader.open(filePath, allocator)
 
-        // Get schema from Lance file
+        // Get schema from Lance file. lance-spark strips Hudi's VECTOR descriptor during
+        // Arrow→Spark conversion but keeps the fixed-size-list dimension on the Spark
+        // field metadata; rebuild the descriptor from that, using requiredSchema
+        // as the source of truth for which columns are Hudi VECTORs — so non-Hudi fixed-size-lists aren't mis-tagged.
         val arrowSchema = lanceReader.schema()
-        val fileSchema = LanceArrowUtils.fromArrowSchema(arrowSchema)
+        val vectorColumnNames: java.util.Set[String] = VectorConversionUtils
+          .detectVectorColumnsFromMetadata(requiredSchema)
+          .keySet()
+          .asScala
+          .map(i => requiredSchema.fields(i).name)
+          .toSet
+          .asJava
+        val fileSchema = VectorConversionUtils.restoreVectorMetadata(
+          LanceArrowUtils.fromArrowSchema(arrowSchema), vectorColumnNames)
 
         // Build type change info for schema evolution
         val (implicitTypeChangeInfo, sparkRequestSchema) =
           SparkSchemaTransformUtils.buildImplicitSchemaChangeInfo(fileSchema, requiredSchema)
 
-        // Filter schema to only fields that exist in file (Lance can only read columns present in file)
-        val requestSchema = SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema)
+        // Filter schema to only fields that exist in file (Lance can only read columns present in file).
+        val requestSchema =
+          SparkSchemaTransformUtils.filterSchemaByFileSchema(sparkRequestSchema, fileSchema)
 
-        val columnNames = if (requestSchema.nonEmpty) {
-          requestSchema.fieldNames.toList.asJava
+        // Lance returns null BLOB sub-structs as non-null parents with null children; widen
+        // nullability inside BLOB subtrees so the codegen projection doesn't NPE on them.
+        val iteratorSchema = widenBlobSubtreeNullability(requestSchema)
+
+        val columnNames = if (iteratorSchema.nonEmpty) {
+          iteratorSchema.fieldNames.toList.asJava
         } else {
           // If only partition columns requested, read minimal data
           null
         }
 
-        // Read data with column projection (filters not supported yet)
-        val arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE)
+        // Honor `hoodie.read.blob.inline.mode`. CONTENT (default) materializes INLINE bytes in
+        // the `data` column; DESCRIPTOR surfaces per-row {position, size} which the descriptor
+        // iterator rewrites into Hudi OUT_OF_LINE references. Non-blob Lance columns ignore
+        // the option regardless.
+        val blobMode = resolveBlobReadMode(storageConf)
+        val readOpts = FileReadOptions.builder().blobReadMode(blobMode).build()
+        val arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts)
 
-        // Create iterator using shared LanceRecordIterator
-        lanceIterator = new LanceRecordIterator(
-          allocator,
-          lanceReader,
-          arrowReader,
-          requestSchema,
-          filePath
-        )
+        // Dispatch: use the DESCRIPTOR-aware iterator only when the user opted into that mode
+        // AND the request actually has BLOB columns (otherwise the rewrite has nothing to do).
+        val blobFieldNames: java.util.Set[String] = {
+          val names = new java.util.HashSet[String]()
+          iteratorSchema.fields.foreach { f =>
+            if (BlobLanceSchemaSupport.isBlobField(f)) names.add(f.name)
+          }
+          names
+        }
+        lanceIterator = if (blobMode == BlobReadMode.DESCRIPTOR && !blobFieldNames.isEmpty) {
+          new BlobDescriptorLanceRecordIterator(
+            allocator, lanceReader, arrowReader, iteratorSchema, filePath, blobFieldNames)
+        } else {
+          new LanceRecordIterator(allocator, lanceReader, arrowReader, iteratorSchema, filePath)
+        }
 
         // Register cleanup listener
         Option(TaskContext.get()).foreach { ctx =>
           ctx.addTaskCompletionListener[Unit](_ => lanceIterator.close())
         }
 
+        val baseIter: Iterator[InternalRow] = lanceIterator.asScala
+
         // Create the following projections for schema evolution:
         // 1. Padding projection: add NULL for missing columns
         // 2. Casting projection: handle type conversions
         val schemaUtils = sparkAdapter.getSchemaUtils
-        val paddingProj = SparkSchemaTransformUtils.generateNullPaddingProjection(requestSchema, requiredSchema)
+        val paddingProj = SparkSchemaTransformUtils.generateNullPaddingProjection(iteratorSchema, requiredSchema)
         val castProj = SparkSchemaTransformUtils.generateUnsafeProjection(
           schemaUtils.toAttributes(requiredSchema),
           Some(SQLConf.get.sessionLocalTimeZone),
@@ -144,7 +177,7 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           def apply(row: InternalRow): UnsafeRow =
             castProj(paddingProj(row))
         }
-        val projectedIter = lanceIterator.asScala.map(projection.apply)
+        val projectedIter = baseIter.map(projection.apply)
 
         // Handle partition columns
         if (partitionSchema.length == 0) {
@@ -171,5 +204,54 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
           throw new IOException(s"Failed to read Lance file: $filePath", e)
       }
     }
+  }
+
+  /**
+   * Resolve the Lance blob read mode from {@code hoodie.read.blob.inline.mode}. Unknown values
+   * fail fast so typos don't silently fall back to the default.
+   */
+  private def resolveBlobReadMode(storageConf: StorageConfiguration[Configuration]): BlobReadMode = {
+    val configured = storageConf.unwrap()
+      .get(HoodieReaderConfig.BLOB_INLINE_READ_MODE.key(),
+        HoodieReaderConfig.BLOB_INLINE_READ_MODE.defaultValue())
+    configured.toUpperCase match {
+      case HoodieReaderConfig.BLOB_INLINE_READ_MODE_CONTENT => BlobReadMode.CONTENT
+      case HoodieReaderConfig.BLOB_INLINE_READ_MODE_DESCRIPTOR => BlobReadMode.DESCRIPTOR
+      case other =>
+        throw new IllegalArgumentException(
+          s"Unsupported value '$other' for ${HoodieReaderConfig.BLOB_INLINE_READ_MODE.key()}; " +
+            s"expected one of [${HoodieReaderConfig.BLOB_INLINE_READ_MODE_CONTENT}, " +
+            s"${HoodieReaderConfig.BLOB_INLINE_READ_MODE_DESCRIPTOR}]")
+    }
+  }
+
+  /**
+   * Widens nullability to true only within BLOB subtrees: the BLOB field itself and all of its
+   * descendants. Lance can materialize a BLOB's nested struct (e.g. `reference` for an INLINE
+   * row) as non-null with all-null leaves, which the downstream codegen projection would NPE
+   * on if the Hudi schema declares those leaves non-nullable. Non-blob fields keep their
+   * original nullability so their contracts aren't silently loosened.
+   */
+  private def widenBlobSubtreeNullability(schema: StructType): StructType = {
+    StructType(schema.fields.map { f =>
+      if (BlobLanceSchemaSupport.isBlobField(f)) {
+        f.copy(nullable = true, dataType = forceTypeNullable(f.dataType))
+      } else {
+        f
+      }
+    })
+  }
+
+  private def forceFieldNullable(field: StructField): StructField =
+    field.copy(nullable = true, dataType = forceTypeNullable(field.dataType))
+
+  private def forceTypeNullable(dt: DataType): DataType = dt match {
+    case s: StructType => StructType(s.fields.map(forceFieldNullable))
+    case a: ArrayType => a.copy(elementType = forceTypeNullable(a.elementType), containsNull = true)
+    case m: MapType => m.copy(
+      keyType = forceTypeNullable(m.keyType),
+      valueType = forceTypeNullable(m.valueType),
+      valueContainsNull = true)
+    case other => other
   }
 }

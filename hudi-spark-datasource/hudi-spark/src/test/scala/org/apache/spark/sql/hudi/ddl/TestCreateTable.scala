@@ -37,6 +37,7 @@ import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.{CatalogTableType, HoodieCatalogTable}
 import org.apache.spark.sql.functions.{col, concat, expr, lit}
 import org.apache.spark.sql.hudi.HoodieSqlCommonUtils
+import org.apache.spark.sql.hudi.command.CreateHoodieTableCommand
 import org.apache.spark.sql.hudi.common.HoodieSparkSqlTestBase
 import org.apache.spark.sql.hudi.common.HoodieSparkSqlTestBase.{disableComplexKeygenValidation, getLastCommitMetadata}
 import org.apache.spark.sql.types._
@@ -2118,6 +2119,310 @@ class TestCreateTable extends HoodieSparkSqlTestBase {
       val schema = spark.table(tableName).schema
       val blobPathField = schema.find(_.name == "blob_path").get
       assertTrue(blobPathField.dataType.isInstanceOf[StringType])
+    }
+  }
+
+  test("test create table with VECTOR column") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  embedding VECTOR(128) COMMENT 'document embedding'
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)
+
+      val schema = spark.table(tableName).schema
+      val embeddingField = schema.find(_.name == "embedding").get
+      assertTrue(embeddingField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals("VECTOR(128)", embeddingField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals("document embedding", embeddingField.metadata.getString("comment"))
+      assertEquals(ArrayType(FloatType, containsNull = false), embeddingField.dataType)
+    }
+  }
+
+  test("test create table with VECTOR column with element type") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  embedding VECTOR(64, DOUBLE)
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)
+
+      val schema = spark.table(tableName).schema
+      val embeddingField = schema.find(_.name == "embedding").get
+      assertTrue(embeddingField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals("VECTOR(64, DOUBLE)", embeddingField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals(ArrayType(DoubleType, containsNull = false), embeddingField.dataType)
+    }
+  }
+
+  test("test create table with multiple VECTOR columns") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  float_vec VECTOR(128),
+           |  float_vec_explicit VECTOR(128, FLOAT),
+           |  double_vec VECTOR(64, DOUBLE),
+           |  int8_vec VECTOR(256, INT8) NOT NULL
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)
+
+      val schema = spark.table(tableName).schema
+
+      val floatVecField = schema.find(_.name == "float_vec").get
+      assertEquals("VECTOR(128)", floatVecField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals(ArrayType(FloatType, containsNull = false), floatVecField.dataType)
+      assertTrue(floatVecField.nullable)
+
+      // VECTOR(128, FLOAT) should be normalized to the canonical form "VECTOR(128)"
+      val floatVecExplicitField = schema.find(_.name == "float_vec_explicit").get
+      assertEquals("VECTOR(128)", floatVecExplicitField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals(ArrayType(FloatType, containsNull = false), floatVecExplicitField.dataType)
+
+      val doubleVecField = schema.find(_.name == "double_vec").get
+      assertEquals("VECTOR(64, DOUBLE)", doubleVecField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals(ArrayType(DoubleType, containsNull = false), doubleVecField.dataType)
+
+      val int8VecField = schema.find(_.name == "int8_vec").get
+      assertEquals("VECTOR(256, INT8)", int8VecField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals(ArrayType(ByteType, containsNull = false), int8VecField.dataType)
+      assertFalse(int8VecField.nullable)
+    }
+  }
+
+  test("test create table with INT8 VECTOR column") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  embedding VECTOR(256, INT8)
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)
+
+      val schema = spark.table(tableName).schema
+      val embeddingField = schema.find(_.name == "embedding").get
+      assertEquals("VECTOR(256, INT8)", embeddingField.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals(ArrayType(ByteType, containsNull = false), embeddingField.dataType)
+    }
+  }
+
+  test("test create table with VECTOR without dimension fails") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      checkExceptionContain(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  v VECTOR
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)("vector is not supported")
+    }
+  }
+
+  test("test create table with invalid VECTOR type surfaces ParseException") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      // Unsupported element type
+      checkExceptionContain(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  embedding VECTOR(128, BOOLEAN)
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)("Invalid VECTOR type")
+    }
+  }
+
+  test("test create table with VECTOR column case insensitive") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  embedding vector(128)
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)
+
+      val schema = spark.table(tableName).schema
+      val embeddingField = schema.find(_.name == "embedding").get
+      assertTrue(embeddingField.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
+      assertEquals(ArrayType(FloatType, containsNull = false), embeddingField.dataType)
+    }
+  }
+
+  test("toHiveCompatibleSchema rewrites VECTOR field to BinaryType and preserves metadata") {
+    // VECTOR's on-disk layout is Parquet fixed_len_byte_array (RFC-99); the HMS column must be
+    // BINARY so Hive-side Parquet reads match the physical type. The logical ArrayType(FloatType)
+    // view is preserved in spark.sql.sources.schema.* TBLPROPERTIES via the retained metadata.
+    val vectorMetadata = new MetadataBuilder()
+      .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(3)")
+      .putString("comment", "embedding")
+      .build()
+
+    val schema = StructType(Seq(
+      StructField("id", LongType, nullable = false),
+      StructField("name", StringType),
+      StructField(
+        "embedding",
+        ArrayType(FloatType, containsNull = false),
+        nullable = true,
+        metadata = vectorMetadata),
+      StructField("dt", StringType)))
+
+    val hiveSchema = CreateHoodieTableCommand.toHiveCompatibleSchema(schema)
+
+    val embedding = hiveSchema("embedding")
+    assertEquals(BinaryType, embedding.dataType)
+    assertEquals("binary", embedding.dataType.catalogString)
+    assertTrue(embedding.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD))
+    assertEquals("VECTOR(3)", embedding.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+    assertEquals("embedding", embedding.metadata.getString("comment"))
+
+    // Non-VECTOR fields must pass through unchanged.
+    assertEquals(LongType, hiveSchema("id").dataType)
+    assertEquals(StringType, hiveSchema("name").dataType)
+    assertEquals(StringType, hiveSchema("dt").dataType)
+  }
+
+  test("toHiveCompatibleSchema leaves plain ArrayType(FloatType) without VECTOR marker alone") {
+    // Guard against accidentally rewriting any ArrayType(FloatType). Only fields carrying the
+    // VECTOR descriptor in hudi_type metadata should be converted to BinaryType.
+    val schema = StructType(Seq(
+      StructField("id", LongType, nullable = false),
+      StructField("floats", ArrayType(FloatType, containsNull = false))))
+
+    val hiveSchema = CreateHoodieTableCommand.toHiveCompatibleSchema(schema)
+    assertEquals(ArrayType(FloatType, containsNull = false), hiveSchema("floats").dataType)
+  }
+
+  test("VECTOR column persists as VECTOR in Hudi tableCreateSchema and allows INSERT INTO") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  embedding VECTOR(3)
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)
+
+      val metaClient = createMetaClient(spark, tmp.getCanonicalPath)
+      val persistedOpt = metaClient.getTableConfig.getTableCreateSchema
+      assertTrue(persistedOpt.isPresent, "tableCreateSchema should be present")
+      val persisted = persistedOpt.get()
+      val embedding = persisted.getField("embedding").get().schema().getNonNullType()
+      assertEquals(HoodieSchemaType.VECTOR, embedding.getType)
+      assertEquals(3, embedding.asInstanceOf[HoodieSchema.Vector].getDimension)
+
+      spark.sql(s"""
+        INSERT INTO $tableName VALUES
+          (1, array(cast(0.1 as float), cast(0.2 as float), cast(0.3 as float))),
+          (2, array(cast(0.4 as float), cast(0.5 as float), cast(0.6 as float)))
+      """)
+    }
+  }
+
+  test("BLOB column persists as BLOB in Hudi tableCreateSchema and allows INSERT INTO") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  payload BLOB
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)
+
+      val metaClient = createMetaClient(spark, tmp.getCanonicalPath)
+      val persistedOpt = metaClient.getTableConfig.getTableCreateSchema
+      assertTrue(persistedOpt.isPresent, "tableCreateSchema should be present")
+      val persisted = persistedOpt.get()
+      val payload = persisted.getField("payload").get().schema().getNonNullType()
+      assertEquals(HoodieSchemaType.BLOB, payload.getType)
+
+      spark.sql(
+        s"""
+           |INSERT INTO $tableName VALUES
+           |  (1, named_struct(
+           |        'type', 'INLINE',
+           |        'data', cast(X'010203' as binary),
+           |        'reference', cast(null as struct<external_path:string,offset:bigint,length:bigint,managed:boolean>)))
+           """.stripMargin)
+    }
+  }
+
+  test("BLOB nested in struct persists and allows INSERT INTO") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |CREATE TABLE $tableName (
+           |  id BIGINT,
+           |  media STRUCT<title: STRING, content: BLOB>
+           |) USING hudi
+           |LOCATION '${tmp.getCanonicalPath}'
+           |TBLPROPERTIES (
+           |  primaryKey = 'id'
+           |)
+           """.stripMargin)
+
+      spark.sql(
+        s"""
+           |INSERT INTO $tableName VALUES
+           |  (1, named_struct(
+           |        'title', 'demo',
+           |        'content', named_struct(
+           |          'type', 'INLINE',
+           |          'data', cast(X'0a0b0c' as binary),
+           |          'reference', cast(null as struct<external_path:string,offset:bigint,length:bigint,managed:boolean>))))
+           """.stripMargin)
     }
   }
 }

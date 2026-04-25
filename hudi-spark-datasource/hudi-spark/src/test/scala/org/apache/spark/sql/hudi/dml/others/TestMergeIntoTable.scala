@@ -1802,4 +1802,113 @@ class TestMergeIntoTable extends HoodieSparkSqlTestBase with ScalaAssertionSuppo
         s"Expected TABLE_OR_VIEW_NOT_FOUND error but got: ${exception.getMessage}")
     }
   }
+
+  test("Test MergeInto preserves VECTOR custom-type metadata") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |create table $tableName (
+           |  id bigint,
+           |  embedding VECTOR(3)
+           |) using hudi
+           | location '${tmp.getCanonicalPath}/$tableName'
+           | tblproperties (
+           |  type = 'cow',
+           |  primaryKey = 'id'
+           | )
+         """.stripMargin)
+
+      spark.sql(
+        s"""
+           |insert into $tableName values
+           |  (1, array(cast(0.1 as float), cast(0.2 as float), cast(0.3 as float)))
+           """.stripMargin)
+
+      // MERGE exercises both NOT MATCHED (new row with VECTOR literal) and MATCHED
+      // (UPDATE SET on the VECTOR column). Without the metadata re-attach in
+      // MergeIntoHoodieTableCommand, the Avro schema-compat check throws
+      // MISSING_UNION_BRANCH.
+      spark.sql(
+        s"""
+           |merge into $tableName t
+           |using (
+           |  select 1L as id, array(cast(0.9 as float), cast(0.8 as float), cast(0.7 as float)) as embedding
+           |  union all
+           |  select 2L as id, array(cast(0.4 as float), cast(0.5 as float), cast(0.6 as float)) as embedding
+           |) s
+           |on t.id = s.id
+           |when matched then update set t.embedding = s.embedding
+           |when not matched then insert (id, embedding) values (s.id, s.embedding)
+           """.stripMargin)
+    }
+  }
+
+  test("Test MergeInto preserves BLOB custom-type metadata") {
+    withTempDir { tmp =>
+      val tableName = generateTableName
+      spark.sql(
+        s"""
+           |create table $tableName (
+           |  id bigint,
+           |  payload BLOB
+           |) using hudi
+           | location '${tmp.getCanonicalPath}/$tableName'
+           | tblproperties (
+           |  type = 'cow',
+           |  primaryKey = 'id'
+           | )
+         """.stripMargin)
+
+      // Use OUT_OF_LINE with a concrete reference: per RFC-100 the BLOB struct's
+      // inner reference fields (external_path, managed) are non-null. A
+      // cast(null as struct<...>) inner would type all fields nullable and
+      // Spark's MERGE analyzer rejects narrowing nullable -> non-null at
+      // assignment resolution time (INSERT tolerates it via TableOutputResolver,
+      // MERGE does not).
+      spark.sql(
+        s"""
+           |insert into $tableName values
+           |  (1, named_struct(
+           |        'type', 'OUT_OF_LINE',
+           |        'data', cast(null as binary),
+           |        'reference', named_struct(
+           |          'external_path', 'blobs/seed',
+           |          'offset', 0L,
+           |          'length', 3L,
+           |          'managed', false)))
+           """.stripMargin)
+
+      // MERGE exercises both NOT MATCHED (new row with BLOB literal) and MATCHED
+      // (UPDATE SET on the BLOB column). Without the metadata re-attach in
+      // MergeIntoHoodieTableCommand, the Avro schema-compat check throws
+      // MISSING_UNION_BRANCH.
+      spark.sql(
+        s"""
+           |merge into $tableName t
+           |using (
+           |  select 1L as id, named_struct(
+           |    'type', 'OUT_OF_LINE',
+           |    'data', cast(null as binary),
+           |    'reference', named_struct(
+           |      'external_path', 'blobs/updated',
+           |      'offset', 10L,
+           |      'length', 100L,
+           |      'managed', true)) as payload
+           |  union all
+           |  select 2L as id, named_struct(
+           |    'type', 'OUT_OF_LINE',
+           |    'data', cast(null as binary),
+           |    'reference', named_struct(
+           |      'external_path', 'blobs/inserted',
+           |      'offset', 200L,
+           |      'length', 50L,
+           |      'managed', false)) as payload
+           |) s
+           |on t.id = s.id
+           |when matched then update set t.payload = s.payload
+           |when not matched then insert (id, payload) values (s.id, s.payload)
+           """.stripMargin)
+    }
+  }
 }

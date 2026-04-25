@@ -145,8 +145,7 @@ public class HiveIncrementalPuller {
         lastCommitTime = config.fromCommitTime;
       }
 
-      Connection conn = getConnection();
-      stmt = conn.createStatement();
+      stmt = getConnection().createStatement();
       // drop the temp table if exists
       String tempDbTable = config.tmpDb + "." + config.targetTable + "__" + config.sourceTable;
       String tempDbTablePath =
@@ -171,6 +170,15 @@ public class HiveIncrementalPuller {
         }
       } catch (SQLException e) {
         LOG.error("Could not close the resultSet opened ", e);
+      }
+      try {
+        if (this.connection != null) {
+          this.connection.close();
+        }
+      } catch (SQLException e) {
+        LOG.error("Could not close the JDBC connection", e);
+      } finally {
+        this.connection = null;
       }
     }
   }

@@ -80,6 +80,9 @@ public class HoodieArrayWritableSchemaUtils {
 
   private static Writable rewriteRecordWithNewSchemaInternal(Writable writable, HoodieSchema oldSchema, HoodieSchema newSchema, Map<String, String> renameCols, Deque<String> fieldNames) {
     switch (newSchema.getType()) {
+      // BLOB/VARIANT are physically records; share the RECORD field-by-name rewrite.
+      case BLOB:
+      case VARIANT:
       case RECORD:
         if (!(writable instanceof ArrayWritable)) {
           throw new SchemaCompatibilityException(String.format("Cannot rewrite %s as a record", writable.getClass().getName()));
@@ -99,7 +102,8 @@ public class HoodieArrayWritableSchemaUtils {
           Option<HoodieSchemaField> oldFieldOpt = noFieldsRenaming
               ? oldSchema.getField(newFieldName)
               : oldSchema.getField(getOldFieldNameWithRenaming(namePrefix, newFieldName, renameCols));
-          if (oldFieldOpt.isPresent()) {
+          // Hive nested projection can hand us an ArrayWritable shorter than oldSchema.
+          if (oldFieldOpt.isPresent() && oldFieldOpt.get().pos() < arrayWritable.get().length) {
             HoodieSchemaField oldField = oldFieldOpt.get();
             values[i] = rewriteRecordWithNewSchema(arrayWritable.get()[oldField.pos()], oldField.schema(), newField.schema(), renameCols, fieldNames);
           } else if (newField.defaultVal().isPresent() && newField.defaultVal().get().equals(HoodieSchema.NULL_VALUE)) {
@@ -301,6 +305,23 @@ public class HoodieArrayWritableSchemaUtils {
             BigDecimal bd = new BigDecimal(new BigInteger(buffer.array()), decimal.getScale());
             HiveDecimalWritable converted = new HiveDecimalWritable(HiveDecimal.create(bd));
             return HiveDecimalUtils.enforcePrecisionScale(converted, decimalTypeInfo);
+          }
+        }
+        break;
+      case VECTOR:
+        // Parquet stores VECTOR as a bare FIXED_LEN_BYTE_ARRAY without a logical-type
+        // annotation (see AvroSchemaConverterWithTimestampNTZ#convertField VECTOR branch),
+        // so Hive's Parquet reader reconstructs the Avro schema as plain FIXED named after
+        // the column. When Hudi then projects that record to the canonical VECTOR schema
+        // (fixed named vector_<elem>_<dim> with logicalType=vector), oldSchema.getType() is
+        // FIXED while newSchema.getType() is VECTOR. The byte layout is identical for
+        // StorageBacking.FIXED_BYTES as long as sizes match, so the rewrite is a pass-through.
+        if (oldSchema.getType() == HoodieSchemaType.FIXED
+            && newSchema instanceof HoodieSchema.Vector) {
+          HoodieSchema.Vector vector = (HoodieSchema.Vector) newSchema;
+          if (vector.getStorageBacking() == HoodieSchema.Vector.StorageBacking.FIXED_BYTES
+              && oldSchema.getFixedSize() == vector.getFixedSize()) {
+            return writable;
           }
         }
         break;

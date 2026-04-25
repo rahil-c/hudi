@@ -284,6 +284,13 @@ public class HoodieStorageConfig extends HoodieConfig {
       .withDocumentation("The fully-qualified class name of the factory class to return readers and writers of files used "
           + "by Hudi. The provided class should implement `org.apache.hudi.io.storage.HoodieIOFactory`.");
 
+  public static final ConfigProperty<String> HOODIE_PARQUET_CONFIG_INJECTOR_CLASS = ConfigProperty
+      .key("hoodie.parquet.write.config.injector.class")
+      .noDefaultValue()
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("Config injector implementation for HoodieParquetConfigInjector class, for users willing to inject some custom configs to parquet writers");
+
   /**
    * @deprecated Use {@link #PARQUET_MAX_FILE_SIZE} and its methods instead
    */
@@ -478,6 +485,11 @@ public class HoodieStorageConfig extends HoodieConfig {
       return this;
     }
 
+    public Builder parquetDictionaryEnabled(boolean enable) {
+      storageConfig.setValue(PARQUET_DICTIONARY_ENABLED, String.valueOf(enable));
+      return this;
+    }
+
     public Builder parquetWriteLegacyFormat(String parquetWriteLegacyFormat) {
       storageConfig.setValue(PARQUET_WRITE_LEGACY_FORMAT_ENABLED, parquetWriteLegacyFormat);
       return this;
@@ -552,7 +564,7 @@ public class HoodieStorageConfig extends HoodieConfig {
      * Sets the bloom filter type for the configuration.
      *
      * @param bloomFilterType The bloom filter type (SIMPLE or DYNAMIC_V0)
-     * @return this builder instance for method chaining
+
      */
     public Builder withBloomFilterType(String bloomFilterType) {
       storageConfig.setValue(BLOOM_FILTER_TYPE, bloomFilterType);
@@ -563,7 +575,7 @@ public class HoodieStorageConfig extends HoodieConfig {
      * Sets the number of entries to be stored in the bloom filter.
      *
      * @param numEntries The number of entries for the bloom filter
-     * @return this builder instance for method chaining
+
      */
     public Builder withBloomFilterNumEntries(int numEntries) {
       storageConfig.setValue(BLOOM_FILTER_NUM_ENTRIES_VALUE, String.valueOf(numEntries));
@@ -574,7 +586,7 @@ public class HoodieStorageConfig extends HoodieConfig {
      * Sets the false positive probability (FPP) for the bloom filter.
      *
      * @param fpp The false positive probability as a double
-     * @return this builder instance for method chaining
+
      */
     public Builder withBloomFilterFpp(double fpp) {
       storageConfig.setValue(BLOOM_FILTER_FPP_VALUE, String.valueOf(fpp));
@@ -585,10 +597,21 @@ public class HoodieStorageConfig extends HoodieConfig {
      * Sets the maximum number of entries for dynamic bloom filter.
      *
      * @param maxEntries The maximum number of entries for dynamic bloom filter
-     * @return this builder instance for method chaining
+
      */
     public Builder withBloomFilterDynamicMaxEntries(int maxEntries) {
       storageConfig.setValue(BLOOM_FILTER_DYNAMIC_MAX_ENTRIES, String.valueOf(maxEntries));
+      return this;
+    }
+
+    /**
+     * Sets the parquet config injector class name.
+     *
+     * @param parquetConfigInjectorClass The fully-qualified class name of the parquet config injector
+
+     */
+    public Builder withParquetConfigInjectorClass(String parquetConfigInjectorClass) {
+      storageConfig.setValue(HOODIE_PARQUET_CONFIG_INJECTOR_CLASS, parquetConfigInjectorClass);
       return this;
     }
 

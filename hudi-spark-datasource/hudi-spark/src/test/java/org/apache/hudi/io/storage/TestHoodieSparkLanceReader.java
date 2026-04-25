@@ -27,6 +27,8 @@ import org.apache.hudi.common.bloom.SimpleBloomFilter;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaField;
+import org.apache.hudi.common.schema.HoodieSchemaType;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.ClosableIterator;
@@ -41,6 +43,9 @@ import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
 import org.apache.spark.sql.catalyst.util.GenericArrayData;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Decimal;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -645,6 +650,38 @@ public class TestHoodieSparkLanceReader {
 
         assertBloomFilter(reader, HoodieDynamicBoundedBloomFilter.class, "key0", "key2", 3);
       }
+    }
+  }
+
+  @Test
+  public void testGetSchemaRestoresVectorMetadata() throws Exception {
+    int dim = 4;
+    Metadata vectorFieldMetadata = new MetadataBuilder()
+        .putString(HoodieSchema.TYPE_METADATA_FIELD, "VECTOR(" + dim + ")")
+        .build();
+    StructType schema = new StructType()
+        .add(new StructField("id", DataTypes.IntegerType, false, Metadata.empty()))
+        .add(new StructField(
+            "embedding",
+            DataTypes.createArrayType(DataTypes.FloatType, false),
+            false,
+            vectorFieldMetadata));
+
+    List<InternalRow> rows = new ArrayList<>();
+    rows.add(createRow(1, new Object[] {1.0f, 2.0f, 3.0f, 4.0f}));
+    rows.add(createRow(2, new Object[] {5.0f, 6.0f, 7.0f, 8.0f}));
+
+    StoragePath path = new StoragePath(tempDir.getAbsolutePath() + "/test_vector_schema.lance");
+    try (HoodieSparkLanceReader reader = writeAndCreateReader(path, schema, rows)) {
+      HoodieSchema readSchema = reader.getSchema();
+      HoodieSchemaField embedding = readSchema.getField("embedding")
+          .orElseThrow(() -> new AssertionError("embedding field missing on read schema"));
+      HoodieSchema fieldSchema = embedding.schema().getNonNullType();
+      assertEquals(HoodieSchemaType.VECTOR, fieldSchema.getType(),
+          "embedding must be restored as VECTOR from the FixedSizeList encoding alone");
+      HoodieSchema.Vector vec = (HoodieSchema.Vector) fieldSchema;
+      assertEquals(dim, vec.getDimension());
+      assertEquals(HoodieSchema.Vector.VectorElementType.FLOAT, vec.getVectorElementType());
     }
   }
 

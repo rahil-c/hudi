@@ -37,6 +37,7 @@ import javax.annotation.concurrent.NotThreadSafe;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Map;
 
 /**
@@ -106,6 +107,20 @@ public abstract class HoodieBaseLanceWriter<R, K extends Comparable<K>> implemen
   protected abstract Schema getArrowSchema();
 
   /**
+   * Subclass hook for emitting additional Lance file-footer key-value metadata
+   * alongside any bloom-filter entries. Called once during {@link #close()}.
+   *
+   * <p>Default implementation returns an empty map. Overriders should return a
+   * fresh map; the caller does not retain a reference. Colliding keys are
+   * overwritten per {@code LanceFileWriter.addSchemaMetadata} semantics.
+   *
+   * @return map of footer metadata key-value pairs, or empty map for none
+   */
+  protected Map<String, String> additionalSchemaMetadata() {
+    return Collections.emptyMap();
+  }
+
+  /**
    * Write a single record. Records are buffered and flushed in batches.
    *
    * @param record Record to write
@@ -163,11 +178,21 @@ public abstract class HoodieBaseLanceWriter<R, K extends Comparable<K>> implemen
         writer.write(root);
       }
 
-      // Finalize and write bloom filter metadata
-      if (writer != null && bloomFilterWriteSupportOpt.isPresent()) {
-        Map<String, String> metadata = bloomFilterWriteSupportOpt.get().finalizeMetadata();
-        if (!metadata.isEmpty()) {
-          writer.addSchemaMetadata(metadata);
+      if (writer != null) {
+        // Finalize and write bloom filter metadata
+        if (bloomFilterWriteSupportOpt.isPresent()) {
+          Map<String, String> metadata = bloomFilterWriteSupportOpt.get().finalizeMetadata();
+          if (!metadata.isEmpty()) {
+            writer.addSchemaMetadata(metadata);
+          }
+        }
+
+        // Allow subclasses to contribute additional footer key-value metadata
+        // (e.g. Spark writer emits `hoodie.vector.columns` for forward-compat read).
+        // Called unconditionally; returns an empty map when no VECTOR columns are present.
+        Map<String, String> extra = additionalSchemaMetadata();
+        if (extra != null && !extra.isEmpty()) {
+          writer.addSchemaMetadata(extra);
         }
       }
     } catch (Exception e) {

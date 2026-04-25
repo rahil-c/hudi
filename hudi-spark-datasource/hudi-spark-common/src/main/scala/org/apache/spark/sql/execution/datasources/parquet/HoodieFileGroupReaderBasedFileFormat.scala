@@ -251,7 +251,8 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     partitionSchema.fields.foreach(f => exclusionFields.add(f.name))
     val requestedStructType = StructType(requiredSchema.fields ++ partitionSchema.fields.filter(f => mandatoryFields.contains(f.name)))
     val requestedSchema = HoodieSchemaUtils.pruneDataSchema(schema, HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(requestedStructType, sanitizedTableName), exclusionFields)
-    val dataSchema = HoodieSchemaUtils.pruneDataSchema(schema, HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(dataStructType, sanitizedTableName), exclusionFields)
+    val dataStructTypeWithMandatoryPartitionFields = StructType(dataStructType.fields ++ partitionSchema.fields.filter(f => mandatoryFields.contains(f.name)))
+    val dataSchema = HoodieSchemaUtils.pruneDataSchema(schema, HoodieSchemaConversionUtils.convertStructTypeToHoodieSchema(dataStructTypeWithMandatoryPartitionFields, sanitizedTableName), exclusionFields)
 
     spark.sessionState.conf.setConfString("spark.sql.parquet.enableVectorizedReader", supportVectorizedRead.toString)
 
@@ -431,11 +432,28 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
 
   /**
    * Detects vector columns and replaces them with BinaryType in one step.
+   *
+   * <p>The BinaryType rewrite is Parquet-specific: Hudi stores VECTOR columns as
+   * FIXED_LEN_BYTE_ARRAY in Parquet, so the reader must see BinaryType and the raw
+   * bytes are post-converted back to ArrayType. Other formats (e.g. Lance) encode
+   * vectors natively as Arrow FixedSizeList and return ArrayType directly, so the
+   * rewrite would introduce a spurious ArrayType→BinaryType cast during schema
+   * evolution and break the read. Skip the rewrite for those formats.
+   *
    * @return (modified schema with BinaryType for vectors, vector column ordinal map)
    */
   private def withVectorRewrite(schema: StructType): (StructType, Map[Int, HoodieSchema.Vector]) = {
-    val vecs = detectVectorColumns(schema)
-    if (vecs.nonEmpty) (replaceVectorFieldsWithBinary(schema, vecs), vecs) else (schema, vecs)
+    // Only Parquet needs the BinaryType rewrite; other formats (Lance) return ArrayType natively.
+    if (hoodieFileFormat != HoodieFileFormat.PARQUET) {
+      (schema, Map.empty[Int, HoodieSchema.Vector])
+    } else {
+      val vecs = detectVectorColumns(schema)
+      if (vecs.isEmpty) {
+        (schema, vecs)
+      } else {
+        (replaceVectorFieldsWithBinary(schema, vecs), vecs)
+      }
+    }
   }
 
   /**

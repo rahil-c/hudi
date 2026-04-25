@@ -25,12 +25,13 @@ import org.apache.hudi.avro.model.HoodieCleanerPlan;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.engine.HoodieLocalEngineContext;
 import org.apache.hudi.common.model.CleanFileInfo;
-import org.apache.hudi.common.model.HoodieCleaningPolicy;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.CleanerUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
@@ -42,13 +43,18 @@ import org.apache.hudi.table.action.BaseActionExecutor;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
+import java.text.ParseException;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static org.apache.hudi.common.table.timeline.InstantComparison.LESSER_THAN;
+import static org.apache.hudi.common.table.timeline.InstantComparison.compareTimestamps;
 import static org.apache.hudi.common.util.CleanerUtils.SAVEPOINTED_TIMESTAMPS;
 import static org.apache.hudi.common.util.CollectionUtils.nonEmpty;
 
@@ -94,6 +100,23 @@ public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
     }
   }
 
+  private HoodieCleanerPlan getEmptyCleanerPlan(Option<HoodieInstant> earliestInstant, CleanPlanner<T, I, K, O> planner) throws IOException {
+    HoodieCleanerPlan.Builder cleanBuilder = HoodieCleanerPlan.newBuilder()
+        .setFilePathsToBeDeletedPerPartition(Collections.emptyMap())
+        .setExtraMetadata(prepareExtraMetadata(planner.getSavepointedTimestamps()));
+    if (earliestInstant.isPresent()) {
+      HoodieInstant hoodieInstant = earliestInstant.get();
+      cleanBuilder.setPolicy(config.getCleanerPolicy().name())
+          .setVersion(CleanPlanner.LATEST_CLEAN_PLAN_VERSION)
+          .setEarliestInstantToRetain(new HoodieActionInstant(hoodieInstant.requestedTime(), hoodieInstant.getAction(), hoodieInstant.getState().name()))
+          .setLastCompletedCommitTimestamp(planner.getLastCompletedCommitTimestamp());
+    } else {
+      cleanBuilder.setPolicy(config.getCleanerPolicy().name())
+          .setVersion(CleanPlanner.LATEST_CLEAN_PLAN_VERSION);
+    }
+    return cleanBuilder.build();
+  }
+
   /**
    * Generates List of files to be cleaned.
    *
@@ -109,8 +132,8 @@ public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
       context.clearJobStatus();
 
       if (partitionsToClean.isEmpty()) {
-        log.info("Nothing to clean here. It is already clean");
-        return HoodieCleanerPlan.newBuilder().setPolicy(HoodieCleaningPolicy.KEEP_LATEST_COMMITS.name()).build();
+        log.info("Partitions to clean returned empty. Checking to see if empty clean needs to be created.");
+        return getEmptyCleanerPlan(earliestInstant, planner);
       }
       log.info(
           "Earliest commit to retain for clean : {}",
@@ -213,14 +236,61 @@ public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
       cleanerEngineContext = context;
     }
     final HoodieCleanerPlan cleanerPlan = requestClean(cleanerEngineContext);
-    Option<HoodieCleanerPlan> option = Option.empty();
-    if (nonEmpty(cleanerPlan.getFilePathsToBeDeletedPerPartition())
-        && cleanerPlan.getFilePathsToBeDeletedPerPartition().values().stream().mapToInt(List::size).sum() > 0) {
+    Option<HoodieCleanerPlan> cleanPlanOpt = Option.empty();
+    if ((cleanerPlan.getPartitionsToBeDeleted() != null && !cleanerPlan.getPartitionsToBeDeleted().isEmpty())
+        || (nonEmpty(cleanerPlan.getFilePathsToBeDeletedPerPartition())
+        && cleanerPlan.getFilePathsToBeDeletedPerPartition().values().stream().mapToInt(List::size).sum() > 0)) {
       // Only create cleaner plan which does some work
-      option = Option.of(cleanerPlan);
+      cleanPlanOpt = Option.of(cleanerPlan);
     }
+    // If cleaner plan returned an empty list, incremental clean is enabled and there was no
+    // completed clean created in the last X hours configured in MAX_DURATION_TO_CREATE_EMPTY_CLEAN,
+    // create a dummy clean to avoid full scan in the future.
+    // Note: For a dataset with incremental clean enabled, that does not receive any updates, cleaner plan always comes
+    // with an empty list of files to be cleaned.  CleanActionExecutor would never be invoked for this dataset.
+    // To avoid fullscan on the dataset with every ingestion run, empty clean commit is created here.
+    if (cleanPlanOpt.isEmpty() && config.incrementalCleanerModeEnabled() && cleanerPlan.getEarliestInstantToRetain() != null && config.maxIntervalToCreateEmptyCleanHours() > 0) {
+      // Only create an empty clean commit if earliestInstantToRetain is present in the plan
+      boolean eligibleForEmptyCleanCommit = true;
 
-    return option;
+      // if there is no previous clean instant or the previous clean instant was before the configured max duration, schedule an empty clean commit
+      Option<HoodieInstant> lastCleanInstant = table.getCleanTimeline().filterCompletedInstants().lastInstant();
+      if (lastCleanInstant.isPresent()) {
+        try {
+          ZonedDateTime latestDateTime = ZonedDateTime.ofInstant(java.time.Instant.now(), table.getMetaClient().getTableConfig().getTimelineTimezone().getZoneId());
+          long currentCleanTimeMs = latestDateTime.toInstant().toEpochMilli();
+          long lastCleanTimeMs = HoodieInstantTimeGenerator.parseDateFromInstantTime(lastCleanInstant.get().requestedTime()).toInstant().toEpochMilli();
+          eligibleForEmptyCleanCommit = currentCleanTimeMs - lastCleanTimeMs > (TimeUnit.HOURS.toMillis(config.maxIntervalToCreateEmptyCleanHours()));
+        } catch (ParseException e) {
+          log.error("Unable to parse last clean commit time", e);
+          throw new HoodieException("Unable to parse last clean commit time", e);
+        }
+      }
+      if (eligibleForEmptyCleanCommit) {
+        // Ensure earliestCommitToRetain doesn't go backwards when user changes cleaner configuration
+        if (lastCleanInstant.isPresent()) {
+          try {
+            HoodieCleanMetadata lastCleanMetadata = table.getActiveTimeline().readCleanMetadata(lastCleanInstant.get());
+            String previousEarliestCommitToRetain = lastCleanMetadata.getEarliestCommitToRetain();
+            String currentEarliestCommitToRetain = cleanerPlan.getEarliestInstantToRetain().getTimestamp();
+
+            if (!StringUtils.isNullOrEmpty(previousEarliestCommitToRetain) && !StringUtils.isNullOrEmpty(currentEarliestCommitToRetain)
+                && compareTimestamps(currentEarliestCommitToRetain, LESSER_THAN, previousEarliestCommitToRetain)) {
+              log.warn("Skipping empty clean creation because earliestCommitToRetain would go backwards. "
+                  + "Previous: {}, Current: {}. This can happen when cleaner configuration is changed.",
+                  previousEarliestCommitToRetain, currentEarliestCommitToRetain);
+              return Option.empty();
+            }
+          } catch (IOException e) {
+            log.error("Unable to read last clean metadata", e);
+            throw new HoodieException("Unable to read last clean metadata", e);
+          }
+        }
+        log.info("Creating an empty clean instant with earliestCommitToRetain of {}", cleanerPlan.getEarliestInstantToRetain().getTimestamp());
+        return Option.of(cleanerPlan);
+      }
+    }
+    return cleanPlanOpt;
   }
 
   @Override
