@@ -141,7 +141,7 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         val blobFieldNames: java.util.Set[String] = {
           val names = new java.util.HashSet[String]()
           iteratorSchema.fields.foreach { f =>
-            if (BlobLanceSchemaSupport.isBlobField(f)) names.add(f.name)
+            if (isBlobField(f)) names.add(f.name)
           }
           names
         }
