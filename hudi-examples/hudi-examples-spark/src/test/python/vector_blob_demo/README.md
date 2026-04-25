@@ -10,20 +10,23 @@ the Oxford-IIIT Pet dataset:
 3. **Vector search** — cosine similarity top-K via the
    `hudi_vector_search` SQL table-valued function, backed by Lance files.
 
-## Two variants
+## Three variants
 
-The folder ships two scripts that produce the **same output** but expose the
-Hudi surface differently. Pick whichever fits the audience:
+The folder ships three scripts — each focused on a specific Hudi feature.
+Run them independently or in sequence for a full walkthrough.
 
-| File | Hudi surface | Best for |
-|---|---|---|
-| [`hudi_lance_vector_blob_demo.py`](hudi_lance_vector_blob_demo.py) | DataFrame API — `StructField(..., metadata={"hudi_type": "VECTOR(N)"})`, `stamp_blob_metadata`, `struct(lit(...), ...)` | Library-style integration; seeing how the Python DataFrame API composes the VECTOR/BLOB logical types under the hood |
-| [`hudi_sql_vector_blob_demo.py`](hudi_sql_vector_blob_demo.py) | Spark SQL — `CREATE TABLE ... (embedding VECTOR(1024), image_bytes BLOB, ...) USING hudi`, `INSERT INTO ... SELECT ... named_struct('type','INLINE', ...)`, `SELECT ... FROM hudi_vector_search(...)` | Live demos; SQL-first users; showing the Hudi 1.2.0 DDL/DML surface the way it's documented |
+| File | Feature focus | Surface | Best for |
+|---|---|---|---|
+| [`hudi_blob_reader_demo.py`](hudi_blob_reader_demo.py) | **OUT_OF_LINE BLOBs + `read_blob()`** — Hudi table stores references to bytes living in a separate container file; `read_blob()` resolves them on demand | Spark SQL | Showing the "lakehouse that references unstructured data without copying" story — tiny Hudi table, bytes elsewhere |
+| [`hudi_sql_vector_blob_demo.py`](hudi_sql_vector_blob_demo.py) | **INLINE BLOBs + VECTOR + `hudi_vector_search`** — bytes embedded in the Hudi base files, cosine similarity search via the TVF | Spark SQL — `CREATE TABLE ... (embedding VECTOR(N), image_bytes BLOB, ...) USING hudi`, `named_struct('type','INLINE', ...)`, `hudi_vector_search(...)` | Live demos; SQL-first users; showing the Hudi 1.2.0 DDL/DML surface the way it's documented |
+| [`hudi_lance_vector_blob_demo.py`](hudi_lance_vector_blob_demo.py) | Same as the SQL demo, but via DataFrame | Python DataFrame API — `StructField(..., metadata={"hudi_type": "VECTOR(N)"})`, `stamp_blob_metadata`, `struct(lit(...), ...)` | Library-style integration; seeing how the Python DataFrame API composes the VECTOR/BLOB logical types under the hood |
 
-Both share the same venv, jars, env vars, and output panel style. They write
-to different table paths (`/tmp/hudi_{format}_pets` vs
-`/tmp/hudi_sql_{format}_pets`) so you can run them back-to-back without
+All three share the same venv, jars, and env vars. They write to different
+table paths (`/tmp/hudi_blob_reader_{format}_pets` vs `/tmp/hudi_sql_{format}_pets`
+vs `/tmp/hudi_{format}_pets`) so you can run them back-to-back without
 collision.
+
+**Suggested demo order** when walking someone through: blob reader → SQL vector search → DataFrame variant (as "here's the lower-level view"). The first two cover the features; the third is reference material.
 
 ## Prereqs
 
@@ -80,11 +83,14 @@ export LANCE_BUNDLE_JAR=~/Downloads/lance-spark-bundle-3.5_2.12-0.4.0.jar
 # Start small to verify correctness — 100 images runs in under a minute
 export HUDI_LANCE_DEMO_N=100
 
-# DataFrame variant
-python hudi_lance_vector_blob_demo.py
+# Blob reader variant — OUT_OF_LINE + read_blob()
+python hudi_blob_reader_demo.py
 
-# ...or the SQL variant (same deps, different surface)
+# SQL variant — INLINE + vector search
 python hudi_sql_vector_blob_demo.py
+
+# DataFrame variant — same as SQL, but through PySpark DataFrame API
+python hudi_lance_vector_blob_demo.py
 ```
 
 Once it works, crank it up:
@@ -129,6 +135,7 @@ etc.) with similarity scores in the 0.3–0.5 range at N=100, tighter at N=1000.
 | `HUDI_BUNDLE_JAR` | `<repo>/packaging/hudi-spark-bundle/target/hudi-spark3.5-bundle_2.12-1.2.0-SNAPSHOT.jar` | Hudi spark bundle |
 | `LANCE_BUNDLE_JAR` | **required even for Parquet runs** | Lance spark bundle (shipped on classpath regardless of base file format) |
 | `HUDI_BASE_FILE_FORMAT` | `lance` | Set to `parquet` to write Parquet base files instead |
+| `HUDI_BLOB_MODE` | `out_of_line` | Blob reader demo only. Set to `inline` to embed PNG bytes directly in the Hudi table (no external container file) |
 | `HUDI_LANCE_DEMO_N` | `1000` | Number of images to sample |
 | `PYSPARK_DRIVER_MEMORY` | `4g` | Driver JVM heap — bump to `8g`+ for N≥2000 |
 | `HUDI_LANCE_DEMO_OUTDIR` | `./outputs` | Where query/top-K PNGs land |
@@ -158,6 +165,138 @@ written). To exercise the descriptor path added in commit `7aea0f72d8e7`,
 change the `.config(...)` line in `create_spark()` to `DESCRIPTOR` — results
 will come back as `OUT_OF_LINE`-shaped references you then resolve via
 `read_blob()`.
+
+## How the blob reader demo works
+
+[`hudi_blob_reader_demo.py`](hudi_blob_reader_demo.py) is the focused
+"Hudi references bytes instead of storing them" walkthrough. End-to-end flow:
+
+### Step 1 — pack PNGs into one container file (pure Python)
+
+```
+/tmp/pets_blob_container.bin
+├── [bytes for image 0]   offset=0,     length=L0
+├── [bytes for image 1]   offset=L0,    length=L1
+├── [bytes for image 2]   offset=L0+L1, length=L2
+└── ...
+```
+
+The script packs every image's raw PNG bytes end-to-end into a single file
+and records each image's `(offset, length)` slice. The Hudi table will
+reference these slices — it will never hold the bytes itself.
+
+### Step 2 — stage references as a Spark temp view
+
+PyArrow writes a tiny Parquet with columns `(image_id, category,
+external_path, offset, length)` — just metadata, no binary. Registered as
+`staging_blob_refs`.
+
+### Step 3 — `CREATE TABLE ... BLOB ... USING hudi`
+
+```sql
+CREATE TABLE pets_blob_reader_lance (
+    image_id     STRING,
+    category     STRING,
+    image_bytes  BLOB
+) USING hudi
+TBLPROPERTIES (
+    primaryKey = 'image_id',
+    preCombineField = 'image_id',
+    type = 'cow',
+    'hoodie.table.base.file.format' = 'lance',
+    'hoodie.write.record.merge.custom.implementation.classes' = 'org.apache.hudi.DefaultSparkRecordMerger'
+)
+```
+
+### Step 4 — `INSERT INTO ... SELECT` building OUT_OF_LINE references
+
+```sql
+INSERT INTO pets_blob_reader_lance
+SELECT
+    image_id,
+    category,
+    named_struct(
+        'type',      'OUT_OF_LINE',
+        'data',      cast(null as binary),
+        'reference', named_struct(
+            'external_path', external_path,
+            'offset',        offset,
+            'length',        length,
+            'managed',       false
+        )
+    ) AS image_bytes
+FROM staging_blob_refs
+```
+
+Canonical shape from
+[`TestDeleteFromTable.scala:151-167`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/spark/sql/hudi/dml/others/TestDeleteFromTable.scala:151)
+and
+[`TestUpdateTable.scala:545-558`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/spark/sql/hudi/dml/others/TestUpdateTable.scala:545).
+`managed = false` means the user owns the external file's lifecycle — Hudi
+will not delete it when rows are removed.
+
+### Step 5 — inspect what's actually stored
+
+```sql
+SELECT image_id,
+       image_bytes.type                    AS blob_type,
+       image_bytes.data                    AS inline_data,
+       image_bytes.reference.external_path AS ref_path,
+       image_bytes.reference.offset        AS ref_offset,
+       image_bytes.reference.length        AS ref_length
+FROM pets_blob_reader_lance LIMIT 3
+```
+
+Output: `inline_data` is null, `ref_path/offset/length` are populated. The
+Hudi table is tiny — just pointers.
+
+### Step 6 — `read_blob()` resolves the descriptor to bytes
+
+```sql
+SELECT image_id, length(read_blob(image_bytes)) AS resolved_byte_count
+FROM pets_blob_reader_lance LIMIT 5
+```
+
+Canonical usage from
+[`TestReadBlobSQL.scala:90-94`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/hudi/blob/TestReadBlobSQL.scala:90).
+`read_blob(col)` is a scalar function (not a TVF) — returns `BINARY`. Works
+in projections, WHERE clauses, joins — anywhere you'd use a column.
+
+### Step 7 — pull bytes into the driver and re-save as PNGs
+
+Final sanity check: `SELECT read_blob(image_bytes) FROM ... LIMIT 3`,
+decode each result as a PNG, save to `./outputs/blob_reader_resolved/`.
+Viewer opens those files to confirm the round-trip worked.
+
+### Step 8 — compare footprints
+
+Prints the sizes of the blob container vs. the Hudi table directory.
+Typical ratio at 100 images: Hudi table is <1% of the container size — the
+"we reference bytes without copying them" punchline, made concrete.
+
+### Comparing INLINE vs OUT_OF_LINE
+
+The same script can be re-run with `HUDI_BLOB_MODE=inline` to show the
+other half of the story: bytes live **inside** the Hudi base files, not in
+a separate container. Same CREATE TABLE, same `read_blob(image_bytes)` SQL
+— the only difference is the INSERT builds `named_struct('type','INLINE',
+'data', <bytes>, 'reference', cast(null as struct<...>))`. On the footprint
+comparison the Hudi table size is the one that ballooned; there's no
+container to reference.
+
+```bash
+# OUT_OF_LINE (default) — references a container file
+python hudi_blob_reader_demo.py
+
+# INLINE — bytes embedded in the Hudi table
+HUDI_BLOB_MODE=inline python hudi_blob_reader_demo.py
+```
+
+Run both back-to-back and the viewer sees: same SQL, same `read_blob()`
+call, radically different storage layouts. That's the "Hudi's BLOB type
+abstracts over inline-vs-external" point.
+
+---
 
 ## How the script works
 
