@@ -959,19 +959,17 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
         s"synthetic reference to the Lance file should be flagged managed (id=$i)")
     }
 
-    // read_blob() preads the bytes back from the .lance file at the {offset, length} the
-    // descriptor gave us — should equal the original payloads.
+    // read_blob() materializes bytes via BatchedBlobReader, which always reads with CONTENT
+    // mode (actual bytes) regardless of the user's inline read mode setting.
     val viewName = s"${tableName}_view"
-    spark.read.format("hudi")
-      .option(modeKey, "DESCRIPTOR")
-      .load(tablePath).createOrReplaceTempView(viewName)
+    spark.read.format("hudi").load(tablePath).createOrReplaceTempView(viewName)
     val materialized = spark.sql(
       s"SELECT id, read_blob(payload) AS bytes FROM $viewName ORDER BY id").collect()
     assertEquals(numRows, materialized.length)
     materialized.zipWithIndex.foreach { case (row, i) =>
       val bytes = row.getAs[Array[Byte]]("bytes")
       assertArrayEquals(expectedPayloads(i), bytes,
-        s"read_blob() bytes mismatch in DESCRIPTOR mode for id=$i")
+        s"read_blob() bytes mismatch for id=$i")
     }
   }
 
