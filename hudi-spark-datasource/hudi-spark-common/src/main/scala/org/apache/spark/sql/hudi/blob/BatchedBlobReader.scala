@@ -207,8 +207,8 @@ class BatchedBlobReader(
             val blobStruct = accessor.getStruct(row, structColIdx, HoodieSchema.Blob.getFieldCount)
             // Dispatch based on storage_type (field 0)
             val storageType = accessor.getString(blobStruct, 0)
-            if (storageType == HoodieSchema.Blob.INLINE && !accessor.isNullAt(blobStruct, 1)) {
-              // Case 1: Inline with data present — bytes are in field 1
+            if (storageType == HoodieSchema.Blob.INLINE) {
+              // Case 1: Inline — bytes are in field 1
               val bytes = accessor.getBytes(blobStruct, 1)
               batch += RowInfo[R](
                 originalRow = row,
@@ -218,10 +218,7 @@ class BatchedBlobReader(
                 index = rowIndex,
                 inlineBytes = Some(bytes)
               )
-            } else if (storageType == HoodieSchema.Blob.OUT_OF_LINE
-              || (storageType == HoodieSchema.Blob.INLINE && accessor.isNullAt(blobStruct, 1))) {
-              // Case 2/3: Out-of-line reference, or INLINE in DESCRIPTOR mode where data is null
-              // but a reference to the backing Lance file is populated instead.
+            } else if (storageType  == HoodieSchema.Blob.OUT_OF_LINE) {
               // Case 2 or 3: Out-of-line — get reference struct (field 2)
               require(!accessor.isNullAt(blobStruct, 2), s"Out-of-line blob at row $rowIndex must set reference")
               val referenceStruct = accessor.getStruct(blobStruct, 2, HoodieSchema.Blob.getReferenceFieldCount)
