@@ -138,13 +138,8 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
 
         // Dispatch: use the DESCRIPTOR-aware iterator only when the user opted into that mode
         // AND the request actually has BLOB columns (otherwise the rewrite has nothing to do).
-        val blobFieldNames: java.util.Set[String] = {
-          val names = new java.util.HashSet[String]()
-          iteratorSchema.fields.foreach { f =>
-            if (isBlobField(f)) names.add(f.name)
-          }
-          names
-        }
+        val blobFieldNames: java.util.Set[String] =
+          iteratorSchema.fields.collect { case f if isBlobField(f) => f.name }.toSet.asJava
         lanceIterator = if (blobMode == BlobReadMode.DESCRIPTOR && !blobFieldNames.isEmpty) {
           new BlobDescriptorLanceRecordIterator(
             allocator, lanceReader, arrowReader, iteratorSchema, filePath, blobFieldNames)

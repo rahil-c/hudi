@@ -890,84 +890,16 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
 
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieTableType])
-  def testBlobOutline(tableType: HoodieTableType): Unit = {
-    val tableName = s"test_lance_blob_outline_${tableType.name().toLowerCase}"
-    val tablePath = s"$basePath/$tableName"
-
-    // Write two external files; each row references one of them.
-    val externalDir = Files.createDirectories(Paths.get(s"$basePath/_blob_ext_${tableType.name().toLowerCase}"))
-    val filePath1 = BlobTestHelpers.createTestFile(externalDir, "blob_file_1.bin", 1024)
-    val filePath2 = BlobTestHelpers.createTestFile(externalDir, "blob_file_2.bin", 1024)
-
-    val sparkSess = spark
-    import sparkSess.implicits._
-    val baseDf = Seq(
-      (1, filePath1, 0L, 256L),
-      (2, filePath1, 256L, 256L),
-      (3, filePath2, 0L, 1024L),
-      (4, filePath2, 0L, 512L)
-    ).toDF("id", "path", "offset", "length")
-    val rawDf = baseDf.select($"id",
-      BlobTestHelpers.blobStructCol("payload", $"path", $"offset", $"length"))
-    val canonicalSchema = StructType(Seq(
-      StructField("id", IntegerType, nullable = false),
-      StructField("payload", BlobType().asInstanceOf[StructType], nullable = true,
-        BlobTestHelpers.blobMetadata)
-    ))
-    val df = spark.createDataFrame(rawDf.rdd, canonicalSchema)
-
-    writeDataframe(tableType, tableName, tablePath, df, saveMode = SaveMode.Overwrite,
-      operation = Some("bulk_insert"),
-      extraOptions = Map(PRECOMBINE_FIELD.key() -> "id"))
-
-    val readDf = spark.read.format("hudi").load(tablePath)
-      .select("id", "payload")
-      .orderBy("id")
-
-    val rowsBack = readDf.collect()
-    assertEquals(4, rowsBack.length)
-
-    val expectedFiles = Map(1 -> "blob_file_1.bin", 2 -> "blob_file_1.bin",
-      3 -> "blob_file_2.bin", 4 -> "blob_file_2.bin")
-    rowsBack.foreach { row =>
-      val id = row.getInt(row.fieldIndex("id"))
-      val payload = row.getStruct(row.fieldIndex("payload"))
-      assertEquals(HoodieSchema.Blob.OUT_OF_LINE,
-        payload.getString(payload.fieldIndex(HoodieSchema.Blob.TYPE)))
-      assertTrue(payload.isNullAt(payload.fieldIndex(HoodieSchema.Blob.INLINE_DATA_FIELD)),
-        s"Inline data must be null for OUT_OF_LINE blob (id=$id)")
-      val ref = payload.getStruct(payload.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE))
-      val extPath = ref.getString(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
-      assertTrue(extPath.endsWith(expectedFiles(id)),
-        s"Unexpected external_path for id=$id: $extPath")
-    }
-
-    // Byte-level round-trip: materialize via read_blob() and compare against
-    // the expected slice of the external file. createTestFile writes bytes
-    // where file[i] = (i % 256).toByte, so a slice [offset, offset+length)
-    // should match the pattern (offset + i) % 256 for i in [0, length).
-    val viewName = s"${tableName}_view"
-    spark.read.format("hudi").load(tablePath).createOrReplaceTempView(viewName)
-    val materialized = spark.sql(
-      s"SELECT id, read_blob(payload) AS bytes FROM $viewName ORDER BY id").collect()
-    assertEquals(4, materialized.length)
-
-    val expectedRanges = Map(1 -> 0L, 2 -> 256L, 3 -> 0L, 4 -> 0L)
-    val expectedLengths = Map(1 -> 256, 2 -> 256, 3 -> 1024, 4 -> 512)
-    materialized.foreach { row =>
-      val id = row.getInt(row.fieldIndex("id"))
-      val bytes = row.getAs[Array[Byte]]("bytes")
-      assertEquals(expectedLengths(id), bytes.length,
-        s"Unexpected blob length for id=$id")
-      BlobTestHelpers.assertBytesContent(bytes, expectedOffset = expectedRanges(id).toInt)
-    }
+  def testBlobOutOfLine(tableType: HoodieTableType): Unit = {
+    verifyBlobOutOfLine(tableType, readMode = None)
   }
 
   /**
    * DESCRIPTOR mode on INLINE rows: user writes `data` bytes; on read with
-   * `hoodie.read.blob.inline.mode=DESCRIPTOR` each row comes back in Hudi OUT_OF_LINE shape
-   * with `external_path` pointing at the Lance file and `{offset, length}` taken from the
-   * blob stream's descriptor. `read_blob()` then preads the bytes back from the .lance file.
+   * `hoodie.read.blob.inline.mode=DESCRIPTOR` each row comes back with type still set to
+   * {@code INLINE} (preserving the original storage mode) but with {@code data=null} and a
+   * populated {@code reference} pointing at the Lance file. {@code read_blob()} then preads
+   * the bytes back from the .lance file via the reference.
    */
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieTableType])
@@ -1000,51 +932,46 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
     assertLanceBlobEncoding(tablePath)
 
     val modeKey = "hoodie.read.blob.inline.mode"
-    val prior = Option(spark.conf.getOption(modeKey).orNull)
-    spark.conf.set(modeKey, "DESCRIPTOR")
-    try {
-      val readRows = spark.read.format("hudi").load(tablePath)
-        .select($"id", $"payload")
-        .orderBy($"id")
-        .collect()
-      assertEquals(numRows, readRows.length)
-      readRows.zipWithIndex.foreach { case (row, i) =>
-        assertEquals(i, row.getInt(row.fieldIndex("id")))
-        val payload = row.getStruct(row.fieldIndex("payload"))
-        assertEquals(HoodieSchema.Blob.OUT_OF_LINE,
-          payload.getString(payload.fieldIndex(HoodieSchema.Blob.TYPE)),
-          s"DESCRIPTOR mode should surface INLINE rows as OUT_OF_LINE (id=$i)")
-        assertTrue(payload.isNullAt(payload.fieldIndex(HoodieSchema.Blob.INLINE_DATA_FIELD)),
-          s"data should be null in DESCRIPTOR mode (id=$i)")
-        val ref = payload.getStruct(payload.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE))
-        assertNotNull(ref, s"reference struct should be populated (id=$i)")
-        val extPath = ref.getString(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
-        assertTrue(extPath.endsWith(".lance"),
-          s"external_path should point at a .lance file, got: $extPath (id=$i)")
-        assertEquals(payloadLen.toLong,
-          ref.getLong(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH)),
-          s"length should equal the written payload length (id=$i)")
-        assertTrue(ref.getBoolean(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_IS_MANAGED)),
-          s"synthetic reference to the Lance file should be flagged managed (id=$i)")
-      }
+    val readRows = spark.read.format("hudi")
+      .option(modeKey, "DESCRIPTOR")
+      .load(tablePath)
+      .select($"id", $"payload")
+      .orderBy($"id")
+      .collect()
+    assertEquals(numRows, readRows.length)
+    readRows.zipWithIndex.foreach { case (row, i) =>
+      assertEquals(i, row.getInt(row.fieldIndex("id")))
+      val payload = row.getStruct(row.fieldIndex("payload"))
+      assertEquals(HoodieSchema.Blob.INLINE,
+        payload.getString(payload.fieldIndex(HoodieSchema.Blob.TYPE)),
+        s"DESCRIPTOR mode should preserve INLINE type (id=$i)")
+      assertTrue(payload.isNullAt(payload.fieldIndex(HoodieSchema.Blob.INLINE_DATA_FIELD)),
+        s"data should be null in DESCRIPTOR mode (id=$i)")
+      val ref = payload.getStruct(payload.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE))
+      assertNotNull(ref, s"reference struct should be populated (id=$i)")
+      val extPath = ref.getString(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
+      assertTrue(extPath.endsWith(".lance"),
+        s"external_path should point at a .lance file, got: $extPath (id=$i)")
+      assertEquals(payloadLen.toLong,
+        ref.getLong(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_LENGTH)),
+        s"length should equal the written payload length (id=$i)")
+      assertTrue(ref.getBoolean(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_IS_MANAGED)),
+        s"synthetic reference to the Lance file should be flagged managed (id=$i)")
+    }
 
-      // read_blob() preads the bytes back from the .lance file at the {offset, length} the
-      // descriptor gave us — should equal the original payloads.
-      val viewName = s"${tableName}_view"
-      spark.read.format("hudi").load(tablePath).createOrReplaceTempView(viewName)
-      val materialized = spark.sql(
-        s"SELECT id, read_blob(payload) AS bytes FROM $viewName ORDER BY id").collect()
-      assertEquals(numRows, materialized.length)
-      materialized.zipWithIndex.foreach { case (row, i) =>
-        val bytes = row.getAs[Array[Byte]]("bytes")
-        assertArrayEquals(expectedPayloads(i), bytes,
-          s"read_blob() bytes mismatch in DESCRIPTOR mode for id=$i")
-      }
-    } finally {
-      prior match {
-        case Some(v) => spark.conf.set(modeKey, v)
-        case None => spark.conf.unset(modeKey)
-      }
+    // read_blob() preads the bytes back from the .lance file at the {offset, length} the
+    // descriptor gave us — should equal the original payloads.
+    val viewName = s"${tableName}_view"
+    spark.read.format("hudi")
+      .option(modeKey, "DESCRIPTOR")
+      .load(tablePath).createOrReplaceTempView(viewName)
+    val materialized = spark.sql(
+      s"SELECT id, read_blob(payload) AS bytes FROM $viewName ORDER BY id").collect()
+    assertEquals(numRows, materialized.length)
+    materialized.zipWithIndex.foreach { case (row, i) =>
+      val bytes = row.getAs[Array[Byte]]("bytes")
+      assertArrayEquals(expectedPayloads(i), bytes,
+        s"read_blob() bytes mismatch in DESCRIPTOR mode for id=$i")
     }
   }
 
@@ -1054,12 +981,22 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
    */
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieTableType])
-  def testBlobOutlineDescriptorMode(tableType: HoodieTableType): Unit = {
-    val tableName = s"test_lance_blob_outline_desc_${tableType.name().toLowerCase}"
+  def testBlobOutOfLineDescriptorMode(tableType: HoodieTableType): Unit = {
+    verifyBlobOutOfLine(tableType, readMode = Some("DESCRIPTOR"))
+  }
+
+  /**
+   * Shared implementation for OUT_OF_LINE blob tests. Writes rows with external references,
+   * reads them back (optionally with a specific read mode), and asserts the reference survives
+   * unchanged and {@code read_blob()} resolves the correct bytes.
+   */
+  private def verifyBlobOutOfLine(tableType: HoodieTableType, readMode: Option[String]): Unit = {
+    val modeSuffix = readMode.map(m => s"_${m.toLowerCase}").getOrElse("")
+    val tableName = s"test_lance_blob_out_of_line${modeSuffix}_${tableType.name().toLowerCase}"
     val tablePath = s"$basePath/$tableName"
 
     val externalDir = Files.createDirectories(
-      Paths.get(s"$basePath/_blob_ext_desc_${tableType.name().toLowerCase}"))
+      Paths.get(s"$basePath/_blob_ext${modeSuffix}_${tableType.name().toLowerCase}"))
     val filePath1 = BlobTestHelpers.createTestFile(externalDir, "blob_file_1.bin", 1024)
     val filePath2 = BlobTestHelpers.createTestFile(externalDir, "blob_file_2.bin", 1024)
 
@@ -1085,49 +1022,44 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
       extraOptions = Map(PRECOMBINE_FIELD.key() -> "id"))
 
     val modeKey = "hoodie.read.blob.inline.mode"
-    val prior = Option(spark.conf.getOption(modeKey).orNull)
-    spark.conf.set(modeKey, "DESCRIPTOR")
-    try {
-      val rowsBack = spark.read.format("hudi").load(tablePath)
-        .select("id", "payload")
-        .orderBy("id")
-        .collect()
-      assertEquals(4, rowsBack.length)
+    val reader = readMode.foldLeft(spark.read.format("hudi"))((r, m) => r.option(modeKey, m))
 
-      val expectedFiles = Map(1 -> "blob_file_1.bin", 2 -> "blob_file_1.bin",
-        3 -> "blob_file_2.bin", 4 -> "blob_file_2.bin")
-      rowsBack.foreach { row =>
-        val id = row.getInt(row.fieldIndex("id"))
-        val payload = row.getStruct(row.fieldIndex("payload"))
-        assertEquals(HoodieSchema.Blob.OUT_OF_LINE,
-          payload.getString(payload.fieldIndex(HoodieSchema.Blob.TYPE)))
-        assertTrue(payload.isNullAt(payload.fieldIndex(HoodieSchema.Blob.INLINE_DATA_FIELD)),
-          s"data must be null for OUT_OF_LINE blob (id=$id)")
-        val ref = payload.getStruct(payload.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE))
-        val extPath = ref.getString(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
-        assertTrue(extPath.endsWith(expectedFiles(id)),
-          s"OUT_OF_LINE reference should pass through unchanged in DESCRIPTOR mode (id=$id): $extPath")
-      }
+    val rowsBack = reader.load(tablePath)
+      .select("id", "payload")
+      .orderBy("id")
+      .collect()
+    assertEquals(4, rowsBack.length)
 
-      val viewName = s"${tableName}_view"
-      spark.read.format("hudi").load(tablePath).createOrReplaceTempView(viewName)
-      val materialized = spark.sql(
-        s"SELECT id, read_blob(payload) AS bytes FROM $viewName ORDER BY id").collect()
-      assertEquals(4, materialized.length)
+    val expectedFiles = Map(1 -> "blob_file_1.bin", 2 -> "blob_file_1.bin",
+      3 -> "blob_file_2.bin", 4 -> "blob_file_2.bin")
+    rowsBack.foreach { row =>
+      val id = row.getInt(row.fieldIndex("id"))
+      val payload = row.getStruct(row.fieldIndex("payload"))
+      assertEquals(HoodieSchema.Blob.OUT_OF_LINE,
+        payload.getString(payload.fieldIndex(HoodieSchema.Blob.TYPE)))
+      assertTrue(payload.isNullAt(payload.fieldIndex(HoodieSchema.Blob.INLINE_DATA_FIELD)),
+        s"Inline data must be null for OUT_OF_LINE blob (id=$id)")
+      val ref = payload.getStruct(payload.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE))
+      val extPath = ref.getString(ref.fieldIndex(HoodieSchema.Blob.EXTERNAL_REFERENCE_PATH))
+      assertTrue(extPath.endsWith(expectedFiles(id)),
+        s"Unexpected external_path for id=$id: $extPath")
+    }
 
-      val expectedRanges = Map(1 -> 0L, 2 -> 256L, 3 -> 0L, 4 -> 0L)
-      val expectedLengths = Map(1 -> 256, 2 -> 256, 3 -> 1024, 4 -> 512)
-      materialized.foreach { row =>
-        val id = row.getInt(row.fieldIndex("id"))
-        val bytes = row.getAs[Array[Byte]]("bytes")
-        assertEquals(expectedLengths(id), bytes.length, s"Unexpected blob length for id=$id")
-        BlobTestHelpers.assertBytesContent(bytes, expectedOffset = expectedRanges(id).toInt)
-      }
-    } finally {
-      prior match {
-        case Some(v) => spark.conf.set(modeKey, v)
-        case None => spark.conf.unset(modeKey)
-      }
+    val viewName = s"${tableName}_view"
+    readMode.foldLeft(spark.read.format("hudi"))((r, m) => r.option(modeKey, m))
+      .load(tablePath).createOrReplaceTempView(viewName)
+    val materialized = spark.sql(
+      s"SELECT id, read_blob(payload) AS bytes FROM $viewName ORDER BY id").collect()
+    assertEquals(4, materialized.length)
+
+    val expectedRanges = Map(1 -> 0L, 2 -> 256L, 3 -> 0L, 4 -> 0L)
+    val expectedLengths = Map(1 -> 256, 2 -> 256, 3 -> 1024, 4 -> 512)
+    materialized.foreach { row =>
+      val id = row.getInt(row.fieldIndex("id"))
+      val bytes = row.getAs[Array[Byte]]("bytes")
+      assertEquals(expectedLengths(id), bytes.length,
+        s"Unexpected blob length for id=$id")
+      BlobTestHelpers.assertBytesContent(bytes, expectedOffset = expectedRanges(id).toInt)
     }
   }
 

@@ -37,13 +37,12 @@ import org.lance.file.LanceFileReader;
 
 import java.io.IOException;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Shared iterator implementation for reading Lance files and converting Arrow batches to Spark rows.
- * This iterator is used by both Hudi's internal Lance reader and Spark datasource integration.
+ * Iterator for reading Lance files and converting Arrow batches to Spark {@link UnsafeRow}s.
+ * Used by both Hudi's internal Lance reader and Spark datasource integration.
  *
  * <p>The iterator manages the lifecycle of:
  * <ul>
@@ -53,20 +52,22 @@ import java.util.Map;
  *   <li>ColumnarBatch - Current batch being iterated</li>
  * </ul>
  *
- * <p>Records are converted to {@link UnsafeRow} using {@link UnsafeProjection} for efficient
- * serialization and memory management.
+ * <p>Subclasses (e.g. {@link BlobDescriptorLanceRecordIterator}) can override
+ * {@link #next()} for per-row transforms and {@link #buildColumnVectors} to
+ * capture additional per-column state on the first batch.
  */
 public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
-  private final BufferAllocator allocator;
-  private final LanceFileReader lanceReader;
-  private final ArrowReader arrowReader;
-  private final StructType sparkSchema;
-  private final UnsafeProjection projection;
-  private final String path;
+  protected final BufferAllocator allocator;
+  protected final LanceFileReader lanceReader;
+  protected final ArrowReader arrowReader;
+  protected final StructType sparkSchema;
+  protected final UnsafeProjection projection;
+  protected final String path;
 
-  private ColumnarBatch currentBatch;
-  private Iterator<InternalRow> rowIterator;
-  private ColumnVector[] columnVectors;
+  protected ColumnarBatch currentBatch;
+  protected ColumnVector[] columnVectors;
+  protected int rowIdInBatch;
+  protected int batchRowCount;
   private boolean closed = false;
 
   /**
@@ -93,12 +94,10 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
 
   @Override
   public boolean hasNext() {
-    // If we have records in current batch, return true
-    if (rowIterator != null && rowIterator.hasNext()) {
+    if (currentBatch != null && rowIdInBatch < batchRowCount) {
       return true;
     }
 
-    // Close previous batch before loading next
     if (currentBatch != null) {
       currentBatch.close();
       currentBatch = null;
@@ -114,36 +113,15 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
         // lance-spark 0.4.0's VectorSchemaRoot may return the file's on-disk order, which
         // would misalign the UnsafeProjection. Cached on the first batch and reused thereafter.
         if (columnVectors == null) {
-          List<FieldVector> fieldVectors = root.getFieldVectors();
-          Map<String, FieldVector> byName = new HashMap<>(fieldVectors.size() * 2);
-          for (FieldVector fv : fieldVectors) {
-            byName.put(fv.getName(), fv);
-          }
-          StructField[] sparkFields = sparkSchema.fields();
-          if (sparkFields.length != fieldVectors.size()) {
-            throw new HoodieException("Lance batch column count " + fieldVectors.size()
-                + " does not match expected Spark schema size " + sparkFields.length
-                + " for file: " + path);
-          }
-          columnVectors = new ColumnVector[sparkFields.length];
-          for (int i = 0; i < sparkFields.length; i++) {
-            String name = sparkFields[i].name();
-            FieldVector fv = byName.get(name);
-            if (fv == null) {
-              throw new HoodieException("Lance batch missing expected column '" + name
-                  + "' for file: " + path + "; available columns: " + byName.keySet());
-            }
-            columnVectors[i] = new LanceArrowColumnVector(fv);
-          }
+          buildColumnVectors(root);
         }
 
-        // Create ColumnarBatch and keep it alive while iterating
         currentBatch = new ColumnarBatch(columnVectors, root.getRowCount());
-        rowIterator = currentBatch.rowIterator();
-        if (rowIterator.hasNext()) {
+        batchRowCount = root.getRowCount();
+        rowIdInBatch = 0;
+        if (batchRowCount > 0) {
           return true;
         }
-        // Empty batch - close and continue to the next one.
         currentBatch.close();
         currentBatch = null;
       }
@@ -159,9 +137,37 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     if (!hasNext()) {
       throw new IllegalStateException("No more records available");
     }
-    InternalRow row = rowIterator.next();
-    // Convert to UnsafeRow immediately while batch is still open
+    InternalRow row = currentBatch.getRow(rowIdInBatch++);
     return projection.apply(row).copy();
+  }
+
+  /**
+   * Build the {@link #columnVectors} array from the first Arrow batch, mapping each Spark schema
+   * field to its Arrow vector by name. Subclasses can override to capture additional per-column
+   * state (e.g. blob-column metadata) but must call {@code super.buildColumnVectors(root)} first.
+   */
+  protected void buildColumnVectors(VectorSchemaRoot root) {
+    List<FieldVector> fieldVectors = root.getFieldVectors();
+    Map<String, FieldVector> byName = new HashMap<>(fieldVectors.size() * 2);
+    for (FieldVector fv : fieldVectors) {
+      byName.put(fv.getName(), fv);
+    }
+    StructField[] sparkFields = sparkSchema.fields();
+    if (sparkFields.length != fieldVectors.size()) {
+      throw new HoodieException("Lance batch column count " + fieldVectors.size()
+          + " does not match expected Spark schema size " + sparkFields.length
+          + " for file: " + path);
+    }
+    columnVectors = new ColumnVector[sparkFields.length];
+    for (int i = 0; i < sparkFields.length; i++) {
+      String name = sparkFields[i].name();
+      FieldVector fv = byName.get(name);
+      if (fv == null) {
+        throw new HoodieException("Lance batch missing expected column '" + name
+            + "' for file: " + path + "; available columns: " + byName.keySet());
+      }
+      columnVectors[i] = new LanceArrowColumnVector(fv);
+    }
   }
 
   @Override
@@ -172,6 +178,6 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     closed = true;
     ColumnarBatch batch = currentBatch;
     currentBatch = null;
-    LanceCloseables.closeAll(batch, arrowReader, lanceReader, allocator);
+    LanceResourceCloser.closeAll(batch, arrowReader, lanceReader, allocator);
   }
 }
