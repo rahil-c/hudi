@@ -123,14 +123,11 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     // Try to load next batch. Loop so zero-row batches (legitimately returned e.g. after
     // filter pushdown) don't silently terminate iteration and drop subsequent non-empty batches.
     try {
-      if (vectorSchemaRoot == null) {
-        vectorSchemaRoot = arrowReader.getVectorSchemaRoot();
-      }
       while (arrowReader.loadNextBatch()) {
-        // Build ColumnVector[] in Spark-schema order by looking each field up by name;
-        // lance-spark 0.4.0's VectorSchemaRoot may return the file's on-disk order, which
-        // would misalign the UnsafeProjection. Cached on the first batch and reused thereafter.
-        if (columnVectors == null) {
+        // Arrow reuses the same VectorSchemaRoot across batches; obtain once together with the
+        // column-vector mapping so both are built exactly once per file.
+        if (vectorSchemaRoot == null) {
+          vectorSchemaRoot = arrowReader.getVectorSchemaRoot();
           buildColumnVectors(vectorSchemaRoot);
         }
 
