@@ -53,7 +53,7 @@ import java.util.Set;
  *       consumers see the original storage mode; {@code read_blob()} resolves both cases.</li>
  * </ul>
  */
-final class BlobDescriptorTransform {
+public final class BlobDescriptorTransform {
 
   private static final UTF8String OUT_OF_LINE_UTF8 =
       UTF8String.fromString(HoodieSchema.Blob.OUT_OF_LINE);
@@ -84,7 +84,7 @@ final class BlobDescriptorTransform {
   /** Blob column metadata keyed by column index; only blob columns have entries. */
   private Map<Integer, BlobColInfo> blobColInfoMap;
 
-  BlobDescriptorTransform(Set<String> blobFieldNames, String lanceFilePath) {
+  public BlobDescriptorTransform(Set<String> blobFieldNames, String lanceFilePath) {
     this.blobFieldNames = blobFieldNames;
     this.lanceFilePathUtf8 = UTF8String.fromString(lanceFilePath);
     this.lanceFilePath = lanceFilePath;
