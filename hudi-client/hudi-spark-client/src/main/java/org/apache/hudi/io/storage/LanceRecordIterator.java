@@ -68,8 +68,6 @@ public final class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
   private ColumnarBatch currentBatch;
   private Iterator<InternalRow> rowIterator;
   private ColumnVector[] columnVectors;
-  /** Arrow reuses the same VectorSchemaRoot; lazily assigned on the first batch load. */
-  private VectorSchemaRoot vectorSchemaRoot;
   /** Row index within the current batch; only used by {@link BlobDescriptorTransform}. */
   private int rowIdInBatch;
   private boolean closed = false;
@@ -126,14 +124,16 @@ public final class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     // filter pushdown) don't silently terminate iteration and drop subsequent non-empty batches.
     try {
       while (arrowReader.loadNextBatch()) {
-        // Arrow reuses the same VectorSchemaRoot across batches; obtain once together with the
-        // column-vector mapping so both are built exactly once per file.
-        if (vectorSchemaRoot == null) {
-          vectorSchemaRoot = arrowReader.getVectorSchemaRoot();
-          buildColumnVectors(vectorSchemaRoot);
+        VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+
+        // Build ColumnVector[] in Spark-schema order by looking each field up by name;
+        // lance-spark 0.4.0's VectorSchemaRoot may return the file's on-disk order, which
+        // would misalign the UnsafeProjection. Cached on the first batch and reused thereafter.
+        if (columnVectors == null) {
+          buildColumnVectors(root);
         }
 
-        currentBatch = new ColumnarBatch(columnVectors, vectorSchemaRoot.getRowCount());
+        currentBatch = new ColumnarBatch(columnVectors, root.getRowCount());
         rowIterator = currentBatch.rowIterator();
         rowIdInBatch = 0;
         if (rowIterator.hasNext()) {
