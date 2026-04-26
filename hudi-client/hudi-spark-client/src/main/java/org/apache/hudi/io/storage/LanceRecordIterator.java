@@ -32,8 +32,8 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
-import org.lance.spark.vectorized.LanceArrowColumnVector;
 import org.lance.file.LanceFileReader;
+import org.lance.spark.vectorized.LanceArrowColumnVector;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -66,10 +66,10 @@ public final class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
   private final BlobDescriptorTransform blobTransform;
 
   private ColumnarBatch currentBatch;
+  private Iterator<InternalRow> rowIterator;
   private ColumnVector[] columnVectors;
   /** Arrow reuses the same VectorSchemaRoot; lazily assigned on the first batch load. */
   private VectorSchemaRoot vectorSchemaRoot;
-  private Iterator<InternalRow> rowIterator;
   /** Row index within the current batch; only used by {@link BlobDescriptorTransform}. */
   private int rowIdInBatch;
   private boolean closed = false;
