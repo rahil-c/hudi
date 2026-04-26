@@ -156,7 +156,7 @@ public final class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     }
     InternalRow row = rowIterator.next();
     if (blobTransform != null) {
-      return blobTransform.transformRow(row, rowIdInBatch++, projection);
+      return blobTransform.transformRow(row, rowIdInBatch++, columnVectors, projection);
     }
     rowIdInBatch++;
     return projection.apply(row).copy();
