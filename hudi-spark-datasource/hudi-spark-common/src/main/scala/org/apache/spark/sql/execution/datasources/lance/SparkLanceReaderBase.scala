@@ -26,7 +26,7 @@ import org.apache.hudi.common.util
 import org.apache.hudi.common.util.collection.ClosableIterator
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.memory.HoodieArrowAllocator
-import org.apache.hudi.io.storage.{BlobDescriptorLanceRecordIterator, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
+import org.apache.hudi.io.storage.{BlobDescriptorTransform, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
 import org.apache.hudi.storage.StorageConfiguration
 
 import org.apache.hadoop.conf.Configuration
@@ -136,16 +136,17 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
         val readOpts = FileReadOptions.builder().blobReadMode(blobMode).build()
         val arrowReader = lanceReader.readAll(columnNames, null, DEFAULT_BATCH_SIZE, readOpts)
 
-        // Dispatch: use the DESCRIPTOR-aware iterator only when the user opted into that mode
+        // Compose the DESCRIPTOR-aware blob transform only when the user opted into that mode
         // AND the request actually has BLOB columns (otherwise the rewrite has nothing to do).
         val blobFieldNames: java.util.Set[String] =
           iteratorSchema.fields.collect { case f if isBlobField(f) => f.name }.toSet.asJava
-        lanceIterator = if (blobMode == BlobReadMode.DESCRIPTOR && !blobFieldNames.isEmpty) {
-          new BlobDescriptorLanceRecordIterator(
-            allocator, lanceReader, arrowReader, iteratorSchema, filePath, blobFieldNames)
+        val blobTransform = if (blobMode == BlobReadMode.DESCRIPTOR && !blobFieldNames.isEmpty) {
+          new BlobDescriptorTransform(blobFieldNames, filePath)
         } else {
-          new LanceRecordIterator(allocator, lanceReader, arrowReader, iteratorSchema, filePath)
+          null
         }
+        lanceIterator = new LanceRecordIterator(
+          allocator, lanceReader, arrowReader, iteratorSchema, filePath, blobTransform)
 
         // Register cleanup listener
         Option(TaskContext.get()).foreach { ctx =>

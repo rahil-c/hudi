@@ -40,7 +40,7 @@ import org.junit.jupiter.api.{AfterEach, BeforeEach}
 import org.junit.jupiter.api.Assertions.{assertArrayEquals, assertEquals, assertFalse, assertNotNull, assertTrue}
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty
 import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.EnumSource
+import org.junit.jupiter.params.provider.{Arguments, EnumSource, MethodSource}
 import org.lance.file.LanceFileReader
 
 import java.nio.file.{Files, Paths}
@@ -889,9 +889,9 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
   }
 
   @ParameterizedTest
-  @EnumSource(value = classOf[HoodieTableType])
-  def testBlobOutOfLine(tableType: HoodieTableType): Unit = {
-    verifyBlobOutOfLine(tableType, readMode = None)
+  @MethodSource(Array("blobOutOfLineParams"))
+  def testBlobOutOfLine(tableType: HoodieTableType, readMode: String): Unit = {
+    verifyBlobOutOfLine(tableType, Option(readMode))
   }
 
   /**
@@ -973,16 +973,6 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
       assertArrayEquals(expectedPayloads(i), bytes,
         s"read_blob() bytes mismatch in DESCRIPTOR mode for id=$i")
     }
-  }
-
-  /**
-   * DESCRIPTOR mode on OUT_OF_LINE rows: pass-through. Rows Hudi wrote with external
-   * references come back with the same reference; the read mode only affects INLINE rows.
-   */
-  @ParameterizedTest
-  @EnumSource(value = classOf[HoodieTableType])
-  def testBlobOutOfLineDescriptorMode(tableType: HoodieTableType): Unit = {
-    verifyBlobOutOfLine(tableType, readMode = Some("DESCRIPTOR"))
   }
 
   /**
@@ -1488,5 +1478,16 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
     extraOptions.foreach { case (key, value) => writer = writer.option(key, value) }
 
     writer.mode(saveMode).save(tablePath)
+  }
+}
+
+object TestLanceDataSource {
+  /** Cross-product of table types and blob read modes for out-of-line blob tests. */
+  def blobOutOfLineParams(): java.util.stream.Stream[Arguments] = {
+    val params = for {
+      tableType <- HoodieTableType.values()
+      readMode <- Array(null, "CONTENT", "DESCRIPTOR")
+    } yield Arguments.of(tableType, readMode: java.lang.String)
+    java.util.stream.Stream.of(params: _*)
   }
 }

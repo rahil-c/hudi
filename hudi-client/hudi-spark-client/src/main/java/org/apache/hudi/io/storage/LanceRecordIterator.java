@@ -52,44 +52,59 @@ import java.util.Map;
  *   <li>ColumnarBatch - Current batch being iterated</li>
  * </ul>
  *
- * <p>Subclasses (e.g. {@link BlobDescriptorLanceRecordIterator}) can override
- * {@link #next()} for per-row transforms and {@link #buildColumnVectors} to
- * capture additional per-column state on the first batch.
+ * <p>An optional {@link BlobDescriptorTransform} can be composed in to rewrite BLOB columns
+ * in DESCRIPTOR mode, avoiding the need for a separate iterator subclass.
  */
 public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
-  protected final BufferAllocator allocator;
-  protected final LanceFileReader lanceReader;
-  protected final ArrowReader arrowReader;
-  protected final StructType sparkSchema;
-  protected final UnsafeProjection projection;
-  protected final String path;
+  private final BufferAllocator allocator;
+  private final LanceFileReader lanceReader;
+  private final ArrowReader arrowReader;
+  private final StructType sparkSchema;
+  private final UnsafeProjection projection;
+  private final String path;
+  private final BlobDescriptorTransform blobTransform;
 
-  protected ColumnarBatch currentBatch;
-  protected ColumnVector[] columnVectors;
-  protected int rowIdInBatch;
-  protected int batchRowCount;
+  private ColumnarBatch currentBatch;
+  private ColumnVector[] columnVectors;
+  private int rowIdInBatch;
+  private int batchRowCount;
   private boolean closed = false;
 
   /**
-   * Creates a new Lance record iterator.
-   *
-   * @param allocator Arrow buffer allocator for memory management
-   * @param lanceReader Lance file reader
-   * @param arrowReader Arrow reader for batch reading
-   * @param schema Spark schema for the records
-   * @param path File path (for error messages)
+   * Creates a new Lance record iterator without blob transform (CONTENT mode or non-blob reads).
    */
   public LanceRecordIterator(BufferAllocator allocator,
                              LanceFileReader lanceReader,
                              ArrowReader arrowReader,
                              StructType schema,
                              String path) {
+    this(allocator, lanceReader, arrowReader, schema, path, null);
+  }
+
+  /**
+   * Creates a new Lance record iterator.
+   *
+   * @param allocator      Arrow buffer allocator for memory management
+   * @param lanceReader    Lance file reader
+   * @param arrowReader    Arrow reader for batch reading
+   * @param schema         Spark schema for the records
+   * @param path           File path (for error messages)
+   * @param blobTransform  optional blob descriptor transform for DESCRIPTOR-mode reads; null for
+   *                       CONTENT mode or non-blob reads
+   */
+  public LanceRecordIterator(BufferAllocator allocator,
+                             LanceFileReader lanceReader,
+                             ArrowReader arrowReader,
+                             StructType schema,
+                             String path,
+                             BlobDescriptorTransform blobTransform) {
     this.allocator = allocator;
     this.lanceReader = lanceReader;
     this.arrowReader = arrowReader;
     this.sparkSchema = schema;
     this.projection = UnsafeProjection.create(schema);
     this.path = path;
+    this.blobTransform = blobTransform;
   }
 
   @Override
@@ -106,9 +121,9 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     // Try to load next batch. Loop so zero-row batches (legitimately returned e.g. after
     // filter pushdown) don't silently terminate iteration and drop subsequent non-empty batches.
     try {
+      // Arrow reuses the same VectorSchemaRoot across loadNextBatch() calls; get the reference once.
+      VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
       while (arrowReader.loadNextBatch()) {
-        VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
-
         // Build ColumnVector[] in Spark-schema order by looking each field up by name;
         // lance-spark 0.4.0's VectorSchemaRoot may return the file's on-disk order, which
         // would misalign the UnsafeProjection. Cached on the first batch and reused thereafter.
@@ -137,16 +152,14 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     if (!hasNext()) {
       throw new IllegalStateException("No more records available");
     }
-    InternalRow row = currentBatch.getRow(rowIdInBatch++);
-    return projection.apply(row).copy();
+    int rowId = rowIdInBatch++;
+    if (blobTransform != null) {
+      return blobTransform.transformRow(currentBatch, rowId, columnVectors, projection);
+    }
+    return projection.apply(currentBatch.getRow(rowId)).copy();
   }
 
-  /**
-   * Build the {@link #columnVectors} array from the first Arrow batch, mapping each Spark schema
-   * field to its Arrow vector by name. Subclasses can override to capture additional per-column
-   * state (e.g. blob-column metadata) but must call {@code super.buildColumnVectors(root)} first.
-   */
-  protected void buildColumnVectors(VectorSchemaRoot root) {
+  private void buildColumnVectors(VectorSchemaRoot root) {
     List<FieldVector> fieldVectors = root.getFieldVectors();
     Map<String, FieldVector> byName = new HashMap<>(fieldVectors.size() * 2);
     for (FieldVector fv : fieldVectors) {
@@ -167,6 +180,9 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
             + "' for file: " + path + "; available columns: " + byName.keySet());
       }
       columnVectors[i] = new LanceArrowColumnVector(fv);
+    }
+    if (blobTransform != null) {
+      blobTransform.init(columnVectors, sparkSchema);
     }
   }
 

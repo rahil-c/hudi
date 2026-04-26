@@ -21,18 +21,16 @@ package org.apache.hudi.io.storage;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.exception.HoodieException;
 
-import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
+import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.apache.spark.sql.vectorized.ColumnarRow;
 import org.apache.spark.unsafe.types.UTF8String;
-import org.lance.file.LanceFileReader;
 import org.lance.spark.vectorized.BlobStructAccessor;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
@@ -41,26 +39,26 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Iterator for Lance files opened in {@link org.lance.file.BlobReadMode#DESCRIPTOR} that rewrites
- * every BLOB column's INLINE rows into a form containing a reference to the blob stream so
- * {@code read_blob()} can lazily resolve the bytes via a pread on the {@code .lance} file.
- *
- * <p>Extends {@link LanceRecordIterator} to reuse batch-loading, column-vector building, and
- * lifecycle management. Only {@link #next()} and {@link #buildColumnVectors} are overridden.
+ * Per-row transform that rewrites BLOB columns from Lance's DESCRIPTOR shape into the Hudi BLOB
+ * shape. Composed into {@link LanceRecordIterator} for DESCRIPTOR-mode reads.
  *
  * <p>In DESCRIPTOR mode Lance surfaces the blob-stream coordinates of INLINE payloads as a
  * {@code Struct<position, size>} in the BLOB {@code data} child instead of materializing the
- * bytes. For each row we:
+ * bytes. For each row this transform:
  * <ul>
- *   <li>Read the BLOB row's {@code type}.</li>
- *   <li>If {@code type == OUT_OF_LINE}, copy the existing {@code reference} struct through.</li>
- *   <li>If {@code type == INLINE}, read {@code {position, size}} via {@link BlobStructAccessor}
- *       and synthesize a reference whose {@code external_path} points at the current
+ *   <li>If {@code type == OUT_OF_LINE}, copies the existing {@code reference} through.</li>
+ *   <li>If {@code type == INLINE}, reads {@code {position, size}} via {@link BlobStructAccessor}
+ *       and synthesizes a reference whose {@code external_path} points at the current
  *       {@code .lance} file. The {@code type} is preserved as {@code INLINE} so downstream
  *       consumers see the original storage mode; {@code read_blob()} resolves both cases.</li>
  * </ul>
  */
-public class BlobDescriptorLanceRecordIterator extends LanceRecordIterator {
+final class BlobDescriptorTransform {
+
+  private static final UTF8String OUT_OF_LINE_UTF8 =
+      UTF8String.fromString(HoodieSchema.Blob.OUT_OF_LINE);
+  private static final UTF8String INLINE_UTF8 =
+      UTF8String.fromString(HoodieSchema.Blob.INLINE);
 
   /** Cached child vectors and accessor for a single BLOB column. */
   private static final class BlobColInfo {
@@ -79,56 +77,38 @@ public class BlobDescriptorLanceRecordIterator extends LanceRecordIterator {
   }
 
   private final Set<String> blobFieldNames;
-  private final UTF8String outOfLineUtf8;
-  private final UTF8String inlineUtf8;
   private final UTF8String lanceFilePathUtf8;
-  private final StructField[] outputFields;
+  private final String lanceFilePath;
 
+  private StructField[] outputFields;
   /** Blob column metadata keyed by column index; only blob columns have entries. */
   private Map<Integer, BlobColInfo> blobColInfoMap;
 
-  /**
-   * @param allocator      Arrow buffer allocator for memory management
-   * @param lanceReader    Lance file reader
-   * @param arrowReader    Arrow reader already opened in DESCRIPTOR mode
-   * @param outputSchema   Hudi-shape Spark schema for the emitted rows
-   * @param lanceFilePath  Lance file path; used for error messages and as the
-   *                       {@code external_path} of synthesized references
-   * @param blobFieldNames top-level BLOB column names whose per-row values should be rewritten
-   */
-  public BlobDescriptorLanceRecordIterator(BufferAllocator allocator,
-                                           LanceFileReader lanceReader,
-                                           ArrowReader arrowReader,
-                                           StructType outputSchema,
-                                           String lanceFilePath,
-                                           Set<String> blobFieldNames) {
-    super(allocator, lanceReader, arrowReader, outputSchema, lanceFilePath);
+  BlobDescriptorTransform(Set<String> blobFieldNames, String lanceFilePath) {
     this.blobFieldNames = blobFieldNames;
-    this.outOfLineUtf8 = UTF8String.fromString(HoodieSchema.Blob.OUT_OF_LINE);
-    this.inlineUtf8 = UTF8String.fromString(HoodieSchema.Blob.INLINE);
     this.lanceFilePathUtf8 = UTF8String.fromString(lanceFilePath);
-    this.outputFields = outputSchema.fields();
+    this.lanceFilePath = lanceFilePath;
   }
 
-  @Override
-  protected void buildColumnVectors(VectorSchemaRoot root) {
-    super.buildColumnVectors(root);
-    blobColInfoMap = new HashMap<>();
-    StructField[] fields = sparkSchema.fields();
-    for (int i = 0; i < fields.length; i++) {
-      if (blobFieldNames.contains(fields[i].name())) {
+  /**
+   * Called once on the first batch to capture per-column blob metadata from the column vectors.
+   */
+  void init(ColumnVector[] columnVectors, StructType sparkSchema) {
+    this.outputFields = sparkSchema.fields();
+    this.blobColInfoMap = new HashMap<>();
+    for (int i = 0; i < outputFields.length; i++) {
+      if (blobFieldNames.contains(outputFields[i].name())) {
         blobColInfoMap.put(i, new BlobColInfo(columnVectors[i]));
       }
     }
   }
 
-  @Override
-  public UnsafeRow next() {
-    if (!hasNext()) {
-      throw new IllegalStateException("No more records available");
-    }
-    int rowId = rowIdInBatch++;
-    InternalRow batchRow = currentBatch.getRow(rowId);
+  /**
+   * Transform a single row, rewriting BLOB columns from Lance DESCRIPTOR shape into Hudi shape.
+   */
+  UnsafeRow transformRow(ColumnarBatch batch, int rowId,
+                         ColumnVector[] columnVectors, UnsafeProjection projection) {
+    InternalRow batchRow = batch.getRow(rowId);
     Object[] rowBuffer = new Object[outputFields.length];
     for (int i = 0; i < outputFields.length; i++) {
       BlobColInfo col = blobColInfoMap.get(i);
@@ -150,30 +130,30 @@ public class BlobDescriptorLanceRecordIterator extends LanceRecordIterator {
     // Caller already checked parent struct is non-null via batchRow.isNullAt(i).
     if (col.typeVec.isNullAt(rowId)) {
       throw new HoodieException("Malformed Lance BLOB row at rowId=" + rowId
-          + " (file: " + path + "): payload struct is non-null but type is null");
+          + " (file: " + lanceFilePath + "): payload struct is non-null but type is null");
     }
     UTF8String type = col.typeVec.getUTF8String(rowId);
 
-    if (type.equals(outOfLineUtf8)) {
+    if (type.equals(OUT_OF_LINE_UTF8)) {
       InternalRow refRow = col.refVec.isNullAt(rowId) ? null : new ColumnarRow(col.refVec, rowId);
-      return new GenericInternalRow(new Object[] { outOfLineUtf8, null, refRow });
+      return new GenericInternalRow(new Object[] { OUT_OF_LINE_UTF8, null, refRow });
     }
 
-    if (!type.equals(inlineUtf8)) {
+    if (!type.equals(INLINE_UTF8)) {
       throw new HoodieException("Unexpected BLOB type '" + type + "' at rowId=" + rowId
-          + " (file: " + path + "); expected INLINE or OUT_OF_LINE");
+          + " (file: " + lanceFilePath + "); expected INLINE or OUT_OF_LINE");
     }
 
     // INLINE source row — rewrite into a reference pointing at the .lance blob stream.
     // Defensively handle null data (e.g. a row with type=INLINE but null payload).
     if (col.dataVec.isNullAt(rowId)) {
-      return new GenericInternalRow(new Object[] { inlineUtf8, null, null });
+      return new GenericInternalRow(new Object[] { INLINE_UTF8, null, null });
     }
 
     long position = col.blobStructAccessor.getPosition(rowId);
     long size = col.blobStructAccessor.getSize(rowId);
     InternalRow refRow = new GenericInternalRow(
         new Object[] { lanceFilePathUtf8, position, size, Boolean.TRUE });
-    return new GenericInternalRow(new Object[] { inlineUtf8, null, refRow });
+    return new GenericInternalRow(new Object[] { INLINE_UTF8, null, refRow });
   }
 }
