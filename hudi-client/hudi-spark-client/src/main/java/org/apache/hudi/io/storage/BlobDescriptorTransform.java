@@ -28,7 +28,6 @@ import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
-import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.apache.spark.sql.vectorized.ColumnarRow;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.lance.spark.vectorized.BlobStructAccessor;
@@ -105,17 +104,19 @@ public final class BlobDescriptorTransform {
 
   /**
    * Transform a single row, rewriting BLOB columns from Lance DESCRIPTOR shape into Hudi shape.
+   *
+   * @param row        the InternalRow from the current batch
+   * @param rowId      row index within the batch (for column-vector access on blob columns)
+   * @param projection projection to convert to UnsafeRow
    */
-  UnsafeRow transformRow(ColumnarBatch batch, int rowId,
-                         ColumnVector[] columnVectors, UnsafeProjection projection) {
-    InternalRow batchRow = batch.getRow(rowId);
+  UnsafeRow transformRow(InternalRow row, int rowId, UnsafeProjection projection) {
     Object[] rowBuffer = new Object[outputFields.length];
     for (int i = 0; i < outputFields.length; i++) {
       BlobColInfo col = blobColInfoMap.get(i);
       if (col != null) {
-        rowBuffer[i] = batchRow.isNullAt(i) ? null : buildBlobOutputRow(col, rowId);
+        rowBuffer[i] = row.isNullAt(i) ? null : buildBlobOutputRow(col, rowId);
       } else {
-        rowBuffer[i] = batchRow.isNullAt(i) ? null : batchRow.get(i, outputFields[i].dataType());
+        rowBuffer[i] = row.isNullAt(i) ? null : row.get(i, outputFields[i].dataType());
       }
     }
     return projection.apply(new GenericInternalRow(rowBuffer)).copy();

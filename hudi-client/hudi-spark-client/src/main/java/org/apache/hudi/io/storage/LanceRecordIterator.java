@@ -37,6 +37,7 @@ import org.lance.file.LanceFileReader;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -53,9 +54,9 @@ import java.util.Map;
  * </ul>
  *
  * <p>An optional {@link BlobDescriptorTransform} can be composed in to rewrite BLOB columns
- * in DESCRIPTOR mode, avoiding the need for a separate iterator subclass.
+ * in DESCRIPTOR mode.
  */
-public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
+public final class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
   private final BufferAllocator allocator;
   private final LanceFileReader lanceReader;
   private final ArrowReader arrowReader;
@@ -66,10 +67,11 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
 
   private ColumnarBatch currentBatch;
   private ColumnVector[] columnVectors;
-  /** Arrow reuses the same VectorSchemaRoot; lazily assigned on the first hasNext() call. */
+  /** Arrow reuses the same VectorSchemaRoot; lazily assigned on the first batch load. */
   private VectorSchemaRoot vectorSchemaRoot;
+  private Iterator<InternalRow> rowIterator;
+  /** Row index within the current batch; only used by {@link BlobDescriptorTransform}. */
   private int rowIdInBatch;
-  private int batchRowCount;
   private boolean closed = false;
 
   /**
@@ -111,7 +113,7 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
 
   @Override
   public boolean hasNext() {
-    if (currentBatch != null && rowIdInBatch < batchRowCount) {
+    if (rowIterator != null && rowIterator.hasNext()) {
       return true;
     }
 
@@ -132,9 +134,9 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
         }
 
         currentBatch = new ColumnarBatch(columnVectors, vectorSchemaRoot.getRowCount());
-        batchRowCount = vectorSchemaRoot.getRowCount();
+        rowIterator = currentBatch.rowIterator();
         rowIdInBatch = 0;
-        if (batchRowCount > 0) {
+        if (rowIterator.hasNext()) {
           return true;
         }
         currentBatch.close();
@@ -152,11 +154,12 @@ public class LanceRecordIterator implements ClosableIterator<UnsafeRow> {
     if (!hasNext()) {
       throw new IllegalStateException("No more records available");
     }
-    int rowId = rowIdInBatch++;
+    InternalRow row = rowIterator.next();
     if (blobTransform != null) {
-      return blobTransform.transformRow(currentBatch, rowId, columnVectors, projection);
+      return blobTransform.transformRow(row, rowIdInBatch++, projection);
     }
-    return projection.apply(currentBatch.getRow(rowId)).copy();
+    rowIdInBatch++;
+    return projection.apply(row).copy();
   }
 
   private void buildColumnVectors(VectorSchemaRoot root) {
