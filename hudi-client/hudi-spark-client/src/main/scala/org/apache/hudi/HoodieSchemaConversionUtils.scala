@@ -158,13 +158,18 @@ object HoodieSchemaConversionUtils {
    * write fails with `SchemaBackwardsCompatibilityException:
    * MISSING_UNION_BRANCH`.
    *
-   * This helper compensates by copying StructField metadata from a
-   * catalog-derived StructType (which still has the metadata Spark
-   * preserved through the catalog round-trip) onto the source StructType
-   * (whose metadata Spark stripped during INSERT resolution). Recurses
-   * into nested StructType fields so BLOB nested inside another STRUCT
-   * is handled too. Falls back to source's own metadata when the catalog
-   * has no matching field or its metadata is empty.
+   * Scoping rules:
+   *   - For a catalog field carrying `hudi_type` (BLOB / VECTOR / VARIANT),
+   *     the catalog defines the canonical Avro union shape. Both metadata
+   *     and nullability are re-stamped, and nested structs are recursed so
+   *     inner-field nullability matches the layout the logical-type
+   *     validator expects.
+   *   - For ordinary fields, only metadata is re-stamped. Nullability is
+   *     left untouched and we do NOT recurse — Spark's TableOutputResolver
+   *     already produced an Avro-compatible shape, and forcing the catalog's
+   *     nullability across unrelated columns shifts their Avro union layout
+   *     and breaks readers (surfacing as `Malformed data. Length is negative`
+   *     in Avro deserialization across MergeInto / partial-update paths).
    *
    * @param sourceSchema  the StructType whose metadata may have been stripped
    *                      (typically `df.schema` from an INSERT plan)
@@ -172,7 +177,8 @@ object HoodieSchemaConversionUtils {
    *                      StructField.metadata (typically derived from the
    *                      Hudi catalog HoodieSchema)
    * @return a StructType matching `sourceSchema`'s field shape but with
-   *         metadata re-stamped from `catalogSchema` where matching
+   *         metadata re-stamped from `catalogSchema` where matching, and
+   *         nullability re-stamped only for logical-type fields
    */
   def alignSchemaMetadataFromCatalog(sourceSchema: StructType,
                                      catalogSchema: StructType): StructType = {
@@ -183,16 +189,16 @@ object HoodieSchemaConversionUtils {
           val newMetadata =
             if (cat.metadata != org.apache.spark.sql.types.Metadata.empty) cat.metadata
             else src.metadata
-          // Spark's INSERT INTO column resolution can also tighten field nullability
-          // (e.g. SELECT 1 AS id resolves as nullable=false even when the catalog
-          //  declares the column as nullable=true). Align with the catalog so the
-          //  resulting Avro schema's union shape matches the persisted schema.
-          val newNullable = cat.nullable
-          val newDataType = (src.dataType, cat.dataType) match {
-            case (s: StructType, c: StructType) => alignSchemaMetadataFromCatalog(s, c)
-            case _ => src.dataType
+          val isLogical = cat.metadata.contains("hudi_type")
+          if (isLogical) {
+            val newDataType = (src.dataType, cat.dataType) match {
+              case (s: StructType, c: StructType) => alignSchemaMetadataFromCatalog(s, c)
+              case _ => src.dataType
+            }
+            src.copy(dataType = newDataType, nullable = cat.nullable, metadata = newMetadata)
+          } else {
+            src.copy(metadata = newMetadata)
           }
-          src.copy(dataType = newDataType, nullable = newNullable, metadata = newMetadata)
         case None => src
       }
     }
