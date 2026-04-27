@@ -107,6 +107,8 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
    *   <li>{@code populateMetaFields} — defaults to {@code false}</li>
    *   <li>{@code bloomFilterOpt} — defaults to {@link Option#empty()}</li>
    *   <li>{@code maxFileSize} — defaults to {@link HoodieStorageConfig#LANCE_MAX_FILE_SIZE}</li>
+   *   <li>{@code allocatorSize} — defaults to {@link HoodieStorageConfig#LANCE_WRITE_ALLOCATOR_SIZE_BYTES}</li>
+   *   <li>{@code flushByteWatermark} — defaults to {@link HoodieStorageConfig#LANCE_WRITE_FLUSH_BYTE_WATERMARK}</li>
    * </ul>
    */
   @Builder(builderMethodName = "builder")
@@ -118,10 +120,18 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
       HoodieStorage storage,
       boolean populateMetaFields,
       Option<BloomFilter> bloomFilterOpt,
-      long maxFileSize) {
+      long maxFileSize,
+      long allocatorSize,
+      long flushByteWatermark) {
     checkArgument(maxFileSize > 0, "maxFileSize must be a positive number");
+    checkArgument(allocatorSize > 0, "allocatorSize must be a positive number");
+    checkArgument(flushByteWatermark > 0, "flushByteWatermark must be a positive number");
+    checkArgument(flushByteWatermark < allocatorSize,
+        "flushByteWatermark (" + flushByteWatermark + ") must be less than allocatorSize ("
+            + allocatorSize + ") so the byte-aware flush prevents reallocations from exceeding the cap");
     return new HoodieSparkLanceWriter(file, sparkSchema, instantTime,
-        taskContextSupplier, storage, populateMetaFields, bloomFilterOpt, maxFileSize);
+        taskContextSupplier, storage, populateMetaFields, bloomFilterOpt, maxFileSize,
+        allocatorSize, flushByteWatermark);
   }
 
   /**
@@ -131,6 +141,8 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
   public static class HoodieSparkLanceWriterBuilder {
     private Option<BloomFilter> bloomFilterOpt = Option.empty();
     private long maxFileSize = Long.parseLong(HoodieStorageConfig.LANCE_MAX_FILE_SIZE.defaultValue());
+    private long allocatorSize = Long.parseLong(HoodieStorageConfig.LANCE_WRITE_ALLOCATOR_SIZE_BYTES.defaultValue());
+    private long flushByteWatermark = Long.parseLong(HoodieStorageConfig.LANCE_WRITE_FLUSH_BYTE_WATERMARK.defaultValue());
   }
 
   private HoodieSparkLanceWriter(StoragePath file,
@@ -140,8 +152,11 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
                                  HoodieStorage storage,
                                  boolean populateMetaFields,
                                  Option<BloomFilter> bloomFilterOpt,
-                                 long maxFileSize) {
-    super(file, DEFAULT_BATCH_SIZE, bloomFilterOpt.map(HoodieBloomFilterRowWriteSupport::new));
+                                 long maxFileSize,
+                                 long allocatorSize,
+                                 long flushByteWatermark) {
+    super(file, DEFAULT_BATCH_SIZE, allocatorSize, flushByteWatermark,
+        bloomFilterOpt.map(HoodieBloomFilterRowWriteSupport::new));
     this.sparkSchema = enrichSparkSchemaForLance(sparkSchema);
     Schema baseArrow = LanceArrowUtils.toArrowSchema(this.sparkSchema, DEFAULT_TIMEZONE, true);
     // Force LargeBinary + `lance-encoding:blob=true` on each BLOB's nested `data` Arrow leaf.

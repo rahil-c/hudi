@@ -20,13 +20,13 @@
 package org.apache.spark.sql.execution.datasources.lance
 
 import org.apache.hudi.SparkAdapterSupport.sparkAdapter
-import org.apache.hudi.common.config.HoodieReaderConfig
+import org.apache.hudi.common.config.{HoodieReaderConfig, HoodieStorageConfig}
 import org.apache.hudi.common.schema.{HoodieSchema, HoodieSchemaType}
 import org.apache.hudi.common.util
 import org.apache.hudi.common.util.collection.ClosableIterator
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.io.memory.HoodieArrowAllocator
-import org.apache.hudi.io.storage.{BlobDescriptorTransform, HoodieSparkLanceReader, LanceRecordIterator, VectorConversionUtils}
+import org.apache.hudi.io.storage.{BlobDescriptorTransform, LanceRecordIterator, VectorConversionUtils}
 import org.apache.hudi.storage.StorageConfiguration
 
 import org.apache.hadoop.conf.Configuration
@@ -87,8 +87,11 @@ class SparkLanceReaderBase(enableVectorizedReader: Boolean) extends SparkColumna
       var lanceIterator: ClosableIterator[UnsafeRow] = null
 
       // Create child allocator for reading
-      val allocator = HoodieArrowAllocator.newChildAllocator(getClass.getSimpleName + "-data-" + filePath,
-        HoodieSparkLanceReader.LANCE_DATA_ALLOCATOR_SIZE);
+      val dataAllocatorSize = storageConf.unwrap().getLong(
+        HoodieStorageConfig.LANCE_READ_ALLOCATOR_SIZE_BYTES.key(),
+        HoodieStorageConfig.LANCE_READ_ALLOCATOR_SIZE_BYTES.defaultValue().toLong)
+      val allocator = HoodieArrowAllocator.newChildAllocator(
+        getClass.getSimpleName + "-data-" + filePath, dataAllocatorSize)
 
       try {
         // Open Lance file reader
