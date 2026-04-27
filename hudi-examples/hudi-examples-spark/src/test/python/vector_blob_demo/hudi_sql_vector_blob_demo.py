@@ -1,7 +1,7 @@
 """
 Hudi VECTOR + BLOB + Vector Search demo — **Spark SQL variant**.
 
-Same shape as `hudi_lance_vector_blob_demo.py`, but every Hudi-touching
+Same shape as `hudi_dataframe_vector_blob_demo.py`, but every Hudi-touching
 operation is a SQL statement so viewers see the actual DDL/DML surface:
 
   CREATE TABLE ... (embedding VECTOR(1024), image_bytes BLOB, ...) USING hudi

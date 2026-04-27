@@ -17,6 +17,10 @@ pillow>=10.3.0
 # Plotting.
 matplotlib>=3.8.0
 
+# Jupyter (only needed for notebooks/ — the .py scripts don't require these).
+jupyter>=1.0.0
+ipykernel>=6.29.0
+
 # NOTES:
 # - Torch 2.3+ includes Metal (MPS) backend for Apple Silicon by default.
 # - Hudi + Lance arrive as JARs, not pip packages. Point at them via:

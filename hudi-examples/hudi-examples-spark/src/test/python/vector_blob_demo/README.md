@@ -19,7 +19,7 @@ Run them independently or in sequence for a full walkthrough.
 |---|---|---|---|
 | [`hudi_blob_reader_demo.py`](hudi_blob_reader_demo.py) | **OUT_OF_LINE BLOBs + `read_blob()`** — Hudi table stores references to bytes living in a separate container file; `read_blob()` resolves them on demand | Spark SQL | Showing the "lakehouse that references unstructured data without copying" story — tiny Hudi table, bytes elsewhere |
 | [`hudi_sql_vector_blob_demo.py`](hudi_sql_vector_blob_demo.py) | **INLINE BLOBs + VECTOR + `hudi_vector_search`** — bytes embedded in the Hudi base files, cosine similarity search via the TVF | Spark SQL — `CREATE TABLE ... (embedding VECTOR(N), image_bytes BLOB, ...) USING hudi`, `named_struct('type','INLINE', ...)`, `hudi_vector_search(...)` | Live demos; SQL-first users; showing the Hudi 1.2.0 DDL/DML surface the way it's documented |
-| [`hudi_lance_vector_blob_demo.py`](hudi_lance_vector_blob_demo.py) | Same as the SQL demo, but via DataFrame | Python DataFrame API — `StructField(..., metadata={"hudi_type": "VECTOR(N)"})`, `stamp_blob_metadata`, `struct(lit(...), ...)` | Library-style integration; seeing how the Python DataFrame API composes the VECTOR/BLOB logical types under the hood |
+| [`hudi_dataframe_vector_blob_demo.py`](hudi_dataframe_vector_blob_demo.py) | Same as the SQL demo, but via DataFrame | Python DataFrame API — `spark.createDataFrame(rows, explicit_schema)` with `containsNull=False` and `hudi_type` metadata declared upfront, then `df.write.format("hudi").save(path)` | Library-style integration; seeing how the Python DataFrame API composes the VECTOR/BLOB logical types under the hood |
 
 All three share the same venv, jars, and env vars. They write to different
 table paths (`/tmp/hudi_blob_reader_{format}_pets` vs `/tmp/hudi_sql_{format}_pets`
@@ -27,6 +27,22 @@ vs `/tmp/hudi_{format}_pets`) so you can run them back-to-back without
 collision.
 
 **Suggested demo order** when walking someone through: blob reader → SQL vector search → DataFrame variant (as "here's the lower-level view"). The first two cover the features; the third is reference material.
+
+## Run as Jupyter notebooks
+
+For live presentations and self-serve exploration, the same three demos are
+also available as Jupyter notebooks under [`notebooks/`](notebooks/). Code,
+narrative, and output (images, top-K panels) live in one scrollable artifact;
+toggling a feature is a single Python variable edit + "Run All" — no shell
+env vars.
+
+| Notebook | `.py` cousin | Toggleable variables |
+|---|---|---|
+| [`notebooks/01_blob_reader.ipynb`](notebooks/01_blob_reader.ipynb) | [`hudi_blob_reader_demo.py`](hudi_blob_reader_demo.py) | `BASE_FILE_FORMAT`, `BLOB_MODE`, `INLINE_READ_MODE`, `N_SAMPLES` |
+| [`notebooks/02_sql_vector_search.ipynb`](notebooks/02_sql_vector_search.ipynb) | [`hudi_sql_vector_blob_demo.py`](hudi_sql_vector_blob_demo.py) | `BASE_FILE_FORMAT`, `N_SAMPLES` |
+| [`notebooks/03_dataframe_vector_search.ipynb`](notebooks/03_dataframe_vector_search.ipynb) | [`hudi_dataframe_vector_blob_demo.py`](hudi_dataframe_vector_blob_demo.py) | `BASE_FILE_FORMAT`, `N_SAMPLES` |
+
+See [`notebooks/README.md`](notebooks/README.md) for setup details.
 
 ## Prereqs
 
@@ -90,14 +106,14 @@ python hudi_blob_reader_demo.py
 python hudi_sql_vector_blob_demo.py
 
 # DataFrame variant — same as SQL, but through PySpark DataFrame API
-python hudi_lance_vector_blob_demo.py
+python hudi_dataframe_vector_blob_demo.py
 ```
 
 Once it works, crank it up:
 
 ```bash
 export HUDI_LANCE_DEMO_N=1000
-python hudi_lance_vector_blob_demo.py        # or hudi_sql_vector_blob_demo.py
+python hudi_dataframe_vector_blob_demo.py        # or hudi_sql_vector_blob_demo.py
 ```
 
 ### Run the same demo against Parquet base files
@@ -107,7 +123,7 @@ base file format with one env var:
 
 ```bash
 # Parquet runs do NOT need LANCE_BUNDLE_JAR — leave it unset
-HUDI_BASE_FILE_FORMAT=parquet python hudi_lance_vector_blob_demo.py
+HUDI_BASE_FILE_FORMAT=parquet python hudi_dataframe_vector_blob_demo.py
 ```
 
 Table path and panel filename auto-rename to `/tmp/hudi_parquet_pets` (or
@@ -357,7 +373,7 @@ abstracts over inline-vs-external" point.
 ## How the script works
 
 The script is a single file —
-[`hudi_lance_vector_blob_demo.py`](hudi_lance_vector_blob_demo.py) — organized
+[`hudi_dataframe_vector_blob_demo.py`](hudi_dataframe_vector_blob_demo.py) — organized
 into numbered sections. Here's what each one does and why.
 
 ### Pre-JVM env setup (top of file, before any `pyspark` import)
@@ -398,7 +414,7 @@ Every Spark config line has a purpose:
 | `spark.sql.extensions = HoodieSparkSessionExtension` | Registers Hudi's SQL rules, including the vector search TVF |
 | `spark.sql.catalog.spark_catalog = HoodieCatalog` | Makes `CREATE TABLE` aware of Hudi |
 | `spark.sql.session.timeZone = UTC` | Determinism |
-| `spark.default.parallelism = 2`, `spark.sql.shuffle.partitions = 2` | Defense-in-depth against macOS socket-buffer saturation. The primary fix is PyArrow staging (see below); low parallelism keeps any incidental Python UDF path well under mbuf pressure |
+| `spark.default.parallelism = 2`, `spark.sql.shuffle.partitions = 2` | Defense-in-depth against macOS socket-buffer saturation. The DataFrame demo relies on small N (100–256 rows) to keep `PythonRDD` traffic under the mbuf limit; the SQL + blob reader demos stage through PyArrow → Parquet (see "Why we stage through Parquet" below). Low parallelism keeps any incidental Python UDF path well under mbuf pressure regardless |
 
 `hoodie.read.blob.inline.mode` is intentionally **not** set on the session —
 the blob reader demo scopes it per-load (see "Switching BLOB read mode"
@@ -423,36 +439,38 @@ becomes the `N` in `VECTOR(N)`.
 
 ### Section 4 — Writing to Hudi
 
-Four functions work together:
+Three pieces work together. The pattern mirrors
+[`TestVectorDataSource.scala`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/hudi/functional/TestVectorDataSource.scala)
+exactly: declare the target `StructType` (with `containsNull=False` on the
+embedding's array elements and `hudi_type` metadata on the columns), build
+positional `Row` tuples from the Python data, and let
+`spark.createDataFrame(rows, schema)` treat the schema as authoritative.
 
-**`stage_to_parquet_with_pyarrow(data, embedding_dim, path)`** writes the
-Python list of dicts to a Parquet file **directly from Python via PyArrow**,
-bypassing Spark entirely for the initial Python→disk hop. Critical for
-macOS — see "Why we stage through Parquet" below.
+**`build_target_schema(embedding_dim)`** returns the full `StructType` with:
+- `embedding`: `ArrayType(FloatType(), containsNull=False)`, `nullable=False`,
+  `metadata={"hudi_type": "VECTOR(<dim>)"}`
+- `image_bytes`: the BLOB struct shape (`type`, `data`, `reference`),
+  `metadata={"hudi_type": "BLOB"}`
+- All other scalar fields (`image_id`, `category`, etc.)
 
-**`inline_blob_struct(bytes_col)`** constructs a `struct<type, data, reference>`
-column expression. Mirrors `BlobTestHelpers.inlineBlobStructCol` in the Scala
-test code. The `reference` field is a null cast to the full
-`struct<external_path, offset, length, managed>` shape so Spark's schema
-inference doesn't produce a `struct<>` mismatch.
+**`rows_for_hudi(data)`** yields one positional `Row(...)` per input dict.
+The BLOB inline value is constructed as a nested `Row("INLINE", bytes, None)`
+— positional, matching the schema's field order.
 
-**`stamp_blob_metadata(df, "image_bytes")`** re-selects every column and
-stamps `hudi_type=BLOB` on the target via `col(name).alias(name, metadata={...})`.
-PySpark gives you no other way to attach `Metadata` to an existing struct
-column.
-
-**`write_to_hudi(spark, data, embedding_dim)`** ties them together:
-1. `stage_to_parquet_with_pyarrow(...)` — Python→disk via PyArrow, no Spark.
-2. `spark.read.parquet(staging_path)` — JVM-native DataFrame, no `PythonRDD`.
-3. Re-stamp `embedding` with `hudi_type = "VECTOR(N)"` metadata (PyArrow
-   doesn't write Spark's schema JSON footer, so `StructField.metadata` is
-   lost on the Parquet round-trip).
-4. `withColumn("image_bytes", inline_blob_struct(...))` + `drop("image_bytes_raw")`
-5. `stamp_blob_metadata(..., "image_bytes")`
-6. `.write.format("hudi")` with these options (the interesting ones):
+**`write_to_hudi(spark, data, embedding_dim)`** is now three lines of real
+work:
+1. `schema = build_target_schema(embedding_dim)`
+2. `df = spark.createDataFrame(list(rows_for_hudi(data)), schema)` — schema
+   is authoritative, so `containsNull=False` and `hudi_type` metadata both
+   land on the JVM-side DataFrame as declared.
+3. `df.write.format("hudi").mode("overwrite").save(table_path)` with the same
+   `hoodie.*` options the SQL demo uses:
    - `hoodie.table.base.file.format = lance` — the switch from Parquet to Lance
    - `hoodie.datasource.write.partitionpath.field = category_sanitized` — 37 breed partitions
    - `hoodie.write.record.merge.custom.implementation.classes = DefaultSparkRecordMerger` — required to merge Spark rows with Hudi's logical types
+
+No PyArrow, no Parquet staging, no `withColumn`/`alias`/`stamp_blob_metadata`
+gymnastics — the schema declares everything, and `createDataFrame` honors it.
 
 ### Section 5 — `find_similar()`
 
@@ -557,8 +575,9 @@ files — safe to leave on always.
 parser at
 [`HoodieSpark3_5ExtendedSqlAstBuilder.scala:2612-2626`](../../../../../../hudi-spark-datasource/hudi-spark3.5.x/src/main/scala/org/apache/spark/sql/parser/HoodieSpark3_5ExtendedSqlAstBuilder.scala)
 rewrites them into the right Spark types **and** stamps `hudi_type` metadata
-automatically — so the DataFrame demo's `stamp_blob_metadata()` /
-`StructField(metadata=...)` gymnastics simply aren't needed here.
+automatically — so the DataFrame demo's explicit
+`StructField(..., metadata={"hudi_type": ...})` declarations simply aren't
+needed here.
 
 ### Step 6 — `INSERT INTO ... SELECT` with `named_struct` (SQL)
 
@@ -623,12 +642,13 @@ All five Hudi-facing steps (CREATE, INSERT, preview SELECT, vector search,
 and the COUNT validation inside the INSERT helper) are raw SQL strings the
 viewer can read top-to-bottom.
 
-## Why we stage through Parquet (written directly by PyArrow)
+## Why the SQL + blob reader demos stage through Parquet (written directly by PyArrow)
 
-Both scripts write the generated images + embeddings to a local Parquet file
-(`/tmp/staging_<table>_parquet.parquet`) via **PyArrow**, then read that back
-with `spark.read.parquet(...)` as the input to the Hudi write. It looks
-redundant — why not just pass a DataFrame to Hudi directly?
+The **SQL** and **blob reader** demos write the generated images +
+embeddings to a local Parquet file (`/tmp/staging_<table>_parquet.parquet`)
+via **PyArrow**, then read that back with `spark.read.parquet(...)` as the
+input to the Hudi write. It looks redundant — why not just pass a DataFrame
+to Hudi directly?
 
 **Short answer**: anything built with `spark.createDataFrame(python_list, ...)`
 is a `PythonRDD`. Its rows are pickled Python bytes that require a Python
@@ -647,24 +667,31 @@ This fires even on the **first** pass — so naive Spark-side Parquet staging
 (`createDataFrame(...).write.parquet(...)`) doesn't actually fix it, because
 that IS a PythonRDD write.
 
-**The real workaround**: skip Spark for the staging step. PyArrow can write
-a proper Parquet file directly from Python, in-process, no Spark involved.
-After `pq.write_table(table, path)`, we do `spark.read.parquet(path)` and
-get a JVM-native DataFrame. No `PythonRDD` ever exists in the lineage, so no
-localhost socket traffic happens anywhere, and the macOS mbuf issue simply
-can't occur.
+**The workaround for SQL + blob reader**: skip Spark for the staging step.
+PyArrow writes a proper Parquet file directly from Python, in-process, no
+Spark involved. After `pq.write_table(table, path)`, we do
+`spark.read.parquet(path)` and get a JVM-native DataFrame backing a temp
+view. No `PythonRDD` ever exists in the lineage, so no localhost socket
+traffic happens anywhere, and the macOS mbuf issue can't occur.
 
-This is the canonical real-world pattern for Python-generated data that
-needs to flow into Spark on a single machine: generate Parquet with PyArrow,
-read with Spark. Each stays in its own process.
+### Why the DataFrame demo doesn't need this
 
-**One extra step for the DataFrame demo**: PyArrow doesn't write Spark's
-schema JSON footer, so `StructField.metadata` (our
-`hudi_type = "VECTOR(N)"` annotation on the embedding column) doesn't
-survive the round-trip. The DataFrame script re-applies the metadata with
-`col("embedding").alias("embedding", metadata={"hudi_type": f"VECTOR({N})"})`
-after `spark.read.parquet`. The SQL script doesn't need this — the
-`CREATE TABLE … embedding VECTOR(N)` DDL carries the logical-type annotation.
+The DataFrame demo (`hudi_dataframe_vector_blob_demo.py`) deliberately keeps
+a `PythonRDD` in its lineage — `spark.createDataFrame(list_of_rows, schema)`
+is a one-shot construction, not sustained streaming. At demo sizes (100–256
+rows) the loopback traffic from the single Hudi write doesn't come close to
+the macOS mbuf limit.
+
+The reason `createDataFrame` is preferred there: it accepts the explicit
+`StructType` as **authoritative**, so `containsNull=False` on the
+embedding's array elements and the `hudi_type` metadata on each column
+both survive into the JVM-side schema. `spark.read.parquet(...)` does the
+opposite — its reader silently flips `containsNull` regardless of any
+`read.schema()` hint, and Hudi's VECTOR validator then rejects the column.
+That's the same pattern
+[`TestVectorDataSource.scala`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/hudi/functional/TestVectorDataSource.scala)
+uses for the canonical Hudi-side test, and it's the one to copy when
+integrating Hudi VECTOR/BLOB writes from a Python DataFrame surface.
 
 ## Troubleshooting
 
@@ -673,7 +700,8 @@ after `spark.read.parquet`. The SQL script doesn't need this — the
 | `RecursionError: Stack overflow` during `createDataFrame` | Python 3.13+ | Use Python 3.12 — PySpark 3.5 doesn't support 3.13+ |
 | `java.lang.OutOfMemoryError: Java heap space` during write | Default driver heap too small for N>~300 | `export PYSPARK_DRIVER_MEMORY=8g` |
 | `java.net.SocketException: No buffer space available` | PythonRDD → Python workers streaming rows through localhost sockets exhausts macOS kernel mbuf pool | Both scripts already stage Python data via **PyArrow** directly to Parquet (bypassing Spark for the initial hop) so no `PythonRDD` ever exists — see "Why we stage through Parquet" below. If it still fires (e.g. with a Python UDF you added), drop `spark.default.parallelism` to `1` or raise kernel buffers: `sudo sysctl -w kern.ipc.maxsockbuf=16777216` |
-| `ModuleNotFoundError: No module named 'pyarrow'` | Venv missing pyarrow | `pip install -r requirements.txt` — pyarrow is now an explicit dependency used for staging |
+| `ModuleNotFoundError: No module named 'pyarrow'` | Venv missing pyarrow | `pip install -r requirements.txt` — pyarrow is an explicit dependency used by the SQL + blob reader staging path (the DataFrame demo doesn't import it) |
+| `ARRAY_ELEMENT NOT_NULL_CONSTRAINT_VIOLATION` or `cannot cast ARRAY<FLOAT> to ARRAY<FLOAT>` from the DataFrame demo | DataFrame built via `spark.read.parquet(...)` — the Parquet reader silently flips `containsNull` to true on round-trip, then Hudi's VECTOR validator rejects the column | Build the DataFrame via `spark.createDataFrame(rows, explicit_schema)` instead — schema is authoritative, `containsNull=False` is preserved. This is what the DataFrame demo now does, mirroring `TestVectorDataSource.scala` |
 | `Lance base file format is currently only supported with the Spark engine` during INSERT | Hudi fell back to AVRO record type; its Lance writer is a stub that throws | SQL path: add `'hoodie.write.record.merge.custom.implementation.classes' = 'org.apache.hudi.DefaultSparkRecordMerger'` to the table's `TBLPROPERTIES` (already in the script). DataFrame path: pass the same key as a write option (already in the script) |
 | `Lance batch column count N does not match expected Spark schema size 0` during read | `SELECT COUNT(*)` prunes to zero columns; Hudi's `LanceRecordIterator` has a strict column-count check that rejects the empty projection | Use `COUNT(<named_col>)` instead of `COUNT(*)` — script does this. Tracked as a Hudi-side bug in [findings.md](findings.md) |
 | `query vector must be a constant expression` | Query vector passed as subquery | Use `ARRAY(f1, f2, …)` literal — script does this |
