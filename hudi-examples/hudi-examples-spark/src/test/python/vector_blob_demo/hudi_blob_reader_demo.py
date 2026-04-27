@@ -20,8 +20,8 @@ shows INLINE blobs + vector search); this one shows OUT_OF_LINE blobs +
 
 Env vars (shares the same conventions as the other demos):
   HUDI_BUNDLE_JAR         (defaults to repo's packaging/hudi-spark-bundle target)
-  LANCE_BUNDLE_JAR        (required)
-  HUDI_BASE_FILE_FORMAT   (default 'lance'; 'parquet' also works)
+  HUDI_BASE_FILE_FORMAT   (default 'lance'; set to 'parquet' to use Parquet)
+  LANCE_BUNDLE_JAR        (required only when HUDI_BASE_FILE_FORMAT=lance)
   HUDI_BLOB_MODE          (default 'out_of_line'; 'inline' stores bytes in the Hudi table)
   HUDI_LANCE_DEMO_N       (default 100; number of images)
   PYSPARK_DRIVER_MEMORY   (default '4g')
@@ -99,16 +99,22 @@ def default_hudi_bundle_jar() -> str:
 
 def resolve_jars() -> str:
     hudi_jar = os.getenv("HUDI_BUNDLE_JAR", default_hudi_bundle_jar())
+    if not Path(hudi_jar).is_file():
+        sys.exit(f"ERROR: HUDI_BUNDLE_JAR does not exist at {hudi_jar}")
+
+    # Lance jar is only needed when writing/reading Lance base files.
+    if CONFIG["base_file_format"] != "lance":
+        return hudi_jar
+
     lance_jar = os.getenv("LANCE_BUNDLE_JAR")
     if not lance_jar:
         sys.exit(
-            "ERROR: LANCE_BUNDLE_JAR is not set. Grab "
-            "org.lance:lance-spark-bundle-3.5_2.12:0.4.0 from Maven Central "
+            "ERROR: LANCE_BUNDLE_JAR is not set (required for HUDI_BASE_FILE_FORMAT=lance). "
+            "Grab org.lance:lance-spark-bundle-3.5_2.12:0.4.0 from Maven Central "
             "and export LANCE_BUNDLE_JAR=/abs/path/to/that.jar."
         )
-    for label, path in [("HUDI_BUNDLE_JAR", hudi_jar), ("LANCE_BUNDLE_JAR", lance_jar)]:
-        if not Path(path).is_file():
-            sys.exit(f"ERROR: {label} does not exist at {path}")
+    if not Path(lance_jar).is_file():
+        sys.exit(f"ERROR: LANCE_BUNDLE_JAR does not exist at {lance_jar}")
     return f"{hudi_jar},{lance_jar}"
 
 
@@ -269,7 +275,7 @@ def stage_and_register(spark: SparkSession, rows):
 
 def create_hudi_table(spark: SparkSession):
     table = CONFIG["table_name"]
-    print(f"\nDDL: CREATE TABLE {table}")
+    print(f"\nDDL: CREATE TABLE {table}  [{CONFIG['base_file_format']} base files]")
 
     spark.sql(f"DROP TABLE IF EXISTS {table}")
 
@@ -299,7 +305,10 @@ def create_hudi_table(spark: SparkSession):
 
 def insert_blob_rows(spark: SparkSession):
     table = CONFIG["table_name"]
-    print(f"\nDML: INSERT INTO {table} SELECT ... ({CONFIG['blob_mode']})")
+    print(
+        f"\nDML: INSERT INTO {table} SELECT ...  "
+        f"[blob_mode={CONFIG['blob_mode']}, base={CONFIG['base_file_format']}]"
+    )
 
     # OUT_OF_LINE shape from TestDeleteFromTable.scala / TestUpdateTable.scala:
     #   named_struct('type','OUT_OF_LINE','data', null, 'reference', named_struct(path, offset, length, managed))
@@ -452,8 +461,19 @@ def _dir_size(path: Path) -> int:
 # ======================================================
 
 def main():
+    fmt = CONFIG["base_file_format"].upper()
+    mode = CONFIG["blob_mode"].upper()
     print("\n" + "=" * 80)
-    print(f"HUDI BLOB READER DEMO — {CONFIG['blob_mode'].upper()} + read_blob()")
+    print(f"HUDI BLOB READER DEMO  [base file format: {fmt} | blob mode: {mode}]")
+    print("read_blob() round-trip on Oxford-IIIT Pet")
+    print("=" * 80)
+    print(f"  base_file_format : {CONFIG['base_file_format']}")
+    print(f"  blob_mode        : {CONFIG['blob_mode']}")
+    print(f"  table_path       : {CONFIG['table_path']}")
+    print(f"  table_name       : {CONFIG['table_name']}")
+    print(f"  n_samples        : {CONFIG['n_samples']}")
+    if CONFIG["blob_mode"] == "out_of_line":
+        print(f"  blob_container   : {CONFIG['blob_container_path']}")
     print("=" * 80 + "\n")
 
     spark = create_spark()

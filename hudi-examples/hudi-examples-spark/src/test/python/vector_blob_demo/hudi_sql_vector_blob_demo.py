@@ -13,8 +13,8 @@ those cannot be SQL. The bridge between the two is a Spark temp view.
 
 Env vars (same as the DataFrame variant):
   HUDI_BUNDLE_JAR         (defaults to repo's packaging/hudi-spark-bundle target)
-  LANCE_BUNDLE_JAR        (required)
   HUDI_BASE_FILE_FORMAT   (default 'lance'; set to 'parquet' to use Parquet)
+  LANCE_BUNDLE_JAR        (required only when HUDI_BASE_FILE_FORMAT=lance)
   HUDI_LANCE_DEMO_N       (default 1000; number of images to ingest)
   PYSPARK_DRIVER_MEMORY   (default '4g')
   HUDI_LANCE_DEMO_OUTDIR  (default './outputs')
@@ -109,17 +109,23 @@ def default_hudi_bundle_jar() -> str:
 
 def resolve_jars() -> str:
     hudi_jar = os.getenv("HUDI_BUNDLE_JAR", default_hudi_bundle_jar())
+    if not Path(hudi_jar).is_file():
+        sys.exit(f"ERROR: HUDI_BUNDLE_JAR does not exist at {hudi_jar}")
+
+    # Lance jar is only needed when writing/reading Lance base files.
+    if CONFIG["base_file_format"] != "lance":
+        return hudi_jar
+
     lance_jar = os.getenv("LANCE_BUNDLE_JAR")
     if not lance_jar:
         sys.exit(
-            "ERROR: LANCE_BUNDLE_JAR is not set. Matching Hudi's pom, grab "
-            "org.lance:lance-spark-bundle-3.5_2.12:0.4.0 from "
+            "ERROR: LANCE_BUNDLE_JAR is not set (required for HUDI_BASE_FILE_FORMAT=lance). "
+            "Grab org.lance:lance-spark-bundle-3.5_2.12:0.4.0 from "
             "https://central.sonatype.com/artifact/org.lance/lance-spark-bundle-3.5_2.12/0.4.0 "
-            "and export LANCE_BUNDLE_JAR=/abs/path/to/lance-spark-bundle-3.5_2.12-0.4.0.jar."
+            "and export LANCE_BUNDLE_JAR=/abs/path/to/that.jar."
         )
-    for label, path in [("HUDI_BUNDLE_JAR", hudi_jar), ("LANCE_BUNDLE_JAR", lance_jar)]:
-        if not Path(path).is_file():
-            sys.exit(f"ERROR: {label} does not exist at {path}")
+    if not Path(lance_jar).is_file():
+        sys.exit(f"ERROR: LANCE_BUNDLE_JAR does not exist at {lance_jar}")
     return f"{hudi_jar},{lance_jar}"
 
 
@@ -273,7 +279,10 @@ def stage_to_parquet_with_pyarrow(data, embedding_dim: int, staging_path: str) -
             pa.field("height", pa.int32(), nullable=False),
             pa.field(
                 "embedding",
-                pa.list_(pa.float32(), list_size=embedding_dim),
+                pa.list_(
+                    pa.field("element", pa.float32(), nullable=False),
+                    list_size=embedding_dim,
+                ),
                 nullable=False,
             ),
         ]
@@ -314,7 +323,10 @@ def register_staging_view(spark: SparkSession, data, embedding_dim: int):
 
 def create_hudi_table_sql(spark: SparkSession, embedding_dim: int):
     table = CONFIG["table_name"]
-    print(f"\nDDL: CREATE TABLE {table} ...")
+    print(
+        f"\nDDL: CREATE TABLE {table} ...  "
+        f"[{CONFIG['base_file_format']} base files]"
+    )
 
     # Drop first so repeat runs are idempotent (also wipes the table_path dir
     # since the catalog's managed-path semantics follow LOCATION).
@@ -361,7 +373,10 @@ def create_hudi_table_sql(spark: SparkSession, embedding_dim: int):
 
 def insert_into_hudi_sql(spark: SparkSession):
     table = CONFIG["table_name"]
-    print(f"\nDML: INSERT INTO {table} SELECT ... FROM {STAGING_VIEW}")
+    print(
+        f"\nDML: INSERT INTO {table} SELECT ... FROM {STAGING_VIEW}  "
+        f"[{CONFIG['base_file_format']} base files]"
+    )
 
     # `named_struct('type', 'INLINE', 'data', <bytes>, 'reference', null)` is
     # the canonical shape for a Hudi BLOB INLINE value (matches the pattern
@@ -497,8 +512,16 @@ def visualize_and_save(query_image_bytes, query_category, results):
 # ======================================================
 
 def main():
+    fmt = CONFIG["base_file_format"].upper()
     print("\n" + "=" * 80)
-    print("HUDI VECTOR + BLOB + VECTOR SEARCH DEMO (SQL variant) — Oxford-IIIT Pet")
+    print(f"HUDI VECTOR + BLOB + VECTOR SEARCH DEMO  [base file format: {fmt}]")
+    print("Oxford-IIIT Pet — Spark SQL variant")
+    print("=" * 80)
+    print(f"  base_file_format : {CONFIG['base_file_format']}")
+    print(f"  table_path       : {CONFIG['table_path']}")
+    print(f"  table_name       : {CONFIG['table_name']}")
+    print(f"  n_samples        : {CONFIG['n_samples']}")
+    print(f"  embedding_model  : {CONFIG['embedding_model']}")
     print("=" * 80 + "\n")
 
     spark = create_spark()

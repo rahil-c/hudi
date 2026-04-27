@@ -1,18 +1,23 @@
 """
-Hudi VECTOR + BLOB + Vector Search demo on Lance files.
+Hudi VECTOR + BLOB + Vector Search demo (DataFrame variant).
 
 End-to-end flow:
   1) Load Oxford-IIIT Pet (cats & dogs, real photos) via torchvision.
   2) Generate image embeddings with a timm backbone.
-  3) Write rows into a Hudi table backed by Lance files, with:
+  3) Write rows into a Hudi table (Lance or Parquet base files), with:
        - `embedding`   tagged as Hudi VECTOR(<dim>)
        - `image_bytes` tagged as Hudi BLOB (INLINE)
   4) Run cosine similarity search via the `hudi_vector_search` SQL TVF.
   5) Save the query image, top-K neighbors, and a combined panel figure.
 
 Env vars:
-  HUDI_BUNDLE_JAR   (defaults to the repo's packaging/hudi-spark-bundle target)
-  LANCE_BUNDLE_JAR  (required — org.lance:lance-spark-bundle-3.5_2.12:0.4.0, matches Hudi pom)
+  HUDI_BUNDLE_JAR        (defaults to the repo's packaging/hudi-spark-bundle target)
+  HUDI_BASE_FILE_FORMAT  (default 'lance'; set to 'parquet' to use Parquet base files)
+  LANCE_BUNDLE_JAR       (required only when HUDI_BASE_FILE_FORMAT=lance —
+                          org.lance:lance-spark-bundle-3.5_2.12:0.4.0, matches Hudi pom)
+  HUDI_LANCE_DEMO_N      (default 1000; number of images to ingest)
+  PYSPARK_DRIVER_MEMORY  (default '4g')
+  HUDI_LANCE_DEMO_OUTDIR (default './outputs')
 """
 
 import io
@@ -46,6 +51,15 @@ from torchvision.datasets import OxfordIIITPet  # noqa: E402
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, lit, struct
+from pyspark.sql.types import (
+    ArrayType,
+    BinaryType,
+    FloatType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+)
 
 
 # ======================================================
@@ -116,17 +130,24 @@ def default_hudi_bundle_jar() -> str:
 
 def resolve_jars() -> str:
     hudi_jar = os.getenv("HUDI_BUNDLE_JAR", default_hudi_bundle_jar())
+    if not Path(hudi_jar).is_file():
+        sys.exit(f"ERROR: HUDI_BUNDLE_JAR does not exist at {hudi_jar}")
+
+    # Lance jar is only needed when writing/reading Lance base files. For Parquet
+    # runs we skip it entirely so users don't need to download it.
+    if CONFIG["base_file_format"] != "lance":
+        return hudi_jar
+
     lance_jar = os.getenv("LANCE_BUNDLE_JAR")
     if not lance_jar:
         sys.exit(
-            "ERROR: LANCE_BUNDLE_JAR is not set. Matching Hudi's pom, grab "
-            "org.lance:lance-spark-bundle-3.5_2.12:0.4.0 from "
+            "ERROR: LANCE_BUNDLE_JAR is not set (required for HUDI_BASE_FILE_FORMAT=lance). "
+            "Matching Hudi's pom, grab org.lance:lance-spark-bundle-3.5_2.12:0.4.0 from "
             "https://central.sonatype.com/artifact/org.lance/lance-spark-bundle-3.5_2.12/0.4.0 "
             "and export LANCE_BUNDLE_JAR=/abs/path/to/lance-spark-bundle-3.5_2.12-0.4.0.jar."
         )
-    for label, path in [("HUDI_BUNDLE_JAR", hudi_jar), ("LANCE_BUNDLE_JAR", lance_jar)]:
-        if not Path(path).is_file():
-            sys.exit(f"ERROR: {label} does not exist at {path}")
+    if not Path(lance_jar).is_file():
+        sys.exit(f"ERROR: LANCE_BUNDLE_JAR does not exist at {lance_jar}")
     return f"{hudi_jar},{lance_jar}"
 
 
@@ -317,7 +338,10 @@ def stage_to_parquet_with_pyarrow(data, embedding_dim: int, staging_path: str) -
             pa.field("height", pa.int32(), nullable=False),
             pa.field(
                 "embedding",
-                pa.list_(pa.float32(), list_size=embedding_dim),
+                pa.list_(
+                    pa.field("element", pa.float32(), nullable=False),
+                    list_size=embedding_dim,
+                ),
                 nullable=False,
             ),
         ]
@@ -339,27 +363,38 @@ def stage_to_parquet_with_pyarrow(data, embedding_dim: int, staging_path: str) -
 
 
 def write_to_hudi(spark, data, embedding_dim: int):
-    print("\nWriting to Hudi table (Lance base file format, VECTOR + BLOB)...")
+    print(
+        f"\nWriting to Hudi table ({CONFIG['base_file_format']} base file format, "
+        f"VECTOR + BLOB)..."
+    )
 
     # Stage through local Parquet written by PyArrow to break the PythonRDD
     # lineage entirely. See stage_to_parquet_with_pyarrow() for why.
     staging_parquet_path = f"/tmp/staging_{CONFIG['table_name']}_parquet.parquet"
     print(f"Staging Python data → Parquet at {staging_parquet_path} (PyArrow, no Spark)...")
     stage_to_parquet_with_pyarrow(data, embedding_dim, staging_parquet_path)
-    df = spark.read.parquet(staging_parquet_path)
 
-    # PyArrow doesn't write Spark's schema JSON footer, so StructField metadata
-    # didn't survive. Re-stamp the `embedding` column with VECTOR(N) metadata
-    # so Hudi recognizes it at write time.
+    # Spark's Parquet reader forces ArrayType.containsNull=true on inferred
+    # schemas, which trips Hudi's VECTOR validation. Supply an explicit schema
+    # with containsNull=false so the writer-side check passes.
     vector_meta = {HUDI_TYPE_METADATA_KEY: f"VECTOR({embedding_dim})"}
-    df = df.select(
-        *[
-            col(f.name).alias(f.name, metadata=vector_meta)
-            if f.name == "embedding"
-            else col(f.name)
-            for f in df.schema.fields
-        ]
-    )
+    read_schema = StructType([
+        StructField("image_id", StringType(), False),
+        StructField("category", StringType(), False),
+        StructField("category_sanitized", StringType(), False),
+        StructField("label", IntegerType(), False),
+        StructField("description", StringType(), True),
+        StructField("image_bytes_raw", BinaryType(), False),
+        StructField("width", IntegerType(), False),
+        StructField("height", IntegerType(), False),
+        StructField(
+            "embedding",
+            ArrayType(FloatType(), containsNull=False),
+            False,
+            metadata=vector_meta,
+        ),
+    ])
+    df = spark.read.schema(read_schema).parquet(staging_parquet_path)
 
     # Project `image_bytes_raw` into the BLOB INLINE struct shape, then drop the raw column.
     df = df.withColumn("image_bytes", inline_blob_struct(col("image_bytes_raw")))
@@ -503,8 +538,16 @@ def visualize_and_save(query_image_bytes, query_category, results):
 # ======================================================
 
 def main():
+    fmt = CONFIG["base_file_format"].upper()
     print("\n" + "=" * 80)
-    print("HUDI VECTOR + BLOB + VECTOR SEARCH DEMO (Oxford-IIIT Pet)")
+    print(f"HUDI VECTOR + BLOB + VECTOR SEARCH DEMO  [base file format: {fmt}]")
+    print("Oxford-IIIT Pet — DataFrame variant")
+    print("=" * 80)
+    print(f"  base_file_format : {CONFIG['base_file_format']}")
+    print(f"  table_path       : {CONFIG['table_path']}")
+    print(f"  table_name       : {CONFIG['table_name']}")
+    print(f"  n_samples        : {CONFIG['n_samples']}")
+    print(f"  embedding_model  : {CONFIG['embedding_model']}")
     print("=" * 80 + "\n")
 
     spark = create_spark()
