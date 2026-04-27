@@ -23,6 +23,8 @@ Env vars (shares the same conventions as the other demos):
   HUDI_BASE_FILE_FORMAT   (default 'lance'; set to 'parquet' to use Parquet)
   LANCE_BUNDLE_JAR        (required only when HUDI_BASE_FILE_FORMAT=lance)
   HUDI_BLOB_MODE          (default 'out_of_line'; 'inline' stores bytes in the Hudi table)
+  HUDI_INLINE_READ_MODE   (default 'content'; 'descriptor' forces lazy reads via read_blob().
+                           Only meaningful when HUDI_BLOB_MODE=inline.)
   HUDI_LANCE_DEMO_N       (default 100; number of images)
   PYSPARK_DRIVER_MEMORY   (default '4g')
   HUDI_LANCE_DEMO_OUTDIR  (default './outputs')
@@ -63,12 +65,23 @@ _blob_mode = os.getenv("HUDI_BLOB_MODE", "out_of_line").lower()
 if _blob_mode not in ("inline", "out_of_line"):
     sys.exit(f"ERROR: HUDI_BLOB_MODE must be 'inline' or 'out_of_line', got '{_blob_mode}'")
 
+# Controls hoodie.read.blob.inline.mode. Only meaningful when blob_mode=inline:
+#   CONTENT    → image_bytes.data returns bytes directly
+#   DESCRIPTOR → image_bytes.data is null; you must call read_blob() to materialize
+# For blob_mode=out_of_line the row is already a descriptor either way.
+_inline_read_mode = os.getenv("HUDI_INLINE_READ_MODE", "content").lower()
+if _inline_read_mode not in ("content", "descriptor"):
+    sys.exit(
+        f"ERROR: HUDI_INLINE_READ_MODE must be 'content' or 'descriptor', got '{_inline_read_mode}'"
+    )
+
 CONFIG = {
     "dataset": "OxfordIIITPet",
     "table_path": f"/tmp/hudi_blob_reader_{_blob_mode}_{_file_format}_pets",
     "table_name": f"pets_blob_reader_{_blob_mode}_{_file_format}",
     "base_file_format": _file_format,
     "blob_mode": _blob_mode,  # 'inline' or 'out_of_line'
+    "inline_read_mode": _inline_read_mode,  # 'content' or 'descriptor'
     "n_samples": int(os.getenv("HUDI_LANCE_DEMO_N", "100")),
     "blob_container_path": "/tmp/pets_blob_container.bin",
     "output_dir": os.getenv("HUDI_LANCE_DEMO_OUTDIR", "./outputs"),
@@ -138,10 +151,13 @@ def create_spark() -> SparkSession:
             "org.apache.spark.sql.hudi.catalog.HoodieCatalog",
         )
         .config("spark.sql.session.timeZone", "UTC")
-        # CONTENT mode: BLOB reads return the struct as written. For OUT_OF_LINE
-        # rows that means a descriptor — which is exactly what we want here
-        # so we can show `read_blob()` resolving it.
-        .config("hoodie.read.blob.inline.mode", "CONTENT")
+        # NOTE: `hoodie.read.blob.inline.mode` is intentionally NOT set on the SparkSession.
+        # If it were, EVERY hudi load — including the one read_blob() runs internally —
+        # would suppress INLINE bytes, and read_blob() would return null. Instead we scope
+        # the DESCRIPTOR option per-load in show_descriptors() so read_blob() in
+        # read_blob_and_save() runs against a default-mode (CONTENT) load and can
+        # materialize bytes. See TestLanceDataSource.testBlobInlineDescriptorMode for the
+        # canonical pattern.
         .config("spark.default.parallelism", "2")
         .config("spark.sql.shuffle.partitions", "2")
     )
@@ -361,13 +377,46 @@ def insert_blob_rows(spark: SparkSession):
 # 6. INSPECT THE DESCRIPTORS (bytes NOT materialized yet)
 # ======================================================
 
+DESCRIPTORS_VIEW = "blob_descriptors_view"
+
+
 def show_descriptors(spark: SparkSession):
+    """
+    Inspect each row's descriptor metadata. When inline_read_mode=DESCRIPTOR, we scope
+    the option to THIS load only — registering a temp view that surfaces the descriptor
+    form. read_blob() lives in read_blob_and_save() and runs against a separate default-
+    mode read so the underlying bytes are still available to resolve.
+    """
     table = CONFIG["table_name"]
+    rmode = CONFIG["inline_read_mode"]
+    path = CONFIG["table_path"]
+
     if CONFIG["blob_mode"] == "out_of_line":
-        print("\nInspecting stored descriptors — `data` is null, `reference.*` points at the container:")
-    else:
-        print("\nInspecting stored INLINE blobs — `data` holds the bytes, `reference.*` is null/empty:")
-    # length(data) instead of `data` so INLINE rows don't dump raw PNG bytes to the console.
+        print(
+            "\nInspecting stored OUT_OF_LINE blobs — `data` is null, `reference.*` points "
+            f"at the container (inline_read_mode={rmode} is a no-op here):"
+        )
+    elif rmode == "content":
+        print(
+            "\nInspecting stored INLINE blobs with inline_read_mode=CONTENT —\n"
+            "  `data` holds the raw bytes (length(data) > 0), `reference.*` is null/empty:"
+        )
+    else:  # descriptor
+        print(
+            "\nInspecting stored INLINE blobs with inline_read_mode=DESCRIPTOR —\n"
+            "  `data` is suppressed (length(data) is null), `reference.*` synthesized to point\n"
+            "  at the .lance file. read_blob() (run in read_blob_and_save) materializes bytes."
+        )
+
+    # Register a view from a load that's scoped to the user's chosen inline read mode.
+    # We deliberately do this on a per-load basis (not at the SparkSession level) so the
+    # later read_blob() call in read_blob_and_save() can use a default-mode read and
+    # actually materialize bytes — see the comment in create_spark().
+    reader = spark.read.format("hudi")
+    if CONFIG["blob_mode"] == "inline":
+        reader = reader.option("hoodie.read.blob.inline.mode", rmode.upper())
+    reader.load(path).createOrReplaceTempView(DESCRIPTORS_VIEW)
+
     sql = f"""
         SELECT image_id,
                category,
@@ -377,7 +426,7 @@ def show_descriptors(spark: SparkSession):
                image_bytes.reference.offset           AS ref_offset,
                image_bytes.reference.length           AS ref_length,
                image_bytes.reference.managed          AS ref_managed
-        FROM {table}
+        FROM {DESCRIPTORS_VIEW}
         LIMIT 3
     """
     print(sql.strip())
@@ -388,14 +437,27 @@ def show_descriptors(spark: SparkSession):
 # 7. read_blob() — materialize bytes on demand
 # ======================================================
 
+RESOLVE_VIEW = "blob_resolve_view"
+
+
 def read_blob_and_save(spark: SparkSession):
-    table = CONFIG["table_name"]
-    print("\n`read_blob(image_bytes)` — resolves each descriptor to its bytes:")
+    print(
+        f"\n`read_blob(image_bytes)` — resolves each descriptor to its bytes "
+        f"(works regardless of inline_read_mode={CONFIG['inline_read_mode']}):"
+    )
+
+    # IMPORTANT: register a fresh load WITHOUT the inline.mode option so the underlying
+    # read sees `data` populated (CONTENT mode). If we read from the DESCRIPTORS_VIEW
+    # registered in show_descriptors(), read_blob() would see data=null because that
+    # view was loaded in DESCRIPTOR mode — and BatchedBlobReader dispatches on the row's
+    # storage_type=INLINE before checking `reference`, so it would return null bytes.
+    spark.read.format("hudi").load(CONFIG["table_path"]).createOrReplaceTempView(RESOLVE_VIEW)
+
     sql = f"""
         SELECT image_id,
                category,
                length(read_blob(image_bytes)) AS resolved_byte_count
-        FROM {table}
+        FROM {RESOLVE_VIEW}
         ORDER BY image_id
         LIMIT 5
     """
@@ -410,7 +472,7 @@ def read_blob_and_save(spark: SparkSession):
     )
     pull_sql = f"""
         SELECT image_id, category, read_blob(image_bytes) AS data
-        FROM {table}
+        FROM {RESOLVE_VIEW}
         ORDER BY image_id
         LIMIT {CONFIG['resolved_images_to_save']}
     """
@@ -463,12 +525,20 @@ def _dir_size(path: Path) -> int:
 def main():
     fmt = CONFIG["base_file_format"].upper()
     mode = CONFIG["blob_mode"].upper()
+    rmode = CONFIG["inline_read_mode"].upper()
     print("\n" + "=" * 80)
-    print(f"HUDI BLOB READER DEMO  [base file format: {fmt} | blob mode: {mode}]")
+    print(
+        f"HUDI BLOB READER DEMO  "
+        f"[base: {fmt} | blob_mode: {mode} | inline_read: {rmode}]"
+    )
     print("read_blob() round-trip on Oxford-IIIT Pet")
     print("=" * 80)
     print(f"  base_file_format : {CONFIG['base_file_format']}")
     print(f"  blob_mode        : {CONFIG['blob_mode']}")
+    print(
+        f"  inline_read_mode : {CONFIG['inline_read_mode']}"
+        + ("  (no-op for out_of_line)" if CONFIG["blob_mode"] == "out_of_line" else "")
+    )
     print(f"  table_path       : {CONFIG['table_path']}")
     print(f"  table_name       : {CONFIG['table_name']}")
     print(f"  n_samples        : {CONFIG['n_samples']}")
@@ -501,10 +571,18 @@ def main():
     else:
         print(f"✓ Table:       {CONFIG['table_path']} (bytes embedded INLINE)")
     print(f"✓ Base format: {CONFIG['base_file_format']}")
+    print(
+        f"✓ Inline read: {CONFIG['inline_read_mode']}"
+        + ("  (no-op — out_of_line rows are descriptors regardless)"
+           if CONFIG["blob_mode"] == "out_of_line" else "")
+    )
     if CONFIG["blob_mode"] == "out_of_line":
         print("✓ Story:       tiny Hudi table of descriptors; `read_blob()` resolves bytes on demand.")
-    else:
-        print("✓ Story:       bytes live in the Hudi base files; `read_blob()` returns them directly.")
+    elif CONFIG["inline_read_mode"] == "content":
+        print("✓ Story:       bytes live in the Hudi base files and are returned directly via image_bytes.data.")
+    else:  # inline + descriptor
+        print("✓ Story:       bytes live in the Hudi base files but are read lazily — image_bytes.data is null,")
+        print("               read_blob() materializes them on demand. Same lazy story as out_of_line.")
     print("=" * 80 + "\n")
 
     spark.stop()
