@@ -106,16 +106,15 @@ The Hudi VECTOR + BLOB + vector search path is format-agnostic — flip the
 base file format with one env var:
 
 ```bash
-export HUDI_BASE_FILE_FORMAT=parquet
-python hudi_lance_vector_blob_demo.py        # or hudi_sql_vector_blob_demo.py
+# Parquet runs do NOT need LANCE_BUNDLE_JAR — leave it unset
+HUDI_BASE_FILE_FORMAT=parquet python hudi_lance_vector_blob_demo.py
 ```
 
 Table path and panel filename auto-rename to `/tmp/hudi_parquet_pets` (or
 `/tmp/hudi_sql_parquet_pets` for the SQL script) and the corresponding
 `outputs/hudi_{...}_parquet_results.png` so you can diff runs side by side.
-`LANCE_BUNDLE_JAR` is still required on the classpath (the Hudi spark bundle
-has compile-time references to Lance classes) — nothing actually writes Lance
-files in this mode.
+`LANCE_BUNDLE_JAR` is **only required when `HUDI_BASE_FILE_FORMAT=lance`** —
+all three scripts skip the Lance jar entirely on Parquet runs.
 
 ### Open the result panel
 
@@ -133,10 +132,11 @@ etc.) with similarity scores in the 0.3–0.5 range at N=100, tighter at N=1000.
 | Var | Default | Purpose |
 |---|---|---|
 | `HUDI_BUNDLE_JAR` | `<repo>/packaging/hudi-spark-bundle/target/hudi-spark3.5-bundle_2.12-1.2.0-SNAPSHOT.jar` | Hudi spark bundle |
-| `LANCE_BUNDLE_JAR` | **required even for Parquet runs** | Lance spark bundle (shipped on classpath regardless of base file format) |
+| `LANCE_BUNDLE_JAR` | **required only when `HUDI_BASE_FILE_FORMAT=lance`** | Lance spark bundle. Parquet runs skip it entirely. |
 | `HUDI_BASE_FILE_FORMAT` | `lance` | Set to `parquet` to write Parquet base files instead |
 | `HUDI_BLOB_MODE` | `out_of_line` | Blob reader demo only. Set to `inline` to embed PNG bytes directly in the Hudi table (no external container file) |
-| `HUDI_LANCE_DEMO_N` | `1000` | Number of images to sample |
+| `HUDI_INLINE_READ_MODE` | `content` | Blob reader demo only, and only meaningful when `HUDI_BLOB_MODE=inline`. Set to `descriptor` to make `image_bytes.data` come back null and force `read_blob()` to materialize bytes lazily. |
+| `HUDI_LANCE_DEMO_N` | `1000` (`100` for blob reader) | Number of images to sample |
 | `PYSPARK_DRIVER_MEMORY` | `4g` | Driver JVM heap — bump to `8g`+ for N≥2000 |
 | `HUDI_LANCE_DEMO_OUTDIR` | `./outputs` | Where query/top-K PNGs land |
 
@@ -158,13 +158,36 @@ Look for:
 - `embedding`   → metadata `{"hudi_type": "VECTOR(1024)"}` (dim depends on the backbone)
 - `image_bytes` → metadata `{"hudi_type": "BLOB"}`, struct fields `type`, `data`, `reference`
 
-## Switching BLOB read mode
+## Switching BLOB read mode (blob reader demo)
 
-Default is `hoodie.read.blob.inline.mode=CONTENT` (returns inline bytes as
-written). To exercise the descriptor path added in commit `7aea0f72d8e7`,
-change the `.config(...)` line in `create_spark()` to `DESCRIPTOR` — results
-will come back as `OUT_OF_LINE`-shaped references you then resolve via
-`read_blob()`.
+`hoodie.read.blob.inline.mode` controls how INLINE blobs come back:
+
+- `CONTENT` (default) — `image_bytes.data` returns the raw bytes directly.
+- `DESCRIPTOR` — `image_bytes.data` is null; `image_bytes.reference.*` is
+  synthesized to point at the underlying base file (`.lance` for Lance
+  base files), and `read_blob(image_bytes)` materializes bytes lazily.
+
+The blob reader demo exposes this via `HUDI_INLINE_READ_MODE`:
+
+```bash
+# Default: bytes inline in the data column
+HUDI_BLOB_MODE=inline python hudi_blob_reader_demo.py
+
+# Lazy: data column is null, read_blob() resolves bytes via the synthesized reference
+HUDI_BLOB_MODE=inline HUDI_INLINE_READ_MODE=descriptor python hudi_blob_reader_demo.py
+```
+
+**Important wiring detail (matches `TestLanceDataSource.testBlobInlineDescriptorMode`):**
+the `DESCRIPTOR` option is scoped to a single per-load read in
+`show_descriptors()`; `read_blob_and_save()` uses a separate default-mode
+load so `read_blob()` can actually materialize bytes. Setting
+`hoodie.read.blob.inline.mode=DESCRIPTOR` at the SparkSession level would
+make every read return `data=null`, including the read backing `read_blob()`,
+so it would also return null.
+
+The setting is a no-op for `HUDI_BLOB_MODE=out_of_line` — those rows are
+already descriptors (no inline bytes to suppress); `read_blob()` always
+resolves them via the user-supplied reference.
 
 ## How the blob reader demo works
 
@@ -237,30 +260,63 @@ will not delete it when rows are removed.
 
 ### Step 5 — inspect what's actually stored
 
+The script does the inspection through a **scoped per-load read** that
+honors `HUDI_INLINE_READ_MODE`:
+
+```python
+reader = spark.read.format("hudi")
+if blob_mode == "inline":
+    reader = reader.option("hoodie.read.blob.inline.mode", inline_read_mode.upper())
+reader.load(path).createOrReplaceTempView("blob_descriptors_view")
+```
+
 ```sql
 SELECT image_id,
        image_bytes.type                    AS blob_type,
-       image_bytes.data                    AS inline_data,
+       length(image_bytes.data)            AS inline_bytes_len,
        image_bytes.reference.external_path AS ref_path,
        image_bytes.reference.offset        AS ref_offset,
-       image_bytes.reference.length        AS ref_length
-FROM pets_blob_reader_lance LIMIT 3
+       image_bytes.reference.length        AS ref_length,
+       image_bytes.reference.managed       AS ref_managed
+FROM blob_descriptors_view LIMIT 3
 ```
 
-Output: `inline_data` is null, `ref_path/offset/length` are populated. The
-Hudi table is tiny — just pointers.
+Output depends on the run:
+- **OUT_OF_LINE** (default): `inline_bytes_len` is null; `ref_path/offset/length` point
+  at the user-supplied container file. Hudi table is tiny — just pointers.
+- **INLINE + CONTENT**: `inline_bytes_len > 0`; `ref_*` is null. Bytes live in the
+  Hudi base files and are returned directly.
+- **INLINE + DESCRIPTOR**: `inline_bytes_len` is null; `ref_path` ends in `.lance`,
+  `ref_managed=true` — Lance synthesized a reference into the base file. The bytes
+  are still resolvable via `read_blob()` against a separate default-mode load.
 
 ### Step 6 — `read_blob()` resolves the descriptor to bytes
 
+`read_blob_and_save()` registers a **separate, default-mode load** so the
+underlying read sees the bytes (`CONTENT` mode) regardless of what the
+inspection step in Step 5 used:
+
+```python
+spark.read.format("hudi").load(path).createOrReplaceTempView("blob_resolve_view")
+```
+
 ```sql
 SELECT image_id, length(read_blob(image_bytes)) AS resolved_byte_count
-FROM pets_blob_reader_lance LIMIT 5
+FROM blob_resolve_view LIMIT 5
 ```
 
 Canonical usage from
-[`TestReadBlobSQL.scala:90-94`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/hudi/blob/TestReadBlobSQL.scala:90).
+[`TestReadBlobSQL.scala:90-94`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/hudi/blob/TestReadBlobSQL.scala:90)
+and the descriptor-mode pattern from
+[`TestLanceDataSource.testBlobInlineDescriptorMode`](../../../../../../hudi-spark-datasource/hudi-spark/src/test/scala/org/apache/hudi/functional/TestLanceDataSource.scala).
 `read_blob(col)` is a scalar function (not a TVF) — returns `BINARY`. Works
 in projections, WHERE clauses, joins — anywhere you'd use a column.
+
+**Why two views?** If `read_blob()` ran against the same DESCRIPTOR-mode
+view as Step 5, `BatchedBlobReader` would dispatch on `storage_type=INLINE`,
+see `data=null`, and return null bytes — never consulting the synthesized
+`reference`. The two-view pattern keeps the descriptor inspection scoped
+while letting `read_blob()` see real bytes.
 
 ### Step 7 — pull bytes into the driver and re-save as PNGs
 
@@ -342,8 +398,12 @@ Every Spark config line has a purpose:
 | `spark.sql.extensions = HoodieSparkSessionExtension` | Registers Hudi's SQL rules, including the vector search TVF |
 | `spark.sql.catalog.spark_catalog = HoodieCatalog` | Makes `CREATE TABLE` aware of Hudi |
 | `spark.sql.session.timeZone = UTC` | Determinism |
-| `hoodie.read.blob.inline.mode = CONTENT` | Explicit default — flip to `DESCRIPTOR` to exercise the new descriptor read path |
 | `spark.default.parallelism = 2`, `spark.sql.shuffle.partitions = 2` | Defense-in-depth against macOS socket-buffer saturation. The primary fix is PyArrow staging (see below); low parallelism keeps any incidental Python UDF path well under mbuf pressure |
+
+`hoodie.read.blob.inline.mode` is intentionally **not** set on the session —
+the blob reader demo scopes it per-load (see "Switching BLOB read mode"
+above) so that `read_blob()` can run against a default-mode load and
+materialize bytes.
 
 ### Section 2 — `load_dataset()`
 
