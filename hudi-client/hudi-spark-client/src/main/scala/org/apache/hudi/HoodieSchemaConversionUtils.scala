@@ -27,9 +27,10 @@ import org.apache.avro.{AvroRuntimeException, Schema}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.avro.HoodieSparkSchemaConverters
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructType}
+import org.apache.spark.sql.types.{ArrayType, DataType, MapType, MetadataBuilder, StructField, StructType}
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
@@ -142,6 +143,123 @@ object HoodieSchemaConversionUtils {
       case a: AvroRuntimeException => throw new HoodieSchemaException(a.getMessage, a)
       case e: Exception => throw new HoodieSchemaException(
         s"Failed to convert struct type to HoodieSchema: $structType", e)
+    }
+  }
+
+  /**
+   * Write-path entry: validates the user-supplied StructType's custom Hudi logical-type
+   * structures (BLOB / VARIANT) before converting to HoodieSchema.
+   *
+   * Use this at ingest boundaries where the StructType originates from user input
+   * (DataFrame.schema, MERGE source, ALTER TABLE new columns, etc.). Internal transforms
+   * and the read/prune path must keep using [[convertStructTypeToHoodieSchema]], which stays
+   * permissive so Spark's nested-schema pruning does not crash reads.
+   *
+   * @throws IllegalArgumentException if a field tagged hudi_type=BLOB/VARIANT has a
+   *                                  non-canonical inner shape
+   * @throws HoodieSchemaException    if conversion fails
+   */
+  def convertUserStructTypeToHoodieSchema(structType: StructType,
+                                          structName: String,
+                                          recordNamespace: String): HoodieSchema = {
+    HoodieSparkSchemaConverters.validateCustomTypeStructures(structType)
+    convertStructTypeToHoodieSchema(structType, structName, recordNamespace)
+  }
+
+  /**
+   * Align `sourceSchema` with the authoritative `targetSchema` (the catalog table schema)
+   * along two dimensions that Spark's write-path rewrites strip away:
+   *
+   *   1. Custom Hudi logical-type metadata (VECTOR, BLOB). TableOutputResolver's Cast(...)
+   *      and UPDATE's castIfNeeded drop the StructField metadata that marks these types;
+   *      without re-attaching, downstream conversion yields the backing physical type
+   *      (plain ARRAY for VECTOR, plain STRUCT for BLOB) and the schema-compatibility check
+   *      fails.
+   *   2. Nullability (only when `alignNullability = true`). The resolved query schema typically
+   *      marks every column nullable (VALUES literals and Cast outputs are nullable by default),
+   *      which diverges from the catalog's declared nullability (e.g. primaryKey columns are
+   *      non-null). Since the rebuilt schema becomes the DataFrame's schema, and therefore the
+   *      writer's canonical schema, leaving source nullability in place produces a nullable-
+   *      writer vs non-null-reader mismatch that fails the schema-compatibility check.
+   *
+   *      Callers must only request nullability alignment when they can guarantee the underlying
+   *      rows carry no nulls for columns the catalog marks non-null - e.g. when Spark's
+   *      TableOutputResolver/castIfNeeded has already inserted null-assertion expressions
+   *      upstream (INSERT/UPDATE). MERGE passes raw source rows pre-assignment (assignments run
+   *      at write time inside ExpressionPayload), so it must pass `alignNullability = false` to
+   *      avoid relabeling rows that may legitimately carry nulls as non-null.
+   *
+   *      Note: BLOB is projected as nullable-everywhere by [[HoodieSparkSchemaConverters.toSqlType]]
+   *      (see the comment there), so the nullability branch of this function is effectively a
+   *      no-op inside BLOB subtrees. The RFC-100 non-null invariants are enforced at the
+   *      physical-schema write boundary via HoodieSchema.Blob#createBlob, not at the Spark
+   *      type layer.
+   *
+   * Recurses into nested StructType, ArrayType whose element is a StructType, and MapType
+   * whose value is a StructType. Fields without a matching target (source-only columns such
+   * as MERGE join keys) are returned unchanged.
+   *
+   * @param sourceSchema     the schema produced by the query (may have lost metadata and may
+   *                         carry over-permissive nullability)
+   * @param targetSchema     the catalog schema that owns the authoritative metadata and
+   *                         nullability
+   * @param caseSensitive    whether field name matching should be case-sensitive (mirrors
+   *                         `spark.sql.caseSensitive`)
+   * @param alignNullability whether to narrow source nullability (and nested
+   *                         containsNull/valueContainsNull) to match the catalog; see note
+   *                         above on when this is safe
+   */
+  def alignSchemaWithCatalog(sourceSchema: StructType,
+                             targetSchema: StructType,
+                             caseSensitive: Boolean,
+                             alignNullability: Boolean): StructType = {
+    val lookupKey: String => String =
+      if (caseSensitive) identity else (_: String).toLowerCase(Locale.ROOT)
+    val targetByName: Map[String, StructField] =
+      targetSchema.fields.map(f => lookupKey(f.name) -> f).toMap
+
+    StructType(sourceSchema.fields.map { field =>
+      targetByName.get(lookupKey(field.name)) match {
+        case Some(target) => alignField(field, target, caseSensitive, alignNullability)
+        case None => field
+      }
+    })
+  }
+
+  private def alignField(source: StructField,
+                         target: StructField,
+                         caseSensitive: Boolean,
+                         alignNullability: Boolean): StructField = {
+    val alignedNullable = if (alignNullability) target.nullable else source.nullable
+    val alignedField = (source.dataType, target.dataType) match {
+      case (s: StructType, t: StructType) =>
+        source.copy(
+          dataType = alignSchemaWithCatalog(s, t, caseSensitive, alignNullability),
+          nullable = alignedNullable)
+      case (ArrayType(sElem: StructType, sContainsNull), ArrayType(tElem: StructType, tContainsNull)) =>
+        val alignedContainsNull = if (alignNullability) tContainsNull else sContainsNull
+        source.copy(
+          dataType = ArrayType(alignSchemaWithCatalog(sElem, tElem, caseSensitive, alignNullability), alignedContainsNull),
+          nullable = alignedNullable)
+      case (MapType(sKey, sVal: StructType, sValueContainsNull), MapType(_, tVal: StructType, tValueContainsNull)) =>
+        val alignedValueContainsNull = if (alignNullability) tValueContainsNull else sValueContainsNull
+        source.copy(
+          dataType = MapType(sKey, alignSchemaWithCatalog(sVal, tVal, caseSensitive, alignNullability), alignedValueContainsNull),
+          nullable = alignedNullable)
+      case _ =>
+        source.copy(nullable = alignedNullable)
+    }
+
+    if (target.metadata.contains(HoodieSchema.TYPE_METADATA_FIELD)) {
+      val enrichedMetadata = new MetadataBuilder()
+        .withMetadata(alignedField.metadata)
+        .putString(
+          HoodieSchema.TYPE_METADATA_FIELD,
+          target.metadata.getString(HoodieSchema.TYPE_METADATA_FIELD))
+        .build()
+      alignedField.copy(metadata = enrichedMetadata)
+    } else {
+      alignedField
     }
   }
 
