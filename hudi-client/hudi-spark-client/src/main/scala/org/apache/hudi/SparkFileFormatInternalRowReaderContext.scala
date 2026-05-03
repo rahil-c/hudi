@@ -97,7 +97,29 @@ class SparkFileFormatInternalRowReaderContext(baseFileReader: SparkColumnarFileR
       structType
     }
 
-    val (readSchema, readFilters) = getSchemaAndFiltersForRead(parquetReadStructType, hasRowIndexField)
+    // Blob DESCRIPTOR mode: strip `data` sub-field from blob structs for Parquet base files.
+    // Applied after vector rewrite; not applied to Lance base files or log files.
+    val isParquetBaseFile = FSUtils.isBaseFile(filePath) && !isLanceBaseFile
+    val isBlobDescriptorMode = isParquetBaseFile && {
+      val hadoopConf = storageConfiguration.unwrapAs(classOf[Configuration])
+      import org.apache.hudi.common.config.HoodieReaderConfig
+      val modeValue = hadoopConf.get(HoodieReaderConfig.BLOB_INLINE_READ_MODE.key(),
+        HoodieReaderConfig.BLOB_INLINE_READ_MODE.defaultValue())
+      modeValue.equalsIgnoreCase(HoodieReaderConfig.BLOB_INLINE_READ_MODE_DESCRIPTOR)
+    }
+    val blobColumnIndices: Set[Int] = if (isBlobDescriptorMode) {
+      VectorConversionUtils.detectBlobColumnsFromMetadata(parquetReadStructType).asScala.map(_.intValue()).toSet
+    } else {
+      Set.empty
+    }
+    val blobReadStructType = if (blobColumnIndices.nonEmpty) {
+      val javaBlobCols: java.util.Set[Integer] = blobColumnIndices.map(Integer.valueOf).asJava
+      VectorConversionUtils.stripBlobDataField(parquetReadStructType, javaBlobCols)
+    } else {
+      parquetReadStructType
+    }
+
+    val (readSchema, readFilters) = getSchemaAndFiltersForRead(blobReadStructType, hasRowIndexField)
     if (FSUtils.isLogFile(filePath)) {
       // NOTE: now only primary key based filtering is supported for log files
       new HoodieSparkFileReaderFactory(storage).newParquetFileReader(filePath)
@@ -120,11 +142,17 @@ class SparkFileFormatInternalRowReaderContext(baseFileReader: SparkColumnarFileR
         readSchema, StructType(Seq.empty), getSchemaHandler.getInternalSchemaOpt,
         readFilters, storage.getConf.asInstanceOf[StorageConfiguration[Configuration]], tableSchemaOpt))
 
-      // Post-process: convert binary VECTOR columns back to typed arrays
-      if (vectorColumnInfo.nonEmpty) {
-        SparkFileFormatInternalRowReaderContext.wrapWithVectorConversion(rawIterator, vectorColumnInfo, readSchema)
+      // Post-process: re-insert null `data` field into blob structs, then convert vectors
+      val blobPaddedIterator = if (blobColumnIndices.nonEmpty) {
+        SparkFileFormatInternalRowReaderContext.wrapWithBlobNullPadding(rawIterator, blobColumnIndices, readSchema, parquetReadStructType)
       } else {
         rawIterator
+      }
+
+      if (vectorColumnInfo.nonEmpty) {
+        SparkFileFormatInternalRowReaderContext.wrapWithVectorConversion(blobPaddedIterator, vectorColumnInfo, if (blobColumnIndices.nonEmpty) parquetReadStructType else readSchema)
+      } else {
+        blobPaddedIterator
       }
     }
   }
@@ -368,6 +396,25 @@ object SparkFileFormatInternalRowReaderContext {
     val outputSchema = StructType(outputFields)
     val projection = UnsafeProjection.create(outputSchema)
     val mapper = VectorConversionUtils.buildRowMapper(readSchema, javaVectorCols, projection.apply(_))
+    new ClosableIterator[InternalRow] {
+      override def hasNext: Boolean = iterator.hasNext
+      override def next(): InternalRow = mapper.apply(iterator.next())
+      override def close(): Unit = iterator.close()
+    }
+  }
+
+  /**
+   * Wraps a closable iterator to re-insert null {@code data} fields into blob structs
+   * after Parquet DESCRIPTOR mode read (expanding 2-field → 3-field structs).
+   */
+  private[hudi] def wrapWithBlobNullPadding(
+      iterator: ClosableIterator[InternalRow],
+      blobColumnIndices: Set[Int],
+      readSchema: StructType,
+      targetSchema: StructType): ClosableIterator[InternalRow] = {
+    val javaBlobCols: java.util.Set[Integer] = blobColumnIndices.map(Integer.valueOf).asJava
+    val projection = UnsafeProjection.create(targetSchema)
+    val mapper = VectorConversionUtils.buildBlobNullPadRowMapper(readSchema, javaBlobCols, projection.apply(_))
     new ClosableIterator[InternalRow] {
       override def hasNext: Boolean = iterator.hasNext
       override def next(): InternalRow = mapper.apply(iterator.next())

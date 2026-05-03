@@ -61,7 +61,7 @@ import org.apache.spark.util.SerializableConfiguration
 
 import java.io.Closeable
 
-import scala.collection.JavaConverters.mapAsJavaMapConverter
+import scala.collection.JavaConverters.{mapAsJavaMapConverter, setAsJavaSetConverter}
 
 trait HoodieFormatTrait {
 
@@ -86,7 +86,8 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
                                            shouldUseRecordPosition: Boolean,
                                            requiredFilters: Seq[Filter],
                                            isMultipleBaseFileFormatsEnabled: Boolean,
-                                           hoodieFileFormat: HoodieFileFormat)
+                                           hoodieFileFormat: HoodieFileFormat,
+                                           isBlobDescriptorMode: Boolean = false)
   extends ParquetFileFormat with SparkAdapterSupport with HoodieFormatTrait with Logging with Serializable {
 
   private lazy val schema = tableSchema.schema
@@ -133,6 +134,19 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     }
   }
 
+  @transient private var cachedBlobDetection: (StructType, Set[Int]) = _
+
+  private def detectBlobColumnsCached(schema: StructType): Set[Int] = {
+    if (cachedBlobDetection != null && (cachedBlobDetection._1 eq schema)) {
+      cachedBlobDetection._2
+    } else {
+      import scala.collection.JavaConverters._
+      val result = VectorConversionUtils.detectBlobColumnsFromMetadata(schema).asScala.map(_.intValue()).toSet
+      cachedBlobDetection = (schema, result)
+      result
+    }
+  }
+
   /**
    * Checks if the file format supports vectorized reading, please refer to SPARK-40918.
    *
@@ -148,6 +162,12 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     // Vector columns are stored as FIXED_LEN_BYTE_ARRAY in Parquet but read as ArrayType in Spark.
     // The binary→array conversion requires row-level access, so disable vectorized batch reading.
     if (detectVectorColumnsCached(schema).nonEmpty) {
+      supportVectorizedRead = false
+      supportReturningBatch = false
+      false
+    } else if (isBlobDescriptorMode && detectBlobColumnsCached(schema).nonEmpty) {
+      // Blob DESCRIPTOR mode strips the data sub-field from blob structs and null-pads
+      // post-read, which requires row-level access.
       supportVectorizedRead = false
       supportReturningBatch = false
       false
@@ -458,6 +478,39 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
   }
 
   /**
+   * Detects BLOB columns and strips the {@code data} sub-field when DESCRIPTOR mode is active.
+   * Only applies to Parquet format; other formats handle DESCRIPTOR mode natively.
+   */
+  private def withBlobDescriptorRewrite(schema: StructType): (StructType, Set[Int]) = {
+    if (hoodieFileFormat != HoodieFileFormat.PARQUET) {
+      (schema, Set.empty[Int])
+    } else {
+      import scala.collection.JavaConverters._
+      val blobCols = VectorConversionUtils.detectBlobColumnsFromMetadata(schema).asScala.map(_.intValue()).toSet
+      if (blobCols.isEmpty) {
+        (schema, blobCols)
+      } else {
+        val javaBlobCols: java.util.Set[Integer] = blobCols.map(Integer.valueOf).asJava
+        (VectorConversionUtils.stripBlobDataField(schema, javaBlobCols), blobCols)
+      }
+    }
+  }
+
+  /**
+   * Wraps an iterator to re-insert null {@code data} fields into blob structs
+   * after Parquet DESCRIPTOR mode read (expanding 2-field → 3-field structs).
+   */
+  private def wrapWithBlobNullPadding(iter: Iterator[InternalRow],
+                                       readSchema: StructType,
+                                       targetSchema: StructType,
+                                       blobCols: Set[Int]): Iterator[InternalRow] = {
+    val blobProjection = UnsafeProjection.create(targetSchema)
+    val javaBlobCols: java.util.Set[Integer] = blobCols.map(Integer.valueOf).asJava
+    val mapper = VectorConversionUtils.buildBlobNullPadRowMapper(readSchema, javaBlobCols, blobProjection.apply(_))
+    iter.map(mapper.apply(_))
+  }
+
+  /**
    * Wraps an iterator to convert binary VECTOR columns back to typed arrays.
    * The read schema has BinaryType for vector columns; the target schema has ArrayType.
    */
@@ -486,16 +539,23 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     val (modifiedOutputSchema, outputVectorCols) = if (hasVectors) withVectorRewrite(outputSchema) else (outputSchema, Map.empty[Int, HoodieSchema.Vector])
     val (modifiedRequestedSchema, _) = if (hasVectors) withVectorRewrite(requestedSchema) else (requestedSchema, Map.empty[Int, HoodieSchema.Vector])
 
+    // Blob DESCRIPTOR mode: strip `data` sub-field from blob structs so Parquet skips
+    // those column chunks entirely (real I/O savings). Applied after vector rewrite.
+    val (blobRequiredSchema, blobCols) = if (isBlobDescriptorMode) withBlobDescriptorRewrite(modifiedRequiredSchema) else (modifiedRequiredSchema, Set.empty[Int])
+    val hasBlobs = blobCols.nonEmpty
+    val (blobOutputSchema, outputBlobCols) = if (hasBlobs) withBlobDescriptorRewrite(modifiedOutputSchema) else (modifiedOutputSchema, Set.empty[Int])
+    val (blobRequestedSchema, _) = if (hasBlobs) withBlobDescriptorRewrite(modifiedRequestedSchema) else (modifiedRequestedSchema, Set.empty[Int])
+
     val rawIter = if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {
       //none of partition fields are read from the file, so the reader will do the appending for us
-      parquetFileReader.read(file, modifiedRequiredSchema, partitionSchema, internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
+      parquetFileReader.read(file, blobRequiredSchema, partitionSchema, internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
     } else if (remainingPartitionSchema.fields.length == 0) {
       //we read all of the partition fields from the file
       val pfileUtils = sparkAdapter.getSparkPartitionedFileUtils
       //we need to modify the partitioned file so that the partition values are empty
       val modifiedFile = pfileUtils.createPartitionedFile(InternalRow.empty, pfileUtils.getPathFromPartitionedFile(file), file.start, file.length)
       //and we pass an empty schema for the partition schema
-      parquetFileReader.read(modifiedFile, modifiedOutputSchema, new StructType(), internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
+      parquetFileReader.read(modifiedFile, blobOutputSchema, new StructType(), internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
     } else {
       //need to do an additional projection here. The case in mind is that partition schema is "a,b,c" mandatoryFields is "a,c",
       //then we will read (dataSchema + a + c) and append b. So the final schema will be (data schema + a + c +b)
@@ -503,8 +563,25 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
       val pfileUtils = sparkAdapter.getSparkPartitionedFileUtils
       val partitionValues = getFixedPartitionValues(file.partitionValues, partitionSchema, fixedPartitionIndexes)
       val modifiedFile = pfileUtils.createPartitionedFile(partitionValues, pfileUtils.getPathFromPartitionedFile(file), file.start, file.length)
-      val iter = parquetFileReader.read(modifiedFile, modifiedRequestedSchema, remainingPartitionSchema, internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
-      projectIter(iter, StructType(modifiedRequestedSchema.fields ++ remainingPartitionSchema.fields), modifiedOutputSchema)
+      val iter = parquetFileReader.read(modifiedFile, blobRequestedSchema, remainingPartitionSchema, internalSchemaOpt, filters, storageConf, tableSchemaAsMessageType)
+      projectIter(iter, StructType(blobRequestedSchema.fields ++ remainingPartitionSchema.fields), blobOutputSchema)
+    }
+
+    // Post-read: re-insert null `data` field into blob structs (expanding 2-field → 3-field)
+    val blobPaddedIter = if (hasBlobs) {
+      val readSchema = if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {
+        StructType(blobRequiredSchema.fields ++ partitionSchema.fields)
+      } else {
+        blobOutputSchema
+      }
+      val targetSchema = if (remainingPartitionSchema.fields.length == partitionSchema.fields.length) {
+        StructType(modifiedRequiredSchema.fields ++ partitionSchema.fields)
+      } else {
+        modifiedOutputSchema
+      }
+      wrapWithBlobNullPadding(rawIter, readSchema, targetSchema, outputBlobCols)
+    } else {
+      rawIter
     }
 
     if (hasVectors) {
@@ -514,9 +591,9 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
       } else {
         modifiedOutputSchema
       }
-      wrapWithVectorConversion(rawIter, readSchema, outputSchema, outputVectorCols)
+      wrapWithVectorConversion(blobPaddedIter, readSchema, outputSchema, outputVectorCols)
     } else {
-      rawIter
+      blobPaddedIter
     }
   }
 

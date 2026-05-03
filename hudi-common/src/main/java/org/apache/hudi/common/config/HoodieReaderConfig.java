@@ -113,7 +113,11 @@ public class HoodieReaderConfig extends HoodieConfig {
       .withValidValues(BLOB_INLINE_READ_MODE_CONTENT, BLOB_INLINE_READ_MODE_DESCRIPTOR)
       .withDocumentation("How Hudi interprets INLINE BLOB values on read. "
           + "CONTENT (default) returns the raw inline bytes. "
-          + "DESCRIPTOR returns an OUT_OF_LINE-shaped reference pointing at the backing "
-          + "Lance file with the INLINE payload's position and size, so callers can defer "
-          + "the byte read via read_blob().");
+          + "DESCRIPTOR suppresses the inline bytes (data field is null) and returns metadata only, "
+          + "avoiding the I/O cost of reading large binary payloads. "
+          + "For Lance files, the reference struct is populated with blob stream coordinates "
+          + "so read_blob() can materialize bytes on demand. "
+          + "For Parquet files, the data column is skipped via column projection; "
+          + "the reference struct is null and read_blob() returns null. "
+          + "Use CONTENT mode when bytes are needed from Parquet tables.");
 }
