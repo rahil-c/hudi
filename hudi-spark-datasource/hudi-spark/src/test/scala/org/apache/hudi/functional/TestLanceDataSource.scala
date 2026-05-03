@@ -18,7 +18,6 @@
 package org.apache.hudi.functional
 
 import org.apache.hudi.DataSourceWriteOptions._
-import org.apache.hudi.DefaultSparkRecordMerger
 import org.apache.hudi.blob.BlobTestHelpers
 import org.apache.hudi.common.config.{HoodieCommonConfig, HoodieMetadataConfig}
 import org.apache.hudi.common.engine.HoodieLocalEngineContext
@@ -1103,7 +1102,6 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
     val createTablePartitionClause = if (isPartitioned) "partitioned by (dt)" else ""
 
     // CREATE TABLE with Lance configuration
-    // Lance format requires Spark record merger for writing
     spark.sql(s"""
       create table $tableName (
         id int,
@@ -1115,8 +1113,7 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
       tblproperties (
         hoodie.table.base.file.format = 'LANCE',
         type = '${tableType.name()}',
-        primaryKey = 'id',
-        hoodie.datasource.write.record.merger.impls = '${classOf[DefaultSparkRecordMerger].getName}'
+        primaryKey = 'id'
       )
       $createTablePartitionClause
       location '$tablePath'
@@ -1488,7 +1485,6 @@ class TestLanceDataSource extends HoodieSparkClientTestBase {
       .option(PRECOMBINE_FIELD.key(), "age")
       .option(TABLE_NAME.key(), tableName)
       .option(HoodieWriteConfig.TBL_NAME.key(), tableName)
-      .option(HoodieWriteConfig.RECORD_MERGE_IMPL_CLASSES.key(), classOf[DefaultSparkRecordMerger].getName)
 
     // Add operation if specified
     writer = operation match {
