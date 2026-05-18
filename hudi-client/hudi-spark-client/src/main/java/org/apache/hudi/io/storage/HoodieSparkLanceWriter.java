@@ -56,8 +56,10 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 import static org.apache.hudi.common.model.HoodieRecord.HoodieMetadataField.COMMIT_SEQNO_METADATA_FIELD;
@@ -196,6 +198,53 @@ public class HoodieSparkLanceWriter extends HoodieBaseLanceWriter<InternalRow, U
    * <p>Only top-level fields are inspected; Hudi BLOB and VECTOR are top-level types in the Hudi
    * schema model.
    */
+  /**
+   * Fail fast if the write schema contains any VARIANT-typed column. The Lance file format
+   * does not currently support VARIANT (see https://lance.org/guide/data_types/#arrow-type-system);
+   * without this guard the write would fail deep in the Avro-to-Arrow conversion layer with a
+   * cryptic error. Walks the Avro schema recursively so nested VARIANT fields (inside records,
+   * unions, arrays, maps) are also caught.
+   */
+  static void validateNoVariantColumns(org.apache.avro.Schema avroSchema) {
+    checkNoVariant(avroSchema, "", new HashSet<>());
+  }
+
+  private static void checkNoVariant(org.apache.avro.Schema schema, String path, Set<String> visitedRecords) {
+    org.apache.avro.LogicalType logicalType = schema.getLogicalType();
+    if (logicalType != null && HoodieSchema.VARIANT_TYPE_NAME.equals(logicalType.getName())) {
+      throw new HoodieNotSupportedException(
+          "Lance base-file format does not currently support VARIANT columns "
+              + "(see https://lance.org/guide/data_types/#arrow-type-system). "
+              + "Found VARIANT field at '" + (path.isEmpty() ? "<root>" : path) + "'. "
+              + "Use Parquet for tables with VARIANT columns.");
+    }
+    switch (schema.getType()) {
+      case RECORD:
+        if (!visitedRecords.add(schema.getFullName())) {
+          return;
+        }
+        for (org.apache.avro.Schema.Field f : schema.getFields()) {
+          String childPath = path.isEmpty() ? f.name() : path + "." + f.name();
+          checkNoVariant(f.schema(), childPath, visitedRecords);
+        }
+        visitedRecords.remove(schema.getFullName());
+        break;
+      case UNION:
+        for (org.apache.avro.Schema branch : schema.getTypes()) {
+          checkNoVariant(branch, path, visitedRecords);
+        }
+        break;
+      case ARRAY:
+        checkNoVariant(schema.getElementType(), path + "[]", visitedRecords);
+        break;
+      case MAP:
+        checkNoVariant(schema.getValueType(), path + ".<value>", visitedRecords);
+        break;
+      default:
+        // Primitive — nothing to recurse into.
+    }
+  }
+
   private static StructType enrichSparkSchemaForLance(StructType sparkSchema) {
     Map<Integer, HoodieSchema.Vector> vectorColumns =
         VectorConversionUtils.detectVectorColumnsFromMetadata(sparkSchema);

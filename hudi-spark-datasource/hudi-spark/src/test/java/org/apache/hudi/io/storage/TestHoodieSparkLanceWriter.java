@@ -23,8 +23,10 @@ import org.apache.hudi.common.bloom.BloomFilter;
 import org.apache.hudi.common.bloom.BloomFilterFactory;
 import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.model.HoodieKey;
+import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.exception.HoodieNotSupportedException;
 import org.apache.hudi.io.memory.HoodieArrowAllocator;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
@@ -57,6 +59,8 @@ import org.lance.file.LanceFileReader;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.apache.hudi.common.bloom.BloomFilterTypeCode.SIMPLE;
@@ -566,5 +570,85 @@ public class TestHoodieSparkLanceWriter {
     } catch (Exception e) {
       return false;
     }
+  }
+
+  // ----- VARIANT-on-Lance guard tests -----
+
+  @Test
+  public void testValidateNoVariantColumns_noVariant_succeeds() {
+    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
+    record.setFields(Arrays.asList(
+        new org.apache.avro.Schema.Field("id", org.apache.avro.Schema.create(org.apache.avro.Schema.Type.INT), null, null),
+        new org.apache.avro.Schema.Field("name", org.apache.avro.Schema.create(org.apache.avro.Schema.Type.STRING), null, null)));
+    HoodieSparkLanceWriter.validateNoVariantColumns(record);
+  }
+
+  @Test
+  public void testValidateNoVariantColumns_topLevelVariant_throws() {
+    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
+    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
+    record.setFields(Collections.singletonList(
+        new org.apache.avro.Schema.Field("payload", variant, null, null)));
+    HoodieNotSupportedException ex = assertThrows(
+        HoodieNotSupportedException.class,
+        () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
+    assertTrue(ex.getMessage().contains("Lance"));
+    assertTrue(ex.getMessage().contains("VARIANT"));
+    assertTrue(ex.getMessage().contains("payload"), "Error should name the offending field: " + ex.getMessage());
+  }
+
+  @Test
+  public void testValidateNoVariantColumns_variantInNestedRecord_throws() {
+    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
+    org.apache.avro.Schema nested = org.apache.avro.Schema.createRecord("Nested", null, "ns", false);
+    nested.setFields(Collections.singletonList(
+        new org.apache.avro.Schema.Field("v", variant, null, null)));
+    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
+    record.setFields(Collections.singletonList(
+        new org.apache.avro.Schema.Field("inner", nested, null, null)));
+    HoodieNotSupportedException ex = assertThrows(
+        HoodieNotSupportedException.class,
+        () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
+    assertTrue(ex.getMessage().contains("inner.v"), "Error should point at nested path: " + ex.getMessage());
+  }
+
+  @Test
+  public void testValidateNoVariantColumns_variantInArray_throws() {
+    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
+    org.apache.avro.Schema array = org.apache.avro.Schema.createArray(variant);
+    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
+    record.setFields(Collections.singletonList(
+        new org.apache.avro.Schema.Field("items", array, null, null)));
+    HoodieNotSupportedException ex = assertThrows(
+        HoodieNotSupportedException.class,
+        () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
+    assertTrue(ex.getMessage().contains("items[]"), "Error should point at array element path: " + ex.getMessage());
+  }
+
+  @Test
+  public void testValidateNoVariantColumns_variantInMap_throws() {
+    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
+    org.apache.avro.Schema map = org.apache.avro.Schema.createMap(variant);
+    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
+    record.setFields(Collections.singletonList(
+        new org.apache.avro.Schema.Field("attrs", map, null, null)));
+    HoodieNotSupportedException ex = assertThrows(
+        HoodieNotSupportedException.class,
+        () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
+    assertTrue(ex.getMessage().contains("attrs.<value>"), "Error should point at map value path: " + ex.getMessage());
+  }
+
+  @Test
+  public void testValidateNoVariantColumns_variantInNullableUnion_throws() {
+    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
+    org.apache.avro.Schema nullableVariant = org.apache.avro.Schema.createUnion(
+        org.apache.avro.Schema.create(org.apache.avro.Schema.Type.NULL), variant);
+    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
+    record.setFields(Collections.singletonList(
+        new org.apache.avro.Schema.Field("payload", nullableVariant, null, org.apache.avro.JsonProperties.NULL_VALUE)));
+    HoodieNotSupportedException ex = assertThrows(
+        HoodieNotSupportedException.class,
+        () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
+    assertTrue(ex.getMessage().contains("payload"), "Error should name the field: " + ex.getMessage());
   }
 }
