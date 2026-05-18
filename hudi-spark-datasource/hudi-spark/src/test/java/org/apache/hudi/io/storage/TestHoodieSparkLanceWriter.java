@@ -24,6 +24,8 @@ import org.apache.hudi.common.bloom.BloomFilterFactory;
 import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.schema.HoodieSchema;
+import org.apache.hudi.common.schema.HoodieSchemaField;
+import org.apache.hudi.common.schema.HoodieSchemaType;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.exception.HoodieNotSupportedException;
@@ -576,19 +578,16 @@ public class TestHoodieSparkLanceWriter {
 
   @Test
   public void testValidateNoVariantColumns_noVariant_succeeds() {
-    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
-    record.setFields(Arrays.asList(
-        new org.apache.avro.Schema.Field("id", org.apache.avro.Schema.create(org.apache.avro.Schema.Type.INT), null, null),
-        new org.apache.avro.Schema.Field("name", org.apache.avro.Schema.create(org.apache.avro.Schema.Type.STRING), null, null)));
+    HoodieSchema record = HoodieSchema.createRecord("R", "ns", null, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.INT)),
+        HoodieSchemaField.of("name", HoodieSchema.create(HoodieSchemaType.STRING))));
     HoodieSparkLanceWriter.validateNoVariantColumns(record);
   }
 
   @Test
   public void testValidateNoVariantColumns_topLevelVariant_throws() {
-    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
-    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
-    record.setFields(Collections.singletonList(
-        new org.apache.avro.Schema.Field("payload", variant, null, null)));
+    HoodieSchema record = HoodieSchema.createRecord("R", "ns", null, Collections.singletonList(
+        HoodieSchemaField.of("payload", HoodieSchema.createVariant())));
     HoodieNotSupportedException ex = assertThrows(
         HoodieNotSupportedException.class,
         () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
@@ -599,13 +598,10 @@ public class TestHoodieSparkLanceWriter {
 
   @Test
   public void testValidateNoVariantColumns_variantInNestedRecord_throws() {
-    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
-    org.apache.avro.Schema nested = org.apache.avro.Schema.createRecord("Nested", null, "ns", false);
-    nested.setFields(Collections.singletonList(
-        new org.apache.avro.Schema.Field("v", variant, null, null)));
-    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
-    record.setFields(Collections.singletonList(
-        new org.apache.avro.Schema.Field("inner", nested, null, null)));
+    HoodieSchema nested = HoodieSchema.createRecord("Nested", "ns", null, Collections.singletonList(
+        HoodieSchemaField.of("v", HoodieSchema.createVariant())));
+    HoodieSchema record = HoodieSchema.createRecord("R", "ns", null, Collections.singletonList(
+        HoodieSchemaField.of("inner", nested)));
     HoodieNotSupportedException ex = assertThrows(
         HoodieNotSupportedException.class,
         () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
@@ -614,11 +610,8 @@ public class TestHoodieSparkLanceWriter {
 
   @Test
   public void testValidateNoVariantColumns_variantInArray_throws() {
-    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
-    org.apache.avro.Schema array = org.apache.avro.Schema.createArray(variant);
-    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
-    record.setFields(Collections.singletonList(
-        new org.apache.avro.Schema.Field("items", array, null, null)));
+    HoodieSchema record = HoodieSchema.createRecord("R", "ns", null, Collections.singletonList(
+        HoodieSchemaField.of("items", HoodieSchema.createArray(HoodieSchema.createVariant()))));
     HoodieNotSupportedException ex = assertThrows(
         HoodieNotSupportedException.class,
         () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
@@ -627,11 +620,8 @@ public class TestHoodieSparkLanceWriter {
 
   @Test
   public void testValidateNoVariantColumns_variantInMap_throws() {
-    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
-    org.apache.avro.Schema map = org.apache.avro.Schema.createMap(variant);
-    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
-    record.setFields(Collections.singletonList(
-        new org.apache.avro.Schema.Field("attrs", map, null, null)));
+    HoodieSchema record = HoodieSchema.createRecord("R", "ns", null, Collections.singletonList(
+        HoodieSchemaField.of("attrs", HoodieSchema.createMap(HoodieSchema.createVariant()))));
     HoodieNotSupportedException ex = assertThrows(
         HoodieNotSupportedException.class,
         () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
@@ -640,12 +630,10 @@ public class TestHoodieSparkLanceWriter {
 
   @Test
   public void testValidateNoVariantColumns_variantInNullableUnion_throws() {
-    org.apache.avro.Schema variant = HoodieSchema.createVariant().toAvroSchema();
-    org.apache.avro.Schema nullableVariant = org.apache.avro.Schema.createUnion(
-        org.apache.avro.Schema.create(org.apache.avro.Schema.Type.NULL), variant);
-    org.apache.avro.Schema record = org.apache.avro.Schema.createRecord("R", null, "ns", false);
-    record.setFields(Collections.singletonList(
-        new org.apache.avro.Schema.Field("payload", nullableVariant, null, org.apache.avro.JsonProperties.NULL_VALUE)));
+    HoodieSchema nullableVariant = HoodieSchema.createUnion(
+        HoodieSchema.NULL_SCHEMA, HoodieSchema.createVariant());
+    HoodieSchema record = HoodieSchema.createRecord("R", "ns", null, Collections.singletonList(
+        HoodieSchemaField.of("payload", nullableVariant)));
     HoodieNotSupportedException ex = assertThrows(
         HoodieNotSupportedException.class,
         () -> HoodieSparkLanceWriter.validateNoVariantColumns(record));
