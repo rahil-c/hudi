@@ -21,6 +21,7 @@ package org.apache.hudi.io.storage.hadoop;
 
 import org.apache.hudi.avro.HoodieAvroWriteSupport;
 import org.apache.hudi.common.bloom.BloomFilter;
+import org.apache.hudi.common.config.ConfigProperty;
 import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.config.HoodieParquetConfig;
 import org.apache.hudi.common.config.HoodieStorageConfig;
@@ -51,6 +52,7 @@ import org.apache.parquet.schema.MessageType;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.List;
 import java.util.Properties;
 
 import static org.apache.hudi.common.config.HoodieStorageConfig.HFILE_WRITER_TO_ALLOW_DUPLICATES;
@@ -79,14 +81,30 @@ public class HoodieAvroFileWriterFactory extends HoodieFileWriterFactory {
     if (compressionCodecName.isEmpty()) {
       compressionCodecName = null;
     }
+    List<String> blobVectorPaths = HoodieSchema.collectBlobAndVectorColumnPaths(schema);
+    int pageSize = resolveBlobVectorScopedInt(hoodieConfig, !blobVectorPaths.isEmpty(),
+        HoodieStorageConfig.PARQUET_BLOB_VECTOR_PAGE_SIZE, HoodieStorageConfig.PARQUET_PAGE_SIZE);
+    int blockSize = resolveBlobVectorScopedInt(hoodieConfig, !blobVectorPaths.isEmpty(),
+        HoodieStorageConfig.PARQUET_BLOB_VECTOR_ROW_GROUP_SIZE, HoodieStorageConfig.PARQUET_BLOCK_SIZE);
     HoodieParquetConfig<HoodieAvroWriteSupport> parquetConfig = new HoodieParquetConfig<>(writeSupport,
         CompressionCodecName.fromConf(compressionCodecName),
-        hoodieConfig.getIntOrDefault(HoodieStorageConfig.PARQUET_BLOCK_SIZE),
-        hoodieConfig.getIntOrDefault(HoodieStorageConfig.PARQUET_PAGE_SIZE),
+        blockSize,
+        pageSize,
         hoodieConfig.getLongOrDefault(HoodieStorageConfig.PARQUET_MAX_FILE_SIZE),
         storageConfiguration, hoodieConfig.getDoubleOrDefault(HoodieStorageConfig.PARQUET_COMPRESSION_RATIO_FRACTION),
-        hoodieConfig.getBooleanOrDefault(HoodieStorageConfig.PARQUET_DICTIONARY_ENABLED));
+        hoodieConfig.getBooleanOrDefault(HoodieStorageConfig.PARQUET_DICTIONARY_ENABLED),
+        blobVectorPaths);
     return new HoodieAvroParquetWriter(path, parquetConfig, instantTime, taskContextSupplier, populateMetaFields);
+  }
+
+  private static int resolveBlobVectorScopedInt(HoodieConfig config,
+                                                boolean hasBlobOrVector,
+                                                ConfigProperty<String> scopedKey,
+                                                ConfigProperty<String> globalKey) {
+    if (hasBlobOrVector && config.contains(scopedKey)) {
+      return Integer.parseInt(config.getString(scopedKey));
+    }
+    return config.getIntOrDefault(globalKey);
   }
 
   protected HoodieFileWriter newParquetFileWriter(
@@ -96,13 +114,19 @@ public class HoodieAvroFileWriterFactory extends HoodieFileWriterFactory {
       throw new HoodieException("hoodie.parquet.write.config.injector.class is not supported with streaming writes with parquet");
     }
     HoodieAvroWriteSupport writeSupport = getHoodieAvroWriteSupport(schema, config, storage.getConf(), false);
+    List<String> blobVectorPaths = HoodieSchema.collectBlobAndVectorColumnPaths(schema);
+    int pageSize = resolveBlobVectorScopedInt(config, !blobVectorPaths.isEmpty(),
+        HoodieStorageConfig.PARQUET_BLOB_VECTOR_PAGE_SIZE, HoodieStorageConfig.PARQUET_PAGE_SIZE);
+    int blockSize = resolveBlobVectorScopedInt(config, !blobVectorPaths.isEmpty(),
+        HoodieStorageConfig.PARQUET_BLOB_VECTOR_ROW_GROUP_SIZE, HoodieStorageConfig.PARQUET_BLOCK_SIZE);
     HoodieParquetConfig<HoodieAvroWriteSupport> parquetConfig = new HoodieParquetConfig<>(writeSupport,
         CompressionCodecName.fromConf(config.getString(HoodieStorageConfig.PARQUET_COMPRESSION_CODEC_NAME)),
-        config.getInt(HoodieStorageConfig.PARQUET_BLOCK_SIZE),
-        config.getInt(HoodieStorageConfig.PARQUET_PAGE_SIZE),
+        blockSize,
+        pageSize,
         config.getLong(HoodieStorageConfig.PARQUET_MAX_FILE_SIZE), // todo: 1024*1024*1024
         storage.getConf(), config.getDouble(HoodieStorageConfig.PARQUET_COMPRESSION_RATIO_FRACTION),
-        config.getBoolean(HoodieStorageConfig.PARQUET_DICTIONARY_ENABLED));
+        config.getBoolean(HoodieStorageConfig.PARQUET_DICTIONARY_ENABLED),
+        blobVectorPaths);
     return new HoodieParquetStreamWriter(new FSDataOutputStream(outputStream, null), parquetConfig);
   }
 

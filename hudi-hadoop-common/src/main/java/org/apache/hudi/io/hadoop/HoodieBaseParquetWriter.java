@@ -77,6 +77,13 @@ public abstract class HoodieBaseParquetWriter<R> implements Closeable {
     parquetWriterbuilder.withValidation(ParquetWriter.DEFAULT_IS_VALIDATING_ENABLED);
     parquetWriterbuilder.withWriterVersion(ParquetWriter.DEFAULT_WRITER_VERSION);
     parquetWriterbuilder.withConf(HadoopFSUtils.registerFileSystem(file, hadoopConf));
+    // BLOB / VECTOR columns: force PLAIN encoding by disabling per-column dictionary.
+    // parquet-mr 1.13.1 does not expose per-column statistics on/off; once the parquet
+    // dependency moves to 1.14+, also call withStatisticsEnabled(colPath, false) and
+    // withSizeStatisticsEnabled(colPath, false) here.
+    for (String colPath : parquetConfig.getBlobVectorColumnPaths()) {
+      parquetWriterbuilder.withDictionaryEncoding(colPath, false);
+    }
     handleParquetBloomFilters(parquetWriterbuilder, hadoopConf);
 
     parquetWriter = parquetWriterbuilder.build();

@@ -273,6 +273,34 @@ public class HoodieSchema implements Serializable {
   }
 
   /**
+   * Returns parquet leaf column paths for BLOB and VECTOR columns at the top level of the
+   * given schema. For vector columns the leaf path is the field name itself (vectors are
+   * FIXED_LEN_BYTE_ARRAY leaves). For blob columns it is {@code <fieldName>.data} — the
+   * binary payload leaf inside the blob group. Other blob subfields (type enum and the
+   * reference metadata record) are intentionally excluded; dictionary and statistics remain
+   * useful for those small fields.
+   *
+   * @param schema a HoodieSchema, may be null
+   * @return ordered list of leaf paths, empty if schema is null / has no blob or vector
+   *         top-level fields
+   */
+  public static List<String> collectBlobAndVectorColumnPaths(HoodieSchema schema) {
+    if (schema == null || schema.isSchemaNull()) {
+      return Collections.emptyList();
+    }
+    List<String> paths = new ArrayList<>();
+    for (HoodieSchemaField field : schema.getFields()) {
+      HoodieSchemaType fieldType = field.schema().getNonNullType().getType();
+      if (fieldType == HoodieSchemaType.VECTOR) {
+        paths.add(field.name());
+      } else if (fieldType == HoodieSchemaType.BLOB) {
+        paths.add(field.name() + "." + Blob.INLINE_DATA_FIELD);
+      }
+    }
+    return paths;
+  }
+
+  /**
    * Parses the comma-separated {@link #VECTOR_COLUMNS_METADATA_KEY} footer value and
    * returns the set of vector column field names. Commas inside parentheses (e.g. inside
    * the VECTOR descriptor {@code VECTOR(128, DOUBLE)}) are not treated as separators.

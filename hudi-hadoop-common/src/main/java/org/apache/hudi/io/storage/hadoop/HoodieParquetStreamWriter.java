@@ -49,7 +49,7 @@ public class HoodieParquetStreamWriter implements HoodieAvroFileWriter, AutoClos
   public HoodieParquetStreamWriter(FSDataOutputStream outputStream,
                                    HoodieParquetConfig<HoodieAvroWriteSupport> parquetConfig) throws IOException {
     this.writeSupport = parquetConfig.getWriteSupport();
-    this.writer = new Builder<IndexedRecord>(new OutputStreamBackedOutputFile(outputStream), writeSupport)
+    Builder<IndexedRecord> builder = new Builder<IndexedRecord>(new OutputStreamBackedOutputFile(outputStream), writeSupport)
         .withWriteMode(ParquetFileWriter.Mode.CREATE)
         .withCompressionCodec(parquetConfig.getCompressionCodecName())
         .withRowGroupSize(parquetConfig.getBlockSize())
@@ -57,8 +57,13 @@ public class HoodieParquetStreamWriter implements HoodieAvroFileWriter, AutoClos
         .withDictionaryPageSize(parquetConfig.getPageSize())
         .withDictionaryEncoding(parquetConfig.isDictionaryEnabled())
         .withWriterVersion(ParquetWriter.DEFAULT_WRITER_VERSION)
-        .withConf(parquetConfig.getStorageConf().unwrapAs(Configuration.class))
-        .build();
+        .withConf(parquetConfig.getStorageConf().unwrapAs(Configuration.class));
+    // parquet-mr 1.13.1 only exposes per-column dictionary off; per-column statistics
+    // disable requires parquet 1.14+.
+    for (String colPath : parquetConfig.getBlobVectorColumnPaths()) {
+      builder.withDictionaryEncoding(colPath, false);
+    }
+    this.writer = builder.build();
   }
 
   @Override

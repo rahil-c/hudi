@@ -56,6 +56,25 @@ public class HoodieStorageConfig extends HoodieConfig {
       .withDocumentation("Parquet page size in bytes. Page is the unit of read within a parquet file. "
           + "Within a block, pages are compressed separately.");
 
+  public static final ConfigProperty<String> PARQUET_BLOB_VECTOR_PAGE_SIZE = ConfigProperty
+      .key("hoodie.parquet.blob.vector.page.size")
+      .noDefaultValue()
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("Parquet page size in bytes used when the table schema contains BLOB or "
+          + "VECTOR logical type columns. When set, overrides hoodie.parquet.page.size for files "
+          + "produced for such tables; otherwise the global page size is used.");
+
+  public static final ConfigProperty<String> PARQUET_BLOB_VECTOR_ROW_GROUP_SIZE = ConfigProperty
+      .key("hoodie.parquet.blob.vector.row.group.size")
+      .noDefaultValue()
+      .markAdvanced()
+      .sinceVersion("1.2.0")
+      .withDocumentation("Parquet row group (block) size in bytes used when the table schema "
+          + "contains BLOB or VECTOR logical type columns. When set, overrides "
+          + "hoodie.parquet.block.size for files produced for such tables; otherwise the global "
+          + "block size is used.");
+
   public static final ConfigProperty<String> ORC_FILE_MAX_SIZE = ConfigProperty
       .key("hoodie.orc.max.file.size")
       .defaultValue(String.valueOf(120 * 1024 * 1024))

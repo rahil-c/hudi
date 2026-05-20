@@ -3088,4 +3088,40 @@ public class TestHoodieSchema {
     HoodieSchema.Variant unshreddedVariant = HoodieSchema.createVariant();
     assertFalse(unshreddedVariant.getPlainTypedValueSchema().isPresent());
   }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsEmpty() {
+    assertTrue(HoodieSchema.collectBlobAndVectorColumnPaths(null).isEmpty());
+
+    HoodieSchema scalarOnly = HoodieSchema.createRecord("ScalarRecord", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("count", HoodieSchema.create(HoodieSchemaType.LONG), null, null)));
+    assertTrue(HoodieSchema.collectBlobAndVectorColumnPaths(scalarOnly).isEmpty());
+  }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsMixed() {
+    HoodieSchema schema = HoodieSchema.createRecord("MixedRecord", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("embedding", HoodieSchema.createVector(128), null, null),
+        HoodieSchemaField.of("payload", HoodieSchema.createBlob(), null, null),
+        HoodieSchemaField.of("label", HoodieSchema.create(HoodieSchemaType.STRING), null, null)));
+
+    List<String> paths = HoodieSchema.collectBlobAndVectorColumnPaths(schema);
+    // Vector → field name as leaf path; Blob → "<field>.data" leaf path.
+    assertEquals(Arrays.asList("embedding", "payload.data"), paths);
+  }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsNullableTypes() {
+    // Nullable vector / blob (wrapped in union with null) must still be detected via getNonNullType().
+    HoodieSchema schema = HoodieSchema.createRecord("NullableRecord", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("maybe_vec",
+            HoodieSchema.createNullable(HoodieSchema.createVector(64)), null, null),
+        HoodieSchemaField.of("maybe_blob",
+            HoodieSchema.createNullable(HoodieSchema.createBlob()), null, null)));
+
+    assertEquals(Arrays.asList("maybe_vec", "maybe_blob.data"),
+        HoodieSchema.collectBlobAndVectorColumnPaths(schema));
+  }
 }
