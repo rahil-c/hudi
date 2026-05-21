@@ -24,6 +24,9 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 
+import java.util.Collections;
+import java.util.List;
+
 /**
  * Base ParquetConfig to hold config params for writing to Parquet.
  * @param <T>
@@ -40,4 +43,23 @@ public class HoodieParquetConfig<T> {
   private final StorageConfiguration<?> storageConf;
   private final double compressionRatio;
   private final boolean dictionaryEnabled;
+  /**
+   * Parquet leaf column paths (dot-separated) for BLOB / VECTOR logical-type columns in the
+   * write schema. The writer applies per-column overrides on these paths: dictionary off
+   * (forces PLAIN encoding) and column statistics off. Empty when the schema contains no
+   * blob/vector columns.
+   */
+  private final List<String> blobVectorColumnPaths;
+
+  public HoodieParquetConfig(T writeSupport,
+                             CompressionCodecName compressionCodecName,
+                             int blockSize,
+                             int pageSize,
+                             long maxFileSize,
+                             StorageConfiguration<?> storageConf,
+                             double compressionRatio,
+                             boolean dictionaryEnabled) {
+    this(writeSupport, compressionCodecName, blockSize, pageSize, maxFileSize, storageConf,
+        compressionRatio, dictionaryEnabled, Collections.emptyList());
+  }
 }

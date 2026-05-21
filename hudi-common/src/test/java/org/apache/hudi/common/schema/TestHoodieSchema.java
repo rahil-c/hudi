@@ -3088,4 +3088,73 @@ public class TestHoodieSchema {
     HoodieSchema.Variant unshreddedVariant = HoodieSchema.createVariant();
     assertFalse(unshreddedVariant.getPlainTypedValueSchema().isPresent());
   }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsEmpty() {
+    assertTrue(HoodieSchema.collectBlobAndVectorColumnPaths(null).isEmpty());
+
+    HoodieSchema scalarOnly = HoodieSchema.createRecord("ScalarRecord", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("count", HoodieSchema.create(HoodieSchemaType.LONG), null, null)));
+    assertTrue(HoodieSchema.collectBlobAndVectorColumnPaths(scalarOnly).isEmpty());
+  }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsMixed() {
+    HoodieSchema schema = HoodieSchema.createRecord("MixedRecord", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("embedding", HoodieSchema.createVector(128), null, null),
+        HoodieSchemaField.of("payload", HoodieSchema.createBlob(), null, null),
+        HoodieSchemaField.of("label", HoodieSchema.create(HoodieSchemaType.STRING), null, null)));
+
+    List<String> paths = HoodieSchema.collectBlobAndVectorColumnPaths(schema);
+    // Vector → field name as leaf path; Blob → "<field>.data" leaf path.
+    assertEquals(Arrays.asList("embedding", "payload.data"), paths);
+  }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsNullableTypes() {
+    // Nullable vector / blob (wrapped in union with null) must still be detected via getNonNullType().
+    HoodieSchema schema = HoodieSchema.createRecord("NullableRecord", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("maybe_vec",
+            HoodieSchema.createNullable(HoodieSchema.createVector(64)), null, null),
+        HoodieSchemaField.of("maybe_blob",
+            HoodieSchema.createNullable(HoodieSchema.createBlob()), null, null)));
+
+    assertEquals(Arrays.asList("maybe_vec", "maybe_blob.data"),
+        HoodieSchema.collectBlobAndVectorColumnPaths(schema));
+  }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsNestedBlob() {
+    // BLOB columns may live inside nested records — the walker must compose dot paths
+    // correctly. (VECTOR columns are validated as top-level-only by HoodieSchema itself,
+    // so they only appear at the root level in the same schema.)
+    HoodieSchema innerSchema = HoodieSchema.createRecord("Inner", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("payload", HoodieSchema.createBlob(), null, null),
+        HoodieSchemaField.of("note", HoodieSchema.create(HoodieSchemaType.STRING), null, null)));
+
+    HoodieSchema outerSchema = HoodieSchema.createRecord("Outer", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("inner", innerSchema, null, null),
+        HoodieSchemaField.of("top_vec", HoodieSchema.createVector(8), null, null)));
+
+    assertEquals(
+        Arrays.asList("inner.payload.data", "top_vec"),
+        HoodieSchema.collectBlobAndVectorColumnPaths(outerSchema));
+  }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsDeeplyNestedBlob() {
+    // Three levels deep — the walker must build correctly composed dot paths.
+    HoodieSchema level2 = HoodieSchema.createRecord("Level2", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("payload", HoodieSchema.createBlob(), null, null)));
+    HoodieSchema level1 = HoodieSchema.createRecord("Level1", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("l2", level2, null, null)));
+    HoodieSchema root = HoodieSchema.createRecord("Root", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("l1", level1, null, null)));
+
+    assertEquals(Collections.singletonList("l1.l2.payload.data"),
+        HoodieSchema.collectBlobAndVectorColumnPaths(root));
+  }
 }

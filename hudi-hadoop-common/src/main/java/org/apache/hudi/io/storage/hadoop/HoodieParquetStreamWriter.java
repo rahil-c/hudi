@@ -22,6 +22,7 @@ package org.apache.hudi.io.storage.hadoop;
 import org.apache.hudi.avro.HoodieAvroWriteSupport;
 import org.apache.hudi.common.config.HoodieParquetConfig;
 import org.apache.hudi.common.model.HoodieKey;
+import org.apache.hudi.io.hadoop.HoodieBaseParquetWriter;
 import org.apache.hudi.io.storage.HoodieAvroFileWriter;
 import org.apache.hudi.parquet.io.OutputStreamBackedOutputFile;
 
@@ -49,7 +50,7 @@ public class HoodieParquetStreamWriter implements HoodieAvroFileWriter, AutoClos
   public HoodieParquetStreamWriter(FSDataOutputStream outputStream,
                                    HoodieParquetConfig<HoodieAvroWriteSupport> parquetConfig) throws IOException {
     this.writeSupport = parquetConfig.getWriteSupport();
-    this.writer = new Builder<IndexedRecord>(new OutputStreamBackedOutputFile(outputStream), writeSupport)
+    Builder<IndexedRecord> builder = new Builder<IndexedRecord>(new OutputStreamBackedOutputFile(outputStream), writeSupport)
         .withWriteMode(ParquetFileWriter.Mode.CREATE)
         .withCompressionCodec(parquetConfig.getCompressionCodecName())
         .withRowGroupSize(parquetConfig.getBlockSize())
@@ -57,8 +58,17 @@ public class HoodieParquetStreamWriter implements HoodieAvroFileWriter, AutoClos
         .withDictionaryPageSize(parquetConfig.getPageSize())
         .withDictionaryEncoding(parquetConfig.isDictionaryEnabled())
         .withWriterVersion(ParquetWriter.DEFAULT_WRITER_VERSION)
-        .withConf(parquetConfig.getStorageConf().unwrapAs(Configuration.class))
-        .build();
+        .withConf(parquetConfig.getStorageConf().unwrapAs(Configuration.class));
+    // BLOB / VECTOR columns: dictionary off → PLAIN encoding. Per-column statistics
+    // setters are looked up reflectively (no-op on parquet-mr 1.13.1, active on 1.14+).
+    for (String colPath : parquetConfig.getBlobVectorColumnPaths()) {
+      builder.withDictionaryEncoding(colPath, false);
+      HoodieBaseParquetWriter.invokeBuilderMethodQuietly(
+          HoodieBaseParquetWriter.WITH_STATISTICS_ENABLED_PER_COLUMN, builder, colPath, false);
+      HoodieBaseParquetWriter.invokeBuilderMethodQuietly(
+          HoodieBaseParquetWriter.WITH_SIZE_STATISTICS_ENABLED_PER_COLUMN, builder, colPath, false);
+    }
+    this.writer = builder.build();
   }
 
   @Override
