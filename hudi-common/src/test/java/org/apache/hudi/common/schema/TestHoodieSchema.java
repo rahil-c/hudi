@@ -3124,4 +3124,37 @@ public class TestHoodieSchema {
     assertEquals(Arrays.asList("maybe_vec", "maybe_blob.data"),
         HoodieSchema.collectBlobAndVectorColumnPaths(schema));
   }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsNestedBlob() {
+    // BLOB columns may live inside nested records — the walker must compose dot paths
+    // correctly. (VECTOR columns are validated as top-level-only by HoodieSchema itself,
+    // so they only appear at the root level in the same schema.)
+    HoodieSchema innerSchema = HoodieSchema.createRecord("Inner", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("payload", HoodieSchema.createBlob(), null, null),
+        HoodieSchemaField.of("note", HoodieSchema.create(HoodieSchemaType.STRING), null, null)));
+
+    HoodieSchema outerSchema = HoodieSchema.createRecord("Outer", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("inner", innerSchema, null, null),
+        HoodieSchemaField.of("top_vec", HoodieSchema.createVector(8), null, null)));
+
+    assertEquals(
+        Arrays.asList("inner.payload.data", "top_vec"),
+        HoodieSchema.collectBlobAndVectorColumnPaths(outerSchema));
+  }
+
+  @Test
+  public void testCollectBlobAndVectorColumnPathsDeeplyNestedBlob() {
+    // Three levels deep — the walker must build correctly composed dot paths.
+    HoodieSchema level2 = HoodieSchema.createRecord("Level2", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("payload", HoodieSchema.createBlob(), null, null)));
+    HoodieSchema level1 = HoodieSchema.createRecord("Level1", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("l2", level2, null, null)));
+    HoodieSchema root = HoodieSchema.createRecord("Root", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("l1", level1, null, null)));
+
+    assertEquals(Collections.singletonList("l1.l2.payload.data"),
+        HoodieSchema.collectBlobAndVectorColumnPaths(root));
+  }
 }

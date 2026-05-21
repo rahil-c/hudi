@@ -52,6 +52,40 @@ public abstract class HoodieBaseParquetWriter<R> implements Closeable {
   public static final String BLOOM_FILTER_EXPECTED_NDV = "parquet.bloom.filter.expected.ndv";
   public static final String BLOOM_FILTER_ENABLED = "parquet.bloom.filter.enabled";
 
+  // Reflective handles for per-column statistics setters. These were added to parquet-mr in
+  // 1.14; on 1.13.1 they don't exist and the lookup yields null, in which case we silently
+  // skip the call. Once Hudi's pinned parquet-mr version moves to 1.14+, these resolve and
+  // statistics get disabled for blob/vector columns transparently — no code change required.
+  public static final Method WITH_STATISTICS_ENABLED_PER_COLUMN =
+      lookupBuilderMethodQuietly("withStatisticsEnabled", String.class, boolean.class);
+  public static final Method WITH_SIZE_STATISTICS_ENABLED_PER_COLUMN =
+      lookupBuilderMethodQuietly("withSizeStatisticsEnabled", String.class, boolean.class);
+
+  private static Method lookupBuilderMethodQuietly(String name, Class<?>... params) {
+    try {
+      return ParquetWriter.Builder.class.getMethod(name, params);
+    } catch (NoSuchMethodException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Best-effort reflective invocation on a {@link ParquetWriter.Builder} (or subclass). If
+   * the looked-up method is null (i.e., not present in the linked parquet-mr version), this
+   * is a no-op. Failures are swallowed — these reflective calls are optional optimizations
+   * and must not break the write path.
+   */
+  public static void invokeBuilderMethodQuietly(Method method, Object builder, Object... args) {
+    if (method == null) {
+      return;
+    }
+    try {
+      method.invoke(builder, args);
+    } catch (IllegalAccessException | InvocationTargetException e) {
+      // Best-effort: keep writing without the per-column override.
+    }
+  }
+
   public HoodieBaseParquetWriter(StoragePath file,
                                  HoodieParquetConfig<? extends WriteSupport<R>> parquetConfig) throws IOException {
     Configuration hadoopConf = parquetConfig.getStorageConf().unwrapAs(Configuration.class);
@@ -78,11 +112,13 @@ public abstract class HoodieBaseParquetWriter<R> implements Closeable {
     parquetWriterbuilder.withWriterVersion(ParquetWriter.DEFAULT_WRITER_VERSION);
     parquetWriterbuilder.withConf(HadoopFSUtils.registerFileSystem(file, hadoopConf));
     // BLOB / VECTOR columns: force PLAIN encoding by disabling per-column dictionary.
-    // parquet-mr 1.13.1 does not expose per-column statistics on/off; once the parquet
-    // dependency moves to 1.14+, also call withStatisticsEnabled(colPath, false) and
-    // withSizeStatisticsEnabled(colPath, false) here.
+    // Per-column statistics setters landed in parquet-mr 1.14; the reflective invokes
+    // below are no-ops on the currently pinned 1.13.1 and will start writing parquet
+    // files without stats for blob/vector columns once Hudi bumps the dependency.
     for (String colPath : parquetConfig.getBlobVectorColumnPaths()) {
       parquetWriterbuilder.withDictionaryEncoding(colPath, false);
+      invokeBuilderMethodQuietly(WITH_STATISTICS_ENABLED_PER_COLUMN, parquetWriterbuilder, colPath, false);
+      invokeBuilderMethodQuietly(WITH_SIZE_STATISTICS_ENABLED_PER_COLUMN, parquetWriterbuilder, colPath, false);
     }
     handleParquetBloomFilters(parquetWriterbuilder, hadoopConf);
 

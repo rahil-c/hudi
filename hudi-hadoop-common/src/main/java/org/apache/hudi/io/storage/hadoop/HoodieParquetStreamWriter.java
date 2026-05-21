@@ -22,6 +22,7 @@ package org.apache.hudi.io.storage.hadoop;
 import org.apache.hudi.avro.HoodieAvroWriteSupport;
 import org.apache.hudi.common.config.HoodieParquetConfig;
 import org.apache.hudi.common.model.HoodieKey;
+import org.apache.hudi.io.hadoop.HoodieBaseParquetWriter;
 import org.apache.hudi.io.storage.HoodieAvroFileWriter;
 import org.apache.hudi.parquet.io.OutputStreamBackedOutputFile;
 
@@ -58,10 +59,14 @@ public class HoodieParquetStreamWriter implements HoodieAvroFileWriter, AutoClos
         .withDictionaryEncoding(parquetConfig.isDictionaryEnabled())
         .withWriterVersion(ParquetWriter.DEFAULT_WRITER_VERSION)
         .withConf(parquetConfig.getStorageConf().unwrapAs(Configuration.class));
-    // parquet-mr 1.13.1 only exposes per-column dictionary off; per-column statistics
-    // disable requires parquet 1.14+.
+    // BLOB / VECTOR columns: dictionary off → PLAIN encoding. Per-column statistics
+    // setters are looked up reflectively (no-op on parquet-mr 1.13.1, active on 1.14+).
     for (String colPath : parquetConfig.getBlobVectorColumnPaths()) {
       builder.withDictionaryEncoding(colPath, false);
+      HoodieBaseParquetWriter.invokeBuilderMethodQuietly(
+          HoodieBaseParquetWriter.WITH_STATISTICS_ENABLED_PER_COLUMN, builder, colPath, false);
+      HoodieBaseParquetWriter.invokeBuilderMethodQuietly(
+          HoodieBaseParquetWriter.WITH_SIZE_STATISTICS_ENABLED_PER_COLUMN, builder, colPath, false);
     }
     this.writer = builder.build();
   }

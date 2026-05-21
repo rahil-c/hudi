@@ -273,31 +273,60 @@ public class HoodieSchema implements Serializable {
   }
 
   /**
-   * Returns parquet leaf column paths for BLOB and VECTOR columns at the top level of the
-   * given schema. For vector columns the leaf path is the field name itself (vectors are
-   * FIXED_LEN_BYTE_ARRAY leaves). For blob columns it is {@code <fieldName>.data} — the
-   * binary payload leaf inside the blob group. Other blob subfields (type enum and the
-   * reference metadata record) are intentionally excluded; dictionary and statistics remain
-   * useful for those small fields.
+   * Returns parquet leaf column paths for BLOB and VECTOR columns in the given schema,
+   * recursing into nested {@link HoodieSchemaType#RECORD} fields. For vector columns the
+   * leaf path is the field name itself (vectors are {@code FIXED_LEN_BYTE_ARRAY} leaves).
+   * For blob columns it is {@code <fieldName>.data} — the binary payload leaf inside the
+   * blob group. Other blob subfields (type enum and the reference metadata record) are
+   * intentionally excluded; dictionary and statistics remain useful for those small fields.
+   *
+   * <p>Examples:
+   * <ul>
+   *   <li>{@code {embedding: VECTOR(128)}}     → {@code embedding}
+   *   <li>{@code {payload: BLOB}}              → {@code payload.data}
+   *   <li>{@code {outer: {payload: BLOB}}}     → {@code outer.payload.data}
+   * </ul>
+   *
+   * <p>VECTOR columns are validated as top-level fields by HoodieSchema itself and
+   * therefore only ever appear at the root level. BLOB columns may live inside nested
+   * RECORDs and are discovered via recursion. The walker does not descend into BLOB or
+   * VARIANT (which are record-shaped but treated as opaque logical types), nor into
+   * ARRAY / MAP elements — paths for BLOBs inside repeated/map structures are out of
+   * scope here.
    *
    * @param schema a HoodieSchema, may be null
-   * @return ordered list of leaf paths, empty if schema is null / has no blob or vector
-   *         top-level fields
+   * @return ordered list of dot-separated leaf paths, empty if schema is null or has no
+   *         blob / vector columns
    */
   public static List<String> collectBlobAndVectorColumnPaths(HoodieSchema schema) {
     if (schema == null || schema.isSchemaNull()) {
       return Collections.emptyList();
     }
     List<String> paths = new ArrayList<>();
+    collectBlobAndVectorColumnPaths(schema, "", paths);
+    return paths;
+  }
+
+  private static void collectBlobAndVectorColumnPaths(HoodieSchema schema,
+                                                      String prefix,
+                                                      List<String> paths) {
+    if (schema == null || !schema.hasFields()) {
+      return;
+    }
     for (HoodieSchemaField field : schema.getFields()) {
-      HoodieSchemaType fieldType = field.schema().getNonNullType().getType();
+      HoodieSchema fieldSchema = field.schema().getNonNullType();
+      HoodieSchemaType fieldType = fieldSchema.getType();
+      String fieldPath = prefix.isEmpty() ? field.name() : prefix + "." + field.name();
       if (fieldType == HoodieSchemaType.VECTOR) {
-        paths.add(field.name());
+        paths.add(fieldPath);
       } else if (fieldType == HoodieSchemaType.BLOB) {
-        paths.add(field.name() + "." + Blob.INLINE_DATA_FIELD);
+        paths.add(fieldPath + "." + Blob.INLINE_DATA_FIELD);
+      } else if (fieldType == HoodieSchemaType.RECORD) {
+        // Plain record: descend. BLOB and VARIANT are also record-shaped but are handled
+        // as opaque logical types above and not recursed into.
+        collectBlobAndVectorColumnPaths(fieldSchema, fieldPath, paths);
       }
     }
-    return paths;
   }
 
   /**

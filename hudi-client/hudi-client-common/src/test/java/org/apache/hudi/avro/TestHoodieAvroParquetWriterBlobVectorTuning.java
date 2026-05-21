@@ -30,6 +30,7 @@ import org.apache.hudi.io.storage.hadoop.HoodieAvroParquetWriter;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 
+import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.parquet.avro.AvroSchemaConverter;
@@ -71,7 +72,6 @@ public class TestHoodieAvroParquetWriterBlobVectorTuning {
   java.nio.file.Path tmpDir;
 
   private static final int VECTOR_DIM = 8;
-  private static final int VECTOR_BYTES = VECTOR_DIM * Float.BYTES;
 
   @Test
   public void testVectorColumnUsesPlainEncodingAndNoStats() throws IOException {
@@ -151,6 +151,75 @@ public class TestHoodieAvroParquetWriterBlobVectorTuning {
   }
 
   @Test
+  public void testBlobColumnDataLeafUsesPlainEncoding() throws IOException {
+    HoodieStorage storage = HoodieTestUtils.getStorage(tmpDir.toString());
+
+    HoodieSchema blobSchema = HoodieSchema.createBlob();
+    HoodieSchema recordSchema = HoodieSchema.createRecord("BlobRecord", null, null, false, Arrays.asList(
+        HoodieSchemaField.of("id", HoodieSchema.create(HoodieSchemaType.STRING), null, null),
+        HoodieSchemaField.of("payload", HoodieSchema.createNullable(blobSchema), null, null)));
+
+    // Sanity check the helper before writing.
+    assertEquals(Collections.singletonList("payload.data"),
+        HoodieSchema.collectBlobAndVectorColumnPaths(recordSchema));
+
+    HoodieAvroWriteSupport writeSupport = new HoodieAvroWriteSupport(
+        new AvroSchemaConverter().convert(recordSchema.toAvroSchema()),
+        recordSchema, Option.empty(), new Properties());
+
+    HoodieParquetConfig<HoodieAvroWriteSupport> parquetConfig = new HoodieParquetConfig<>(
+        writeSupport, CompressionCodecName.UNCOMPRESSED,
+        ParquetWriter.DEFAULT_BLOCK_SIZE, ParquetWriter.DEFAULT_PAGE_SIZE,
+        1024L * 1024L * 1024L, storage.getConf(), 0.1, true,
+        HoodieSchema.collectBlobAndVectorColumnPaths(recordSchema));
+
+    StoragePath filePath = new StoragePath(tmpDir.resolve("blob.parquet").toAbsolutePath().toString());
+    Schema blobAvroSchema = blobSchema.toAvroSchema();
+    Schema typeEnumSchema = blobAvroSchema.getField(HoodieSchema.Blob.TYPE).schema();
+
+    List<GenericRecord> records = new ArrayList<>();
+    int n = 32;
+    for (int i = 0; i < n; i++) {
+      GenericRecord blob = new GenericData.Record(blobAvroSchema);
+      blob.put(HoodieSchema.Blob.TYPE,
+          new GenericData.EnumSymbol(typeEnumSchema, HoodieSchema.Blob.INLINE));
+      // INLINE mode: data carries the payload, reference is null.
+      blob.put(HoodieSchema.Blob.INLINE_DATA_FIELD,
+          ByteBuffer.wrap(blobPayload(i)));
+      blob.put(HoodieSchema.Blob.EXTERNAL_REFERENCE, null);
+
+      GenericRecord rec = new GenericData.Record(recordSchema.toAvroSchema());
+      rec.put("id", "row-" + (i % 4));
+      rec.put("payload", blob);
+      records.add(rec);
+    }
+
+    try (HoodieAvroParquetWriter writer = new HoodieAvroParquetWriter(
+        filePath, parquetConfig, "001", new LocalTaskContextSupplier(), false)) {
+      for (GenericRecord rec : records) {
+        writer.writeAvro((String) rec.get("id"), rec);
+      }
+    }
+
+    ParquetMetadata metadata = ParquetUtils.readMetadata(storage, filePath);
+    ColumnChunkMetaData payloadDataChunk = findColumn(metadata, "payload.data");
+    ColumnChunkMetaData idChunk = findColumn(metadata, "id");
+
+    // BLOB binary leaf: PLAIN only, no dictionary.
+    Set<Encoding> payloadEncodings = payloadDataChunk.getEncodings();
+    assertTrue(payloadEncodings.contains(Encoding.PLAIN),
+        "Expected blob data leaf to use PLAIN encoding, got " + payloadEncodings);
+    assertTrue(Collections.disjoint(payloadEncodings,
+            EnumSet.of(Encoding.PLAIN_DICTIONARY, Encoding.RLE_DICTIONARY)),
+        "Expected blob data leaf to have no dictionary encoding, got " + payloadEncodings);
+
+    // Sibling scalar string column: dictionary still eligible.
+    Set<Encoding> idEncodings = idChunk.getEncodings();
+    assertTrue(idEncodings.contains(Encoding.PLAIN_DICTIONARY) || idEncodings.contains(Encoding.RLE_DICTIONARY),
+        "Expected scalar string column to remain dictionary-encoded, got " + idEncodings);
+  }
+
+  @Test
   public void testHoodieParquetConfigBackwardsCompatibleConstructor() {
     // The 8-arg delegate constructor (pre-blob/vector) must default to an empty paths list.
     HoodieParquetConfig<Object> cfg = new HoodieParquetConfig<>(
@@ -167,6 +236,16 @@ public class TestHoodieAvroParquetWriterBlobVectorTuning {
       buf.putFloat((float) (seed + i) * 0.125f);
     }
     return buf.array();
+  }
+
+  private static byte[] blobPayload(int seed) {
+    // 256-byte payloads ensure the column is non-trivial and dictionary would have a chance
+    // to engage if it weren't explicitly disabled.
+    byte[] payload = new byte[256];
+    for (int i = 0; i < payload.length; i++) {
+      payload[i] = (byte) ((seed * 31 + i) & 0xFF);
+    }
+    return payload;
   }
 
   private static ColumnChunkMetaData findColumn(ParquetMetadata metadata, String path) {
