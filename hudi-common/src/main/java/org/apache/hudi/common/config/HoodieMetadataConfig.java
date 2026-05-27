@@ -538,6 +538,33 @@ public final class HoodieMetadataConfig extends HoodieConfig {
       .sinceVersion("1.0.1")
       .withDocumentation("Column for which secondary index will be built.");
 
+  public static final ConfigProperty<Boolean> VECTOR_INDEX_ENABLE_PROP = ConfigProperty
+      .key(METADATA_PREFIX + ".vector.index.enable")
+      .defaultValue(false)
+      .sinceVersion("1.4.0")
+      .withDocumentation("Enable vector index within the metadata table for ANN (approximate nearest neighbor) search.");
+
+  public static final ConfigProperty<Integer> VECTOR_INDEX_NUM_CLUSTERS = ConfigProperty
+      .key(METADATA_PREFIX + ".vector.index.num.clusters")
+      .defaultValue(256)
+      .markAdvanced()
+      .sinceVersion("1.4.0")
+      .withDocumentation("Number of clusters (centroids) to build in the vector index.");
+
+  public static final ConfigProperty<Integer> VECTOR_INDEX_FILE_GROUP_COUNT_PER_CLUSTER = ConfigProperty
+      .key(METADATA_PREFIX + ".vector.index.file.group.count.per.cluster")
+      .defaultValue(1)
+      .markAdvanced()
+      .sinceVersion("1.4.0")
+      .withDocumentation("Number of file groups per cluster in the vector index.");
+
+  public static final ConfigProperty<Long> VECTOR_INDEX_TRAINING_SAMPLE_SIZE = ConfigProperty
+      .key(METADATA_PREFIX + ".vector.index.training.sample.size")
+      .defaultValue(1_000_000L)
+      .markAdvanced()
+      .sinceVersion("1.4.0")
+      .withDocumentation("Number of vectors sampled for training the vector index clustering model.");
+
   // Config to specify metadata index to delete
   public static final ConfigProperty<String> DROP_METADATA_INDEX = ConfigProperty
       .key(METADATA_PREFIX + ".index.drop")
@@ -949,6 +976,22 @@ public final class HoodieMetadataConfig extends HoodieConfig {
     return getString(SECONDARY_INDEX_NAME);
   }
 
+  public boolean isVectorIndexEnabled() {
+    return getBooleanOrDefault(VECTOR_INDEX_ENABLE_PROP);
+  }
+
+  public int getVectorIndexNumClusters() {
+    return getInt(VECTOR_INDEX_NUM_CLUSTERS);
+  }
+
+  public int getVectorIndexFileGroupCountPerCluster() {
+    return getInt(VECTOR_INDEX_FILE_GROUP_COUNT_PER_CLUSTER);
+  }
+
+  public long getVectorIndexTrainingSampleSize() {
+    return getLong(VECTOR_INDEX_TRAINING_SAMPLE_SIZE);
+  }
+
   public String getMetadataIndexToDrop() {
     return getString(DROP_METADATA_INDEX);
   }
@@ -1291,6 +1334,11 @@ public final class HoodieMetadataConfig extends HoodieConfig {
 
     public Builder withExpressionIndexEnabled(boolean enabled) {
       metadataConfig.setValue(EXPRESSION_INDEX_ENABLE_PROP, String.valueOf(enabled));
+      return this;
+    }
+
+    public Builder withVectorIndexEnabled(boolean enabled) {
+      metadataConfig.setValue(VECTOR_INDEX_ENABLE_PROP, String.valueOf(enabled));
       return this;
     }
 
