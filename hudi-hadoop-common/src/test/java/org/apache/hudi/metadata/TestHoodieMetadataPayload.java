@@ -18,28 +18,39 @@
 
 package org.apache.hudi.metadata;
 
+import org.apache.hudi.avro.model.HoodieVectorIndexInfo;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.model.HoodieRecordGlobalLocation;
 import org.apache.hudi.common.testutils.HoodieCommonTestHarness;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.stats.HoodieColumnRangeMetadata;
 import org.apache.hudi.stats.ValueMetadata;
 
+import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.apache.hudi.common.util.CollectionUtils.createImmutableMap;
 import static org.apache.hudi.metadata.HoodieIndexVersion.V1;
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SECONDARY_INDEX_RECORD_KEY_SEPARATOR;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_ENCODING_RAW_FLOAT32;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -376,5 +387,117 @@ public class TestHoodieMetadataPayload extends HoodieCommonTestHarness {
     // Case with only escape characters but no actual separator
     assertThrows(IllegalStateException.class, () -> SecondaryIndexKeyUtils.getSecondaryKeyFromSecondaryIndexKey("part\\one"));
     assertThrows(IllegalStateException.class, () -> SecondaryIndexKeyUtils.getRecordKeyFromSecondaryIndexKey("part\\one"));
+  }
+
+  private static final String VECTOR_INDEX_PARTITION = MetadataPartitionType.VECTOR_INDEX.getPartitionPath() + "embedding";
+  private static final String VECTOR_INDEX_INSTANT_TIME = "20240101120000";
+  private static final int VECTOR_INDEX_DIMENSION = 8;
+
+  private static ByteBuffer createVectorPayload(int dimension, float seed) {
+    ByteBuffer buffer = ByteBuffer.allocate(dimension * Float.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+    for (int i = 0; i < dimension; i++) {
+      buffer.putFloat(seed + i);
+    }
+    buffer.flip();
+    return buffer;
+  }
+
+  private static byte[] vectorBytes(ByteBuffer buffer) {
+    ByteBuffer dup = buffer.duplicate();
+    byte[] out = new byte[dup.remaining()];
+    dup.get(out);
+    return out;
+  }
+
+  @Test
+  public void testVectorIndexPayloadAvroRoundtripWithUuidFileId() throws IOException {
+    String recordKey = "rk1";
+    ByteBuffer vector = createVectorPayload(VECTOR_INDEX_DIMENSION, 0.5f);
+    String dataPartition = "2024/01/01";
+    String fileId = UUID.randomUUID().toString() + "-0";
+    int clusterId = 42;
+    long position = 17L;
+
+    HoodieRecord<HoodieMetadataPayload> record = HoodieMetadataPayload.createVectorIndexRecord(
+        recordKey, VECTOR_INDEX_PARTITION, clusterId, vector,
+        dataPartition, fileId, VECTOR_INDEX_INSTANT_TIME, 0, position, false);
+
+    assertEquals(recordKey, record.getRecordKey());
+    assertEquals(VECTOR_INDEX_PARTITION, record.getPartitionPath());
+
+    // Serialize through getInsertValue (same-schema fast path) and then re-construct the payload from the IndexedRecord.
+    Option<IndexedRecord> serialized = record.getData().getInsertValue(null);
+    assertTrue(serialized.isPresent());
+    HoodieMetadataPayload roundTripped = new HoodieMetadataPayload(Option.of((GenericRecord) serialized.get()));
+    assertEquals(record.getData(), roundTripped);
+
+    Option<HoodieVectorIndexInfo> info = roundTripped.getVectorIndexMetadata();
+    assertTrue(info.isPresent());
+    assertEquals(clusterId, info.get().getClusterId());
+    assertEquals(VECTOR_INDEX_ENCODING_RAW_FLOAT32, info.get().getEncoding());
+    assertFalse(info.get().getIsDeleted());
+    assertArrayEquals(vectorBytes(vector), vectorBytes(info.get().getVectorPayload()));
+
+    // Inline pointer round-trips and decodes via the shared RLI helper.
+    assertNotNull(info.get().getLocation());
+    assertEquals(dataPartition, info.get().getLocation().getPartitionName());
+    assertEquals(Long.valueOf(position), info.get().getLocation().getPosition());
+    Option<HoodieRecordGlobalLocation> loc = roundTripped.getVectorIndexRecordLocation();
+    assertTrue(loc.isPresent());
+    assertEquals(fileId, loc.get().getFileId());
+    assertEquals(dataPartition, loc.get().getPartitionPath());
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, 1})
+  public void testVectorIndexPayloadFileIdEncoding(int fileIdEncoding) throws IOException {
+    String recordKey = "rk-enc-" + fileIdEncoding;
+    ByteBuffer vector = createVectorPayload(VECTOR_INDEX_DIMENSION, 1.0f);
+    String dataPartition = "2024/01/02";
+    String fileId = fileIdEncoding == 0 ? UUID.randomUUID().toString() + "-3" : "raw-string-file-id";
+
+    HoodieRecord<HoodieMetadataPayload> record = HoodieMetadataPayload.createVectorIndexRecord(
+        recordKey, VECTOR_INDEX_PARTITION, 7, vector,
+        dataPartition, fileId, VECTOR_INDEX_INSTANT_TIME, fileIdEncoding, 99L, false);
+
+    HoodieMetadataPayload roundTripped = new HoodieMetadataPayload(Option.of((GenericRecord) record.getData().getInsertValue(null).get()));
+    Option<HoodieRecordGlobalLocation> loc = roundTripped.getVectorIndexRecordLocation();
+    assertTrue(loc.isPresent());
+    assertEquals(fileId, loc.get().getFileId());
+  }
+
+  @Test
+  public void testVectorIndexPayloadLatestWinsMerge() {
+    String recordKey = "rk-merge";
+    String fileId = UUID.randomUUID().toString() + "-0";
+
+    // Older entry: cluster A, vector v_old, same row location.
+    HoodieRecord<HoodieMetadataPayload> older = HoodieMetadataPayload.createVectorIndexRecord(
+        recordKey, VECTOR_INDEX_PARTITION, 1, createVectorPayload(VECTOR_INDEX_DIMENSION, 0.0f),
+        "2024/01/01", fileId, VECTOR_INDEX_INSTANT_TIME, 0, 0L, false);
+
+    // Newer entry simulating a re-embed: cluster B, vector v_new.
+    HoodieRecord<HoodieMetadataPayload> newer = HoodieMetadataPayload.createVectorIndexRecord(
+        recordKey, VECTOR_INDEX_PARTITION, 2, createVectorPayload(VECTOR_INDEX_DIMENSION, 100.0f),
+        "2024/01/01", fileId, VECTOR_INDEX_INSTANT_TIME, 0, 0L, false);
+
+    HoodieMetadataPayload merged = newer.getData().preCombine(older.getData());
+    assertEquals(newer.getData(), merged);
+    assertEquals(2, merged.getVectorIndexMetadata().get().getClusterId());
+  }
+
+  @Test
+  public void testVectorIndexPayloadTombstoneRoundtrip() throws IOException {
+    String recordKey = "rk-tombstone";
+    String fileId = UUID.randomUUID().toString() + "-0";
+
+    HoodieRecord<HoodieMetadataPayload> deleted = HoodieMetadataPayload.createVectorIndexRecord(
+        recordKey, VECTOR_INDEX_PARTITION, 3, createVectorPayload(VECTOR_INDEX_DIMENSION, 2.0f),
+        "2024/01/01", fileId, VECTOR_INDEX_INSTANT_TIME, 0, 5L, true);
+
+    // A tombstone marks the payload as deleted, so getInsertValue returns empty (matches secondary/column-stats behaviour).
+    assertTrue(deleted.getData().isDeleted());
+    assertFalse(deleted.getData().getInsertValue(null).isPresent());
+    assertTrue(deleted.getData().getVectorIndexMetadata().get().getIsDeleted());
   }
 }

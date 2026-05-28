@@ -554,6 +554,54 @@
                 }
             ],
             "default" : null
+        },
+        {
+            "name": "VectorIndexMetadata",
+            "doc": "Metadata Index entry for a single row's vector assignment, encoded vector payload, and inline base-table pointer. Used by the vector_index_<name> partitions of the metadata table.",
+            "type": [
+                "null",
+                {
+                    "type": "record",
+                    "name": "HoodieVectorIndexInfo",
+                    "fields": [
+                        {
+                            "name": "isDeleted",
+                            "type": "boolean",
+                            "doc": "True if this entry has been deleted. Combine semantics for the VECTOR_INDEX partition are latest-wins."
+                        },
+                        {
+                            "name": "clusterId",
+                            "type": "int",
+                            "doc": "Cluster (centroid) id this row was assigned to during IVF training."
+                        },
+                        {
+                            "name": "encoding",
+                            "type": "string",
+                            "default": "RAW_FLOAT32",
+                            "doc": "Discriminator for the vectorPayload byte layout. RAW_FLOAT32 = little-endian packed float32 of length dimension*4 (IVF-Flat). RABITQ_* values are reserved for the RaBitPQ fast-follow."
+                        },
+                        {
+                            "name": "vectorPayload",
+                            "type": [
+                                "null",
+                                "bytes"
+                            ],
+                            "default": null,
+                            "doc": "Encoded vector bytes whose layout is described by `encoding`. The dimension and elementType are fixed per vector_index_<name> partition and carried in the corresponding HoodieIndexDefinition options - they are not repeated per record."
+                        },
+                        {
+                            "name": "location",
+                            "type": [
+                                "null",
+                                "HoodieRecordIndexInfo"
+                            ],
+                            "default": null,
+                            "doc": "Inline base-table pointer (partition, fileId, position, instantTime) reusing the Record Index encoding. Populated so vector search can resolve the underlying row in a single MDT hop without a follow-up RLI lookup. Nullable so a future vector-only flavour remains possible."
+                        }
+                    ]
+                }
+            ],
+            "default" : null
         }
     ]
 }

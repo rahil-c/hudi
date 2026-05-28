@@ -23,6 +23,7 @@ import org.apache.hudi.avro.model.HoodieMetadataColumnStats;
 import org.apache.hudi.avro.model.HoodieMetadataFileInfo;
 import org.apache.hudi.avro.model.HoodieRecordIndexInfo;
 import org.apache.hudi.avro.model.HoodieSecondaryIndexInfo;
+import org.apache.hudi.avro.model.HoodieVectorIndexInfo;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.function.SerializableBiFunction;
 import org.apache.hudi.common.model.HoodieFileFormat;
@@ -77,8 +78,15 @@ import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_BLO
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_COLUMN_STATS;
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_RECORD_INDEX;
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_SECONDARY_INDEX;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_VECTOR_INDEX;
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_NAME_METADATA;
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SECONDARY_INDEX_FIELD_IS_DELETED;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_CLUSTER_ID;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_ENCODING;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_IS_DELETED;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_LOCATION;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_VECTOR_PAYLOAD;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_ENCODING_RAW_FLOAT32;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_EXPRESSION_INDEX;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_EXPRESSION_INDEX_PREFIX;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_SECONDARY_INDEX;
@@ -263,6 +271,44 @@ public enum MetadataPartitionType {
       return metaClient.getIndexForMetadataPartition(indexName)
           .map(HoodieIndexDefinition::getIndexName)
           .orElseThrow(() -> new IllegalArgumentException("Index definition is not present for index: " + indexName));
+    }
+
+    @Override
+    public void constructMetadataPayload(HoodieMetadataPayload payload, GenericRecord record) {
+      GenericRecord vectorIndexRecord = getNestedFieldValue(record, SCHEMA_FIELD_ID_VECTOR_INDEX);
+      checkState(vectorIndexRecord != null, "Valid VectorIndexMetadata record expected for type: " + MetadataPartitionType.VECTOR_INDEX.getRecordType());
+      boolean isDeleted = (Boolean) vectorIndexRecord.get(VECTOR_INDEX_FIELD_IS_DELETED);
+      int clusterId = (Integer) vectorIndexRecord.get(VECTOR_INDEX_FIELD_CLUSTER_ID);
+      // `encoding`, `vectorPayload`, and `location` are Avro-default fields - guard reads so a writer that
+      // omits them (e.g. an older writer) does not NPE the reader.
+      String encoding = VECTOR_INDEX_ENCODING_RAW_FLOAT32;
+      if (vectorIndexRecord.getSchema().getField(VECTOR_INDEX_FIELD_ENCODING) != null) {
+        Object encodingValue = vectorIndexRecord.get(VECTOR_INDEX_FIELD_ENCODING);
+        if (encodingValue != null) {
+          encoding = encodingValue.toString();
+        }
+      }
+      ByteBuffer vectorPayload = null;
+      if (vectorIndexRecord.getSchema().getField(VECTOR_INDEX_FIELD_VECTOR_PAYLOAD) != null) {
+        vectorPayload = (ByteBuffer) vectorIndexRecord.get(VECTOR_INDEX_FIELD_VECTOR_PAYLOAD);
+      }
+      HoodieRecordIndexInfo location = null;
+      if (vectorIndexRecord.getSchema().getField(VECTOR_INDEX_FIELD_LOCATION) != null) {
+        GenericRecord locationRecord = (GenericRecord) vectorIndexRecord.get(VECTOR_INDEX_FIELD_LOCATION);
+        if (locationRecord != null) {
+          Object positionValue = locationRecord.hasField(RECORD_INDEX_FIELD_POSITION) ? locationRecord.get(RECORD_INDEX_FIELD_POSITION) : null;
+          location = new HoodieRecordIndexInfo(
+              locationRecord.get(RECORD_INDEX_FIELD_PARTITION).toString(),
+              Long.parseLong(locationRecord.get(RECORD_INDEX_FIELD_FILEID_HIGH_BITS).toString()),
+              Long.parseLong(locationRecord.get(RECORD_INDEX_FIELD_FILEID_LOW_BITS).toString()),
+              Integer.parseInt(locationRecord.get(RECORD_INDEX_FIELD_FILE_INDEX).toString()),
+              locationRecord.get(RECORD_INDEX_FIELD_FILEID).toString(),
+              Long.parseLong(locationRecord.get(RECORD_INDEX_FIELD_INSTANT_TIME).toString()),
+              Integer.parseInt(locationRecord.get(RECORD_INDEX_FIELD_FILEID_ENCODING).toString()),
+              positionValue != null ? Long.parseLong(positionValue.toString()) : null);
+        }
+      }
+      payload.vectorIndexMetadata = new HoodieVectorIndexInfo(isDeleted, clusterId, encoding, vectorPayload, location);
     }
   },
   PARTITION_STATS(HoodieTableMetadataUtil.PARTITION_NAME_PARTITION_STATS, "partition-stats-", 6) {
