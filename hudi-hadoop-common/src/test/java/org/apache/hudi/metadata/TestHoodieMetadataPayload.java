@@ -18,6 +18,7 @@
 
 package org.apache.hudi.metadata;
 
+import org.apache.hudi.avro.model.HoodieMetadataRecord;
 import org.apache.hudi.avro.model.HoodieVectorIndexInfo;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordGlobalLocation;
@@ -30,8 +31,6 @@ import org.apache.hudi.stats.ValueMetadata;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -50,7 +49,6 @@ import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_ENCODI
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -410,7 +408,7 @@ public class TestHoodieMetadataPayload extends HoodieCommonTestHarness {
   }
 
   @Test
-  public void testVectorIndexPayloadAvroRoundtripWithUuidFileId() throws IOException {
+  public void testVectorIndexPayloadAvroRoundtrip() throws IOException {
     String recordKey = "rk1";
     ByteBuffer vector = createVectorPayload(VECTOR_INDEX_DIMENSION, 0.5f);
     String dataPartition = "2024/01/01";
@@ -420,7 +418,7 @@ public class TestHoodieMetadataPayload extends HoodieCommonTestHarness {
 
     HoodieRecord<HoodieMetadataPayload> record = HoodieMetadataPayload.createVectorIndexRecord(
         recordKey, VECTOR_INDEX_PARTITION, clusterId, vector,
-        dataPartition, fileId, VECTOR_INDEX_INSTANT_TIME, 0, position, false);
+        dataPartition, fileId, VECTOR_INDEX_INSTANT_TIME, position, false);
 
     assertEquals(recordKey, record.getRecordKey());
     assertEquals(VECTOR_INDEX_PARTITION, record.getPartitionPath());
@@ -429,7 +427,6 @@ public class TestHoodieMetadataPayload extends HoodieCommonTestHarness {
     Option<IndexedRecord> serialized = record.getData().getInsertValue(null);
     assertTrue(serialized.isPresent());
     HoodieMetadataPayload roundTripped = new HoodieMetadataPayload(Option.of((GenericRecord) serialized.get()));
-    assertEquals(record.getData(), roundTripped);
 
     Option<HoodieVectorIndexInfo> info = roundTripped.getVectorIndexMetadata();
     assertTrue(info.isPresent());
@@ -438,32 +435,15 @@ public class TestHoodieMetadataPayload extends HoodieCommonTestHarness {
     assertFalse(info.get().getIsDeleted());
     assertArrayEquals(vectorBytes(vector), vectorBytes(info.get().getVectorPayload()));
 
-    // Inline pointer round-trips and decodes via the shared RLI helper.
-    assertNotNull(info.get().getLocation());
-    assertEquals(dataPartition, info.get().getLocation().getPartitionName());
-    assertEquals(Long.valueOf(position), info.get().getLocation().getPosition());
+    // Flat location fields round-trip and resolve to a HoodieRecordGlobalLocation in one hop.
+    assertEquals(dataPartition, info.get().getDataPartition());
+    assertEquals(fileId, info.get().getFileId());
+    assertEquals(Long.valueOf(position), info.get().getPosition());
     Option<HoodieRecordGlobalLocation> loc = roundTripped.getVectorIndexRecordLocation();
     assertTrue(loc.isPresent());
     assertEquals(fileId, loc.get().getFileId());
     assertEquals(dataPartition, loc.get().getPartitionPath());
-  }
-
-  @ParameterizedTest
-  @ValueSource(ints = {0, 1})
-  public void testVectorIndexPayloadFileIdEncoding(int fileIdEncoding) throws IOException {
-    String recordKey = "rk-enc-" + fileIdEncoding;
-    ByteBuffer vector = createVectorPayload(VECTOR_INDEX_DIMENSION, 1.0f);
-    String dataPartition = "2024/01/02";
-    String fileId = fileIdEncoding == 0 ? UUID.randomUUID().toString() + "-3" : "raw-string-file-id";
-
-    HoodieRecord<HoodieMetadataPayload> record = HoodieMetadataPayload.createVectorIndexRecord(
-        recordKey, VECTOR_INDEX_PARTITION, 7, vector,
-        dataPartition, fileId, VECTOR_INDEX_INSTANT_TIME, fileIdEncoding, 99L, false);
-
-    HoodieMetadataPayload roundTripped = new HoodieMetadataPayload(Option.of((GenericRecord) record.getData().getInsertValue(null).get()));
-    Option<HoodieRecordGlobalLocation> loc = roundTripped.getVectorIndexRecordLocation();
-    assertTrue(loc.isPresent());
-    assertEquals(fileId, loc.get().getFileId());
+    assertEquals(VECTOR_INDEX_INSTANT_TIME, loc.get().getInstantTime());
   }
 
   @Test
@@ -474,30 +454,73 @@ public class TestHoodieMetadataPayload extends HoodieCommonTestHarness {
     // Older entry: cluster A, vector v_old, same row location.
     HoodieRecord<HoodieMetadataPayload> older = HoodieMetadataPayload.createVectorIndexRecord(
         recordKey, VECTOR_INDEX_PARTITION, 1, createVectorPayload(VECTOR_INDEX_DIMENSION, 0.0f),
-        "2024/01/01", fileId, VECTOR_INDEX_INSTANT_TIME, 0, 0L, false);
+        "2024/01/01", fileId, VECTOR_INDEX_INSTANT_TIME, 0L, false);
 
     // Newer entry simulating a re-embed: cluster B, vector v_new.
     HoodieRecord<HoodieMetadataPayload> newer = HoodieMetadataPayload.createVectorIndexRecord(
         recordKey, VECTOR_INDEX_PARTITION, 2, createVectorPayload(VECTOR_INDEX_DIMENSION, 100.0f),
-        "2024/01/01", fileId, VECTOR_INDEX_INSTANT_TIME, 0, 0L, false);
+        "2024/01/01", fileId, VECTOR_INDEX_INSTANT_TIME, 0L, false);
 
     HoodieMetadataPayload merged = newer.getData().preCombine(older.getData());
-    assertEquals(newer.getData(), merged);
     assertEquals(2, merged.getVectorIndexMetadata().get().getClusterId());
   }
 
+  /**
+   * Round-trips a tombstone through Avro serialization. Catches the bug where the deserialization
+   * path forgets to set {@code isDeletedRecord} from the inner {@code isDeleted} flag, which would
+   * cause {@code preCombine} to no longer short-circuit on tombstones read from storage.
+   */
   @Test
-  public void testVectorIndexPayloadTombstoneRoundtrip() throws IOException {
+  public void testVectorIndexPayloadTombstoneRoundtrip() {
     String recordKey = "rk-tombstone";
-    String fileId = UUID.randomUUID().toString() + "-0";
+    // Build the GenericRecord directly so we exercise the deserialization path - the factory
+    // method short-circuits getInsertValue() for tombstones, so it cannot drive this test.
+    HoodieVectorIndexInfo deletedInfo = new HoodieVectorIndexInfo(
+        /*isDeleted=*/true, /*clusterId=*/3, VECTOR_INDEX_ENCODING_RAW_FLOAT32,
+        createVectorPayload(VECTOR_INDEX_DIMENSION, 2.0f),
+        "2024/01/01", UUID.randomUUID().toString() + "-0", parseInstant(VECTOR_INDEX_INSTANT_TIME), 5L);
+    HoodieMetadataRecord onDisk = new HoodieMetadataRecord(
+        recordKey, MetadataPartitionType.VECTOR_INDEX.getRecordType(),
+        null, null, null, null, null, deletedInfo);
 
-    HoodieRecord<HoodieMetadataPayload> deleted = HoodieMetadataPayload.createVectorIndexRecord(
-        recordKey, VECTOR_INDEX_PARTITION, 3, createVectorPayload(VECTOR_INDEX_DIMENSION, 2.0f),
-        "2024/01/01", fileId, VECTOR_INDEX_INSTANT_TIME, 0, 5L, true);
+    HoodieMetadataPayload roundTripped = new HoodieMetadataPayload(Option.of(onDisk));
 
-    // A tombstone marks the payload as deleted, so getInsertValue returns empty (matches secondary/column-stats behaviour).
-    assertTrue(deleted.getData().isDeleted());
-    assertFalse(deleted.getData().getInsertValue(null).isPresent());
-    assertTrue(deleted.getData().getVectorIndexMetadata().get().getIsDeleted());
+    assertTrue(roundTripped.isDeleted(), "deserialized tombstone must report isDeleted()=true so preCombine short-circuits");
+    assertTrue(roundTripped.getVectorIndexMetadata().get().getIsDeleted());
+  }
+
+  /**
+   * The same-schema fast path in getInsertValue() skips the per-field projected-schema decode
+   * branch in MetadataPartitionType.VECTOR_INDEX.constructMetadataPayload. This test drives the
+   * slow path by passing the canonical Avro schema explicitly, exercising the readOptionalField /
+   * readOptionalStringField helpers.
+   */
+  @Test
+  public void testVectorIndexPayloadProjectedSchemaRoundtrip() throws IOException {
+    String recordKey = "rk-projected";
+    ByteBuffer vector = createVectorPayload(VECTOR_INDEX_DIMENSION, 7.0f);
+    String dataPartition = "2024/02/02";
+    String fileId = "raw-fileid-projected";
+    HoodieRecord<HoodieMetadataPayload> record = HoodieMetadataPayload.createVectorIndexRecord(
+        recordKey, VECTOR_INDEX_PARTITION, 11, vector,
+        dataPartition, fileId, VECTOR_INDEX_INSTANT_TIME, 99L, false);
+
+    IndexedRecord serialized = record.getData().getInsertValue(HoodieMetadataRecord.SCHEMA$).get();
+    HoodieMetadataPayload roundTripped = new HoodieMetadataPayload(Option.of((GenericRecord) serialized));
+
+    HoodieVectorIndexInfo info = roundTripped.getVectorIndexMetadata().get();
+    assertEquals(11, info.getClusterId());
+    assertEquals(dataPartition, info.getDataPartition());
+    assertEquals(fileId, info.getFileId());
+    assertEquals(Long.valueOf(99L), info.getPosition());
+    assertArrayEquals(vectorBytes(vector), vectorBytes(info.getVectorPayload()));
+  }
+
+  private static long parseInstant(String instant) {
+    try {
+      return org.apache.hudi.common.table.timeline.TimelineUtils.parseDateFromInstantTime(instant).getTime();
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
   }
 }

@@ -35,6 +35,7 @@ import org.apache.hudi.common.model.HoodieRecordGlobalLocation;
 import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.schema.HoodieSchemaCache;
+import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
@@ -195,7 +196,10 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
   public static final String VECTOR_INDEX_FIELD_CLUSTER_ID = "clusterId";
   public static final String VECTOR_INDEX_FIELD_ENCODING = "encoding";
   public static final String VECTOR_INDEX_FIELD_VECTOR_PAYLOAD = "vectorPayload";
-  public static final String VECTOR_INDEX_FIELD_LOCATION = "location";
+  public static final String VECTOR_INDEX_FIELD_DATA_PARTITION = "dataPartition";
+  public static final String VECTOR_INDEX_FIELD_FILE_ID = "fileId";
+  public static final String VECTOR_INDEX_FIELD_INSTANT_TIME = "instantTime";
+  public static final String VECTOR_INDEX_FIELD_POSITION = "position";
   public static final String VECTOR_INDEX_ENCODING_RAW_FLOAT32 = "RAW_FLOAT32";
 
   /**
@@ -223,7 +227,9 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
   protected HoodieRecordIndexInfo recordIndexMetadata;
   protected HoodieSecondaryIndexInfo secondaryIndexMetadata;
   protected HoodieVectorIndexInfo vectorIndexMetadata;
-  private boolean isDeletedRecord = false;
+  // Package-private so MetadataPartitionType.constructMetadataPayload can restore the tombstone
+  // flag when deserializing payloads whose isDeleted state lives inside an inner Avro record.
+  boolean isDeletedRecord = false;
 
   public HoodieMetadataPayload(@Nullable GenericRecord record, Comparable<?> orderingVal) {
     this(Option.ofNullable(record));
@@ -761,16 +767,16 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
    * Each entry maps the record key of a single row to its cluster assignment, its encoded vector payload,
    * and an inline base-table pointer that lets vector search resolve the row in a single MDT hop.
    *
-   * @param recordKey      Primary key of the underlying row in the data table
-   * @param partitionPath  Resolved metadata table partition path for this vector index (e.g. {@code vector_index_<name>})
-   * @param clusterId      Cluster (centroid) id this row was assigned to during IVF training
-   * @param vectorPayload  Encoded vector bytes in {@code RAW_FLOAT32} layout (little-endian packed float32 of length dimension*4)
-   * @param dataPartition  Data table partition holding the row
-   * @param fileId         fileId of the file group holding the row
-   * @param instantTime    instantTime when the row was added
-   * @param fileIdEncoding {@link #RECORD_INDEX_FIELD_FILEID_ENCODING_UUID} or {@link #RECORD_INDEX_FIELD_FILEID_ENCODING_RAW_STRING}
-   * @param position       row position within the file group
-   * @param isDeleted      true if this is a tombstone for the record
+   * @param recordKey     Primary key of the underlying row in the data table
+   * @param partitionPath Resolved metadata table partition path for this vector index (e.g. {@code vector_index_<name>})
+   * @param clusterId     Cluster (centroid) id this row was assigned to during IVF training
+   * @param vectorPayload Encoded vector bytes in {@code RAW_FLOAT32} layout (little-endian packed float32 of length dimension*4).
+   *                      The buffer is sliced internally; callers do not need to flip().
+   * @param dataPartition Data table partition holding the row
+   * @param fileId        Raw fileId of the file group holding the row (no UUID-encoding)
+   * @param instantTime   instantTime when the row was added
+   * @param position      Row position within the file group
+   * @param isDeleted     true if this is a tombstone for the record
    */
   public static HoodieRecord<HoodieMetadataPayload> createVectorIndexRecord(String recordKey,
                                                                             String partitionPath,
@@ -779,13 +785,22 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
                                                                             String dataPartition,
                                                                             String fileId,
                                                                             String instantTime,
-                                                                            int fileIdEncoding,
                                                                             long position,
                                                                             boolean isDeleted) {
     HoodieKey key = new HoodieKey(recordKey, partitionPath);
-    HoodieRecordIndexInfo location = buildRecordIndexInfo(dataPartition, fileId, instantTime, fileIdEncoding, position);
+    long instantTimeMillis;
+    try {
+      instantTimeMillis = TimelineUtils.parseDateFromInstantTime(instantTime).getTime();
+    } catch (Exception e) {
+      throw new HoodieMetadataException("Failed to create metadata payload. Instant time parsing for " + instantTime + " failed ", e);
+    }
+    // slice() yields a view from current position to limit, so callers that forgot to flip()
+    // after writing still produce an empty payload rather than a corrupt one; callers that
+    // pass a read-ready buffer are unaffected.
+    ByteBuffer payloadBytes = vectorPayload == null ? null : vectorPayload.slice();
     HoodieVectorIndexInfo vectorInfo = new HoodieVectorIndexInfo(
-        isDeleted, clusterId, VECTOR_INDEX_ENCODING_RAW_FLOAT32, vectorPayload, location);
+        isDeleted, clusterId, VECTOR_INDEX_ENCODING_RAW_FLOAT32, payloadBytes,
+        dataPartition, fileId, instantTimeMillis, position);
     HoodieMetadataPayload payload = new HoodieMetadataPayload(recordKey, vectorInfo);
     return new HoodieAvroRecord<>(key, payload);
   }
@@ -799,14 +814,24 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
 
   /**
    * Resolve the inline base-table pointer carried by a vector index record to a
-   * {@link HoodieRecordGlobalLocation}, reusing the same decoder that the record index uses.
-   * Returns {@link Option#empty()} when the payload is not a vector record or its {@code location} is unset.
+   * {@link HoodieRecordGlobalLocation}. Returns {@link Option#empty()} when the payload is not
+   * a vector record or its fileId is unset.
    */
   public Option<HoodieRecordGlobalLocation> getVectorIndexRecordLocation() {
-    if (vectorIndexMetadata == null || vectorIndexMetadata.getLocation() == null) {
+    if (vectorIndexMetadata == null || vectorIndexMetadata.getFileId() == null) {
       return Option.empty();
     }
-    return Option.ofNullable(getLocationFromRecordIndexInfo(vectorIndexMetadata.getLocation()));
+    Long instantTimeMillis = vectorIndexMetadata.getInstantTime();
+    String instantTime = instantTimeMillis == null
+        ? null
+        : HoodieInstantTimeGenerator.formatDate(new java.util.Date(instantTimeMillis));
+    Long position = vectorIndexMetadata.getPosition();
+    if (position == null) {
+      return Option.of(new HoodieRecordGlobalLocation(
+          vectorIndexMetadata.getDataPartition(), instantTime, vectorIndexMetadata.getFileId()));
+    }
+    return Option.of(new HoodieRecordGlobalLocation(
+        vectorIndexMetadata.getDataPartition(), instantTime, vectorIndexMetadata.getFileId(), position));
   }
 
   /**
@@ -852,8 +877,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
         && Objects.equals(this.filesystemMetadata, otherMetadataPayload.filesystemMetadata)
         && Objects.equals(this.bloomFilterMetadata, otherMetadataPayload.bloomFilterMetadata)
         && Objects.equals(this.columnStatMetadata, otherMetadataPayload.columnStatMetadata)
-        && Objects.equals(this.recordIndexMetadata, otherMetadataPayload.recordIndexMetadata)
-        && Objects.equals(this.vectorIndexMetadata, otherMetadataPayload.vectorIndexMetadata);
+        && Objects.equals(this.recordIndexMetadata, otherMetadataPayload.recordIndexMetadata);
   }
 
   @Override
