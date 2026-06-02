@@ -23,6 +23,7 @@ import org.apache.hudi.avro.model.HoodieMetadataColumnStats;
 import org.apache.hudi.avro.model.HoodieMetadataFileInfo;
 import org.apache.hudi.avro.model.HoodieRecordIndexInfo;
 import org.apache.hudi.avro.model.HoodieSecondaryIndexInfo;
+import org.apache.hudi.avro.model.HoodieVectorIndexInfo;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.function.SerializableBiFunction;
 import org.apache.hudi.common.model.HoodieFileFormat;
@@ -77,8 +78,18 @@ import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_BLO
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_COLUMN_STATS;
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_RECORD_INDEX;
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_SECONDARY_INDEX;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_ID_VECTOR_INDEX;
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SCHEMA_FIELD_NAME_METADATA;
 import static org.apache.hudi.metadata.HoodieMetadataPayload.SECONDARY_INDEX_FIELD_IS_DELETED;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_CLUSTER_ID;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_ENCODING;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_IS_DELETED;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_DATA_PARTITION;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_FILE_ID;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_INSTANT_TIME;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_POSITION;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_FIELD_VECTOR_PAYLOAD;
+import static org.apache.hudi.metadata.HoodieMetadataPayload.VECTOR_INDEX_ENCODING_RAW_FLOAT32;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_EXPRESSION_INDEX;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_EXPRESSION_INDEX_PREFIX;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.PARTITION_NAME_SECONDARY_INDEX;
@@ -264,6 +275,35 @@ public enum MetadataPartitionType {
           .map(HoodieIndexDefinition::getIndexName)
           .orElseThrow(() -> new IllegalArgumentException("Index definition is not present for index: " + indexName));
     }
+
+    @Override
+    public void constructMetadataPayload(HoodieMetadataPayload payload, GenericRecord record) {
+      GenericRecord vectorIndexRecord = getNestedFieldValue(record, SCHEMA_FIELD_ID_VECTOR_INDEX);
+      checkState(vectorIndexRecord != null, "Valid VectorIndexMetadata record expected for type: " + MetadataPartitionType.VECTOR_INDEX.getRecordType());
+      boolean isDeleted = (Boolean) vectorIndexRecord.get(VECTOR_INDEX_FIELD_IS_DELETED);
+      int clusterId = (Integer) vectorIndexRecord.get(VECTOR_INDEX_FIELD_CLUSTER_ID);
+      // `isDeleted` and `clusterId` have no Avro defaults so the writer must have set them.
+      // The remaining fields are nullable / defaulted - guard each read so a projected schema
+      // that drops a field does not NPE the reader.
+      String encoding = VECTOR_INDEX_ENCODING_RAW_FLOAT32;
+      if (vectorIndexRecord.getSchema().getField(VECTOR_INDEX_FIELD_ENCODING) != null) {
+        Object encodingValue = vectorIndexRecord.get(VECTOR_INDEX_FIELD_ENCODING);
+        if (encodingValue != null) {
+          encoding = encodingValue.toString();
+        }
+      }
+      ByteBuffer vectorPayload = readOptionalField(vectorIndexRecord, VECTOR_INDEX_FIELD_VECTOR_PAYLOAD);
+      String dataPartition = readOptionalStringField(vectorIndexRecord, VECTOR_INDEX_FIELD_DATA_PARTITION);
+      String fileId = readOptionalStringField(vectorIndexRecord, VECTOR_INDEX_FIELD_FILE_ID);
+      Long instantTime = readOptionalField(vectorIndexRecord, VECTOR_INDEX_FIELD_INSTANT_TIME);
+      Long position = readOptionalField(vectorIndexRecord, VECTOR_INDEX_FIELD_POSITION);
+      payload.vectorIndexMetadata = new HoodieVectorIndexInfo(
+          isDeleted, clusterId, encoding, vectorPayload, dataPartition, fileId, instantTime, position);
+      // Restore the top-level tombstone flag so preCombine short-circuits correctly when a
+      // deleted record is read back from storage - mirrors the invariant the in-memory factory
+      // establishes via the (key, HoodieVectorIndexInfo) constructor.
+      payload.isDeletedRecord = isDeleted;
+    }
   },
   PARTITION_STATS(HoodieTableMetadataUtil.PARTITION_NAME_PARTITION_STATS, "partition-stats-", 6) {
     @Override
@@ -316,6 +356,27 @@ public enum MetadataPartitionType {
     }
 
     return unsafeCast(record.get(fieldName));
+  }
+
+  /**
+   * Returns the value of an Avro field that may be absent in the projected schema or set to null.
+   * Used by index constructMetadataPayload methods so a writer / projection that drops a field
+   * does not NPE the reader.
+   */
+  private static <T> T readOptionalField(GenericRecord record, String fieldName) {
+    if (record.getSchema().getField(fieldName) == null) {
+      return null;
+    }
+    return unsafeCast(record.get(fieldName));
+  }
+
+  /**
+   * Like {@link #readOptionalField} but coerces {@code Utf8} / other CharSequence types to {@code String}
+   * so callers do not need to remember the Avro string-class detail at every call site.
+   */
+  private static String readOptionalStringField(GenericRecord record, String fieldName) {
+    Object value = readOptionalField(record, fieldName);
+    return value == null ? null : value.toString();
   }
 
   private static void constructFilesMetadataPayload(HoodieMetadataPayload payload, GenericRecord record) {

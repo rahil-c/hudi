@@ -25,6 +25,7 @@ import org.apache.hudi.avro.model.HoodieMetadataFileInfo;
 import org.apache.hudi.avro.model.HoodieMetadataRecord;
 import org.apache.hudi.avro.model.HoodieRecordIndexInfo;
 import org.apache.hudi.avro.model.HoodieSecondaryIndexInfo;
+import org.apache.hudi.avro.model.HoodieVectorIndexInfo;
 import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.EmptyHoodieRecordPayload;
 import org.apache.hudi.common.model.HoodieAvroRecord;
@@ -34,6 +35,7 @@ import org.apache.hudi.common.model.HoodieRecordGlobalLocation;
 import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.schema.HoodieSchemaCache;
+import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
@@ -120,6 +122,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
   private static final int COLUMN_STATS_METADATA_FIELD_OFFSET = BLOOM_FILTER_METADATA_FIELD_OFFSET + 1;
   private static final int RECORD_INDEX_METADATA_FIELD_OFFSET = COLUMN_STATS_METADATA_FIELD_OFFSET + 1;
   private static final int SECONDARY_INDEX_METADATA_FIELD_OFFSET = RECORD_INDEX_METADATA_FIELD_OFFSET + 1;
+  private static final int VECTOR_INDEX_METADATA_FIELD_OFFSET = SECONDARY_INDEX_METADATA_FIELD_OFFSET + 1;
 
   /**
    * HoodieMetadata schema field ids
@@ -131,6 +134,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
   public static final String SCHEMA_FIELD_ID_BLOOM_FILTER = "BloomFilterMetadata";
   public static final String SCHEMA_FIELD_ID_RECORD_INDEX = "recordIndexMetadata";
   public static final String SCHEMA_FIELD_ID_SECONDARY_INDEX = "SecondaryIndexMetadata";
+  public static final String SCHEMA_FIELD_ID_VECTOR_INDEX = "VectorIndexMetadata";
 
   /**
    * HoodieMetadata bloom filter payload field ids
@@ -186,6 +190,19 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
   public static final String SECONDARY_INDEX_FIELD_IS_DELETED = FIELD_IS_DELETED;
 
   /**
+   * HoodieMetadata vector index payload field ids
+   */
+  public static final String VECTOR_INDEX_FIELD_IS_DELETED = FIELD_IS_DELETED;
+  public static final String VECTOR_INDEX_FIELD_CLUSTER_ID = "clusterId";
+  public static final String VECTOR_INDEX_FIELD_ENCODING = "encoding";
+  public static final String VECTOR_INDEX_FIELD_VECTOR_PAYLOAD = "vectorPayload";
+  public static final String VECTOR_INDEX_FIELD_DATA_PARTITION = "dataPartition";
+  public static final String VECTOR_INDEX_FIELD_FILE_ID = "fileId";
+  public static final String VECTOR_INDEX_FIELD_INSTANT_TIME = "instantTime";
+  public static final String VECTOR_INDEX_FIELD_POSITION = "position";
+  public static final String VECTOR_INDEX_ENCODING_RAW_FLOAT32 = "RAW_FLOAT32";
+
+  /**
    * NOTE: PLEASE READ CAREFULLY
    * <p>
    * In Avro 1.10 generated builders rely on {@code SpecificData.getForSchema} invocation that in turn
@@ -209,7 +226,10 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
   protected HoodieMetadataColumnStats columnStatMetadata = null;
   protected HoodieRecordIndexInfo recordIndexMetadata;
   protected HoodieSecondaryIndexInfo secondaryIndexMetadata;
-  private boolean isDeletedRecord = false;
+  protected HoodieVectorIndexInfo vectorIndexMetadata;
+  // Package-private so MetadataPartitionType.constructMetadataPayload can restore the tombstone
+  // flag when deserializing payloads whose isDeleted state lives inside an inner Avro record.
+  boolean isDeletedRecord = false;
 
   public HoodieMetadataPayload(@Nullable GenericRecord record, Comparable<?> orderingVal) {
     this(Option.ofNullable(record));
@@ -233,23 +253,27 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
   }
 
   protected HoodieMetadataPayload(String key, int type, Map<String, HoodieMetadataFileInfo> filesystemMetadata) {
-    this(key, type, filesystemMetadata, null, null, null, null, false);
+    this(key, type, filesystemMetadata, null, null, null, null, null, false);
   }
 
   protected HoodieMetadataPayload(String key, HoodieMetadataBloomFilter metadataBloomFilter) {
-    this(key, MetadataPartitionType.BLOOM_FILTERS.getRecordType(), null, metadataBloomFilter, null, null, null, metadataBloomFilter.getIsDeleted());
+    this(key, MetadataPartitionType.BLOOM_FILTERS.getRecordType(), null, metadataBloomFilter, null, null, null, null, metadataBloomFilter.getIsDeleted());
   }
 
   protected HoodieMetadataPayload(String key, HoodieMetadataColumnStats columnStats, int recordType) {
-    this(key, recordType, null, null, columnStats, null, null, columnStats.getIsDeleted());
+    this(key, recordType, null, null, columnStats, null, null, null, columnStats.getIsDeleted());
   }
 
   private HoodieMetadataPayload(String key, HoodieRecordIndexInfo recordIndexMetadata) {
-    this(key, MetadataPartitionType.RECORD_INDEX.getRecordType(), null, null, null, recordIndexMetadata, null, false);
+    this(key, MetadataPartitionType.RECORD_INDEX.getRecordType(), null, null, null, recordIndexMetadata, null, null, false);
   }
 
   protected HoodieMetadataPayload(String key, HoodieSecondaryIndexInfo secondaryIndexMetadata) {
-    this(key, MetadataPartitionType.SECONDARY_INDEX.getRecordType(), null, null, null, null, secondaryIndexMetadata, secondaryIndexMetadata.getIsDeleted());
+    this(key, MetadataPartitionType.SECONDARY_INDEX.getRecordType(), null, null, null, null, secondaryIndexMetadata, null, secondaryIndexMetadata.getIsDeleted());
+  }
+
+  protected HoodieMetadataPayload(String key, HoodieVectorIndexInfo vectorIndexMetadata) {
+    this(key, MetadataPartitionType.VECTOR_INDEX.getRecordType(), null, null, null, null, null, vectorIndexMetadata, vectorIndexMetadata.getIsDeleted());
   }
 
   protected HoodieMetadataPayload(String key, int type,
@@ -258,6 +282,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
                                   HoodieMetadataColumnStats columnStats,
                                   HoodieRecordIndexInfo recordIndexMetadata,
                                   HoodieSecondaryIndexInfo secondaryIndexMetadata,
+                                  HoodieVectorIndexInfo vectorIndexMetadata,
                                   boolean isDeletedRecord) {
     this.key = key;
     this.type = type;
@@ -266,6 +291,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
     this.columnStatMetadata = columnStats;
     this.recordIndexMetadata = recordIndexMetadata;
     this.secondaryIndexMetadata = secondaryIndexMetadata;
+    this.vectorIndexMetadata = vectorIndexMetadata;
     this.isDeletedRecord = isDeletedRecord;
   }
 
@@ -428,7 +454,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
     if (schema == null || schema == HOODIE_METADATA_AVRO_SCHEMA) {
       // If the schema is same or none is provided, we can return the record directly
       HoodieMetadataRecord record = new HoodieMetadataRecord(key, type, filesystemMetadata, bloomFilterMetadata,
-          columnStatMetadata, recordIndexMetadata, secondaryIndexMetadata);
+          columnStatMetadata, recordIndexMetadata, secondaryIndexMetadata, vectorIndexMetadata);
       return Option.of(record);
     } else {
       // Otherwise, the assumption is that the schema required contains the metadata fields so we construct a new GenericRecord with these fields
@@ -449,6 +475,9 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
       }
       if (secondaryIndexMetadata != null) {
         record.put(SECONDARY_INDEX_METADATA_FIELD_OFFSET, secondaryIndexMetadata);
+      }
+      if (vectorIndexMetadata != null) {
+        record.put(VECTOR_INDEX_METADATA_FIELD_OFFSET, vectorIndexMetadata);
       }
       return Option.of(record);
     }
@@ -649,17 +678,33 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
    */
   public static HoodieRecord<HoodieMetadataPayload> createRecordIndexUpdate(String recordKey, String partition,
                                                                             String fileId, String instantTime, int fileIdEncoding) {
-
     HoodieKey key = new HoodieKey(recordKey, MetadataPartitionType.RECORD_INDEX.getPartitionPath());
-    long instantTimeMillis = -1;
+    HoodieRecordIndexInfo recordIndexInfo = buildRecordIndexInfo(partition, fileId, instantTime, fileIdEncoding, null);
+    HoodieMetadataPayload payload = new HoodieMetadataPayload(recordKey, recordIndexInfo);
+    return new HoodieAvroRecord<>(key, payload);
+  }
+
+  /**
+   * Build a {@link HoodieRecordIndexInfo} for a base-table row pointer. Shared by the record index
+   * factory and the vector index factory so that the UUID-vs-raw fileId encoding stays in one place.
+   *
+   * @param partition      data table partition holding the row
+   * @param fileId         fileId of the file group holding the row
+   * @param instantTime    instantTime when the record was added (parsed to epoch millis)
+   * @param fileIdEncoding {@link #RECORD_INDEX_FIELD_FILEID_ENCODING_UUID} or {@link #RECORD_INDEX_FIELD_FILEID_ENCODING_RAW_STRING}
+   * @param position       row position within the file group, or null if unknown
+   */
+  private static HoodieRecordIndexInfo buildRecordIndexInfo(String partition, String fileId, String instantTime,
+                                                            int fileIdEncoding, Long position) {
+    long instantTimeMillis;
     try {
       instantTimeMillis = TimelineUtils.parseDateFromInstantTime(instantTime).getTime();
     } catch (Exception e) {
-      throw new HoodieMetadataException("Failed to create metadata payload for record index. Instant time parsing for " + instantTime + " failed ", e);
+      throw new HoodieMetadataException("Failed to create metadata payload. Instant time parsing for " + instantTime + " failed ", e);
     }
-    if (fileIdEncoding == 0) {
-      // Data file names have a -D suffix to denote the index (D = integer) of the file written
-      // In older HUID versions the file index was missing
+    if (fileIdEncoding == RECORD_INDEX_FIELD_FILEID_ENCODING_UUID) {
+      // Data file names have a -D suffix to denote the index (D = integer) of the file written.
+      // In older HUDI versions the file index was missing.
       final UUID uuid;
       final int fileIndex;
       try {
@@ -675,31 +720,25 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
         throw new HoodieMetadataException(String.format("Invalid UUID or index: fileID=%s, partition=%s, instantTime=%s",
             fileId, partition, instantTime), e);
       }
-
-      HoodieMetadataPayload payload = new HoodieMetadataPayload(recordKey,
-          new HoodieRecordIndexInfo(
-              partition,
-              uuid.getMostSignificantBits(),
-              uuid.getLeastSignificantBits(),
-              fileIndex,
-              EMPTY_STRING,
-              instantTimeMillis,
-              0,
-              null));
-      return new HoodieAvroRecord<>(key, payload);
-    } else {
-      HoodieMetadataPayload payload = new HoodieMetadataPayload(recordKey,
-          new HoodieRecordIndexInfo(
-              partition,
-              -1L,
-              -1L,
-              -1,
-              fileId,
-              instantTimeMillis,
-              1,
-              null));
-      return new HoodieAvroRecord<>(key, payload);
+      return new HoodieRecordIndexInfo(
+          partition,
+          uuid.getMostSignificantBits(),
+          uuid.getLeastSignificantBits(),
+          fileIndex,
+          EMPTY_STRING,
+          instantTimeMillis,
+          RECORD_INDEX_FIELD_FILEID_ENCODING_UUID,
+          position);
     }
+    return new HoodieRecordIndexInfo(
+        partition,
+        -1L,
+        -1L,
+        -1,
+        fileId,
+        instantTimeMillis,
+        RECORD_INDEX_FIELD_FILEID_ENCODING_RAW_STRING,
+        position);
   }
 
   /**
@@ -720,6 +759,79 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
 
   public boolean isSecondaryIndexDeleted() {
     return secondaryIndexMetadata.getIsDeleted();
+  }
+
+  /**
+   * Create and return a {@code HoodieMetadataPayload} to insert or update an entry for the vector index.
+   * <p>
+   * Each entry maps the record key of a single row to its cluster assignment, its encoded vector payload,
+   * and an inline base-table pointer that lets vector search resolve the row in a single MDT hop.
+   *
+   * @param recordKey     Primary key of the underlying row in the data table
+   * @param partitionPath Resolved metadata table partition path for this vector index (e.g. {@code vector_index_<name>})
+   * @param clusterId     Cluster (centroid) id this row was assigned to during IVF training
+   * @param vectorPayload Encoded vector bytes in {@code RAW_FLOAT32} layout (little-endian packed float32 of length dimension*4).
+   *                      The buffer is sliced internally; callers do not need to flip().
+   * @param dataPartition Data table partition holding the row
+   * @param fileId        Raw fileId of the file group holding the row (no UUID-encoding)
+   * @param instantTime   instantTime when the row was added
+   * @param position      Row position within the file group
+   * @param isDeleted     true if this is a tombstone for the record
+   */
+  public static HoodieRecord<HoodieMetadataPayload> createVectorIndexRecord(String recordKey,
+                                                                            String partitionPath,
+                                                                            int clusterId,
+                                                                            ByteBuffer vectorPayload,
+                                                                            String dataPartition,
+                                                                            String fileId,
+                                                                            String instantTime,
+                                                                            long position,
+                                                                            boolean isDeleted) {
+    HoodieKey key = new HoodieKey(recordKey, partitionPath);
+    long instantTimeMillis;
+    try {
+      instantTimeMillis = TimelineUtils.parseDateFromInstantTime(instantTime).getTime();
+    } catch (Exception e) {
+      throw new HoodieMetadataException("Failed to create metadata payload. Instant time parsing for " + instantTime + " failed ", e);
+    }
+    // slice() yields a view from current position to limit, so callers that forgot to flip()
+    // after writing still produce an empty payload rather than a corrupt one; callers that
+    // pass a read-ready buffer are unaffected.
+    ByteBuffer payloadBytes = vectorPayload == null ? null : vectorPayload.slice();
+    HoodieVectorIndexInfo vectorInfo = new HoodieVectorIndexInfo(
+        isDeleted, clusterId, VECTOR_INDEX_ENCODING_RAW_FLOAT32, payloadBytes,
+        dataPartition, fileId, instantTimeMillis, position);
+    HoodieMetadataPayload payload = new HoodieMetadataPayload(recordKey, vectorInfo);
+    return new HoodieAvroRecord<>(key, payload);
+  }
+
+  /**
+   * Get the vector index metadata from this payload.
+   */
+  public Option<HoodieVectorIndexInfo> getVectorIndexMetadata() {
+    return Option.ofNullable(vectorIndexMetadata);
+  }
+
+  /**
+   * Resolve the inline base-table pointer carried by a vector index record to a
+   * {@link HoodieRecordGlobalLocation}. Returns {@link Option#empty()} when the payload is not
+   * a vector record or its fileId is unset.
+   */
+  public Option<HoodieRecordGlobalLocation> getVectorIndexRecordLocation() {
+    if (vectorIndexMetadata == null || vectorIndexMetadata.getFileId() == null) {
+      return Option.empty();
+    }
+    Long instantTimeMillis = vectorIndexMetadata.getInstantTime();
+    String instantTime = instantTimeMillis == null
+        ? null
+        : HoodieInstantTimeGenerator.formatDate(new java.util.Date(instantTimeMillis));
+    Long position = vectorIndexMetadata.getPosition();
+    if (position == null) {
+      return Option.of(new HoodieRecordGlobalLocation(
+          vectorIndexMetadata.getDataPartition(), instantTime, vectorIndexMetadata.getFileId()));
+    }
+    return Option.of(new HoodieRecordGlobalLocation(
+        vectorIndexMetadata.getDataPartition(), instantTime, vectorIndexMetadata.getFileId(), position));
   }
 
   /**

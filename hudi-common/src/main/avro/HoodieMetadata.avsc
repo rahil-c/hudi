@@ -554,6 +554,81 @@
                 }
             ],
             "default" : null
+        },
+        {
+            "name": "VectorIndexMetadata",
+            "doc": "Metadata Index entry for a single row's vector assignment, encoded vector payload, and inline base-table pointer. Used by the vector_index_<name> partitions of the metadata table.",
+            "type": [
+                "null",
+                {
+                    "type": "record",
+                    "name": "HoodieVectorIndexInfo",
+                    "fields": [
+                        {
+                            "name": "isDeleted",
+                            "type": "boolean",
+                            "doc": "True if this entry has been deleted. Combine semantics for the VECTOR_INDEX partition are latest-wins."
+                        },
+                        {
+                            "name": "clusterId",
+                            "type": "int",
+                            "doc": "Cluster (centroid) id this row was assigned to during IVF training."
+                        },
+                        {
+                            "name": "encoding",
+                            "type": "string",
+                            "default": "RAW_FLOAT32",
+                            "doc": "Discriminator for the vectorPayload byte layout. RAW_FLOAT32 = little-endian packed float32 of length dimension*4 (IVF-Flat). RABITQ_* values are reserved for the RaBitPQ fast-follow."
+                        },
+                        {
+                            "name": "vectorPayload",
+                            "type": [
+                                "null",
+                                "bytes"
+                            ],
+                            "default": null,
+                            "doc": "Encoded vector bytes whose layout is described by `encoding`. The dimension and elementType are fixed per vector_index_<name> partition and carried in the corresponding HoodieIndexDefinition options - they are not repeated per record."
+                        },
+                        {
+                            "name": "dataPartition",
+                            "type": [
+                                "null",
+                                "string"
+                            ],
+                            "default": null,
+                            "doc": "Data table partition holding the row this vector belongs to."
+                        },
+                        {
+                            "name": "fileId",
+                            "type": [
+                                "null",
+                                "string"
+                            ],
+                            "default": null,
+                            "doc": "Raw fileId of the file group holding the row. The vector index records the fileId as a string rather than UUID-encoded so the read path stays branch-free; per-record UUID compaction is negligible against the encoded vector payload."
+                        },
+                        {
+                            "name": "instantTime",
+                            "type": [
+                                "null",
+                                "long"
+                            ],
+                            "default": null,
+                            "doc": "Epoch milliseconds of the commit that added the row."
+                        },
+                        {
+                            "name": "position",
+                            "type": [
+                                "null",
+                                "long"
+                            ],
+                            "default": null,
+                            "doc": "Row position within the file group, used for direct base-file lookup."
+                        }
+                    ]
+                }
+            ],
+            "default" : null
         }
     ]
 }
