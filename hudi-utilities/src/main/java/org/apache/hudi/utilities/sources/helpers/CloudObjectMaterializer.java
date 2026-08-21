@@ -18,6 +18,9 @@
 
 package org.apache.hudi.utilities.sources.helpers;
 
+import org.apache.hudi.ApiMaturityLevel;
+import org.apache.hudi.PublicAPIClass;
+import org.apache.hudi.PublicAPIMethod;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.utilities.schema.SchemaProvider;
@@ -40,6 +43,7 @@ import java.util.List;
  * defers to a Spark datasource; a reader that parses documents selects by document extension,
  * sizes partitions by the bytes it will actually parse, and builds rows itself.
  */
+@PublicAPIClass(maturity = ApiMaturityLevel.EVOLVING)
 public interface CloudObjectMaterializer extends Serializable {
 
   /**
@@ -50,6 +54,7 @@ public interface CloudObjectMaterializer extends Serializable {
    * @param objectKey column holding the object key, which differs per cloud store
    * @param props     streamer configs
    */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   String objectKeyPredicate(String objectKey, TypedProperties props);
 
   /**
@@ -61,11 +66,13 @@ public interface CloudObjectMaterializer extends Serializable {
    * @param bytesPerPartition configured target bytes per partition
    * @param minPartitions    lower bound from the source profile, ignored when smaller
    */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   int partitionCount(List<CloudObjectMetadata> objects, long bytesPerPartition, int minPartitions);
 
   /**
    * Reads the selected objects into rows. Returns empty when there is nothing to read.
    */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   Option<Dataset<Row>> materialize(SparkSession spark,
                                    List<CloudObjectMetadata> objects,
                                    Option<SchemaProvider> schemaProvider,
