@@ -22,6 +22,7 @@ package org.apache.hudi.utilities.sources.helpers.unstructured;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.schema.HoodieSchema;
 import org.apache.hudi.common.util.ReflectionUtils;
+import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.utilities.sources.helpers.CloudObjectMetadata;
 
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -71,6 +72,11 @@ public class UnstructuredFileRecordBuilder implements Serializable {
   public UnstructuredFileRecordBuilder(TypedProperties props) {
     this.props = props;
     this.inlineMaxBytes = getLongWithAltKeys(props, BLOB_INLINE_MAX_BYTES);
+    // readFully narrows the size to int, so a threshold past Integer.MAX_VALUE would
+    // surface as a NegativeArraySizeException on the first oversized file instead
+    ValidationUtils.checkArgument(inlineMaxBytes >= 0 && inlineMaxBytes <= Integer.MAX_VALUE,
+        BLOB_INLINE_MAX_BYTES.key() + " must be between 0 and " + Integer.MAX_VALUE
+            + ", got " + inlineMaxBytes);
     this.parseEnabled = getBooleanWithAltKeys(props, PARSE_ENABLED);
     this.parseMaxBytes = getLongWithAltKeys(props, PARSE_MAX_BYTES);
     this.parseMaxTextChars = getIntWithAltKeys(props, PARSE_MAX_TEXT_CHARS);
@@ -79,20 +85,15 @@ public class UnstructuredFileRecordBuilder implements Serializable {
         getIntWithAltKeys(props, CHUNK_OVERLAP_CHARS));
   }
 
-  public Row buildRow(FileSystem fs, String pathStr) throws IOException {
-    Path path = new Path(pathStr);
-    FileStatus status = fs.getFileStatus(path);
-    return buildRow(fs, pathStr, status.getLen(), status.getModificationTime());
-  }
-
   /**
-   * Builds the row for an object whose size and modification time are already known, which cloud
-   * notifications carry. Avoids a metadata request per object; falls back to interrogating the
-   * object when the events had no usable timestamp.
+   * Builds the row for an object whose size and modification time are already known, which both
+   * cloud notifications and the directory listing carry. Avoids a metadata request per object,
+   * falling back to interrogating the object when no usable timestamp came with it.
    */
   public Row buildRow(FileSystem fs, CloudObjectMetadata object) throws IOException {
     if (object.getModificationTime() == CloudObjectMetadata.UNKNOWN_MODIFICATION_TIME) {
-      return buildRow(fs, object.getPath());
+      FileStatus status = fs.getFileStatus(new Path(object.getPath()));
+      return buildRow(fs, object.getPath(), status.getLen(), status.getModificationTime());
     }
     return buildRow(fs, object.getPath(), object.getSize(), object.getModificationTime());
   }
@@ -107,7 +108,13 @@ public class UnstructuredFileRecordBuilder implements Serializable {
       inlineBytes = readFully(fs, path, (int) size);
       blob = RowFactory.create(HoodieSchema.Blob.INLINE, inlineBytes, null);
     } else {
-      Row reference = RowFactory.create(pathStr, null, null, false);
+      // length records what was ingested, so a reference that no longer matches the file can be
+      // detected from metadata alone. A replaced file is normally re-ingested because its
+      // modification time moves, but a copy that preserves mtime would otherwise diverge silently,
+      // and a historical row's reference always resolves to the file's current bytes.
+      // Valid as an integrity signal only because the blob is the whole file; a future sub-range
+      // reference (offset + length) would need the check to account for that.
+      Row reference = RowFactory.create(pathStr, null, size, false);
       blob = RowFactory.create(HoodieSchema.Blob.OUT_OF_LINE, null, reference);
     }
 
