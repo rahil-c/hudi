@@ -19,6 +19,9 @@
 
 package org.apache.hudi.utilities.sources.helpers.unstructured;
 
+import org.apache.hudi.ApiMaturityLevel;
+import org.apache.hudi.PublicAPIClass;
+import org.apache.hudi.PublicAPIMethod;
 import org.apache.hudi.common.config.TypedProperties;
 
 import java.io.InputStream;
@@ -33,6 +36,7 @@ import java.io.Serializable;
  * An {@link Error} is a different matter and must be allowed to propagate, so the task
  * fails and Spark retries it rather than continuing on an undefined JVM state.
  */
+@PublicAPIClass(maturity = ApiMaturityLevel.EVOLVING)
 public interface DocumentParser extends Serializable {
 
   /**
@@ -40,6 +44,7 @@ public interface DocumentParser extends Serializable {
    * {@link #parse}. Implementations are deserialized per task, not per executor, so
    * anything expensive set up here is paid once per partition.
    */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   default void init(TypedProperties props) {
   }
 
@@ -50,5 +55,6 @@ public interface DocumentParser extends Serializable {
    * @param fileName     name of the file (used for format detection hints)
    * @param maxTextChars cap on extracted text length; hitting it yields a TRUNCATED result
    */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   ParseResult parse(InputStream in, String fileName, int maxTextChars);
 }
